@@ -117,10 +117,66 @@ pub fn diff_row_heights(app: &App, area: Rect) -> Vec<usize> {
     app.visible.iter().map(|r| row_height(r, gutter_w, width, app.wrap)).collect()
 }
 
-/// Rows the inline comment box occupies: one per input line plus the border.
+/// Rows the inline comment box occupies at the diff pane's `width`: the wrapped body height
+/// (so the box grows as text wraps, not only on explicit newlines) plus the two borders.
+/// Uses the same wrapped lines as [`render_composer`], so the reserved height matches.
 #[must_use]
-pub fn composer_height(app: &App) -> usize {
-    app.input.split('\n').count() + 2
+pub fn composer_height(app: &App, width: usize) -> usize {
+    composer_lines(app, composer_content_width(width)).len() + 2
+}
+
+/// The text width inside the comment box: the diff pane width minus its two borders.
+fn composer_content_width(width: usize) -> usize {
+    width.saturating_sub(2).max(1)
+}
+
+/// The diff pane's inner content width for the full terminal `area`, so the event loop can
+/// reserve the comment box without a `Frame` (mirrors [`diff_viewport_height`]).
+#[must_use]
+pub fn diff_inner_width(area: Rect) -> usize {
+    let rows = vrows(area);
+    let (diff_area, _) = body_split(&rows);
+    inner_rect(diff_area).width as usize
+}
+
+/// The comment box's display lines at `content_w`: each input line word-wrapped (via the
+/// diff's [`wrap_segments`], so the box wraps exactly as it renders), the last carrying the
+/// cursor block.
+fn composer_lines(app: &App, content_w: usize) -> Vec<Line<'static>> {
+    let mut texts: Vec<String> = Vec::new();
+    for logical in app.input.split('\n') {
+        texts.extend(wrap_text(logical, content_w));
+    }
+    let last = texts.len() - 1; // always ≥ 1: an empty input yields one empty line
+    texts
+        .into_iter()
+        .enumerate()
+        .map(|(i, t)| {
+            if i == last {
+                Line::from(vec![Span::raw(t), Span::styled("█", Style::default().fg(cat::PEACH))])
+            } else {
+                Line::from(t)
+            }
+        })
+        .collect()
+}
+
+/// Word-wrap a plain string to `width` columns, reusing the diff's [`wrap_segments`] so the
+/// break rule (last space, hard-break an over-wide word, width-aware) is identical.
+fn wrap_text(s: &str, width: usize) -> Vec<String> {
+    let cells: Vec<Cell> = s
+        .chars()
+        .map(|ch| Cell {
+            ch,
+            w: UnicodeWidthChar::width(ch).unwrap_or(0),
+            fg: cat::TEXT,
+            emph: false,
+        })
+        .collect();
+    wrap_segments(&cells, width)
+        .into_iter()
+        .map(|(a, b)| cells[a..b].iter().map(|c| c.ch).collect())
+        .collect()
 }
 
 /// A clickable region in the header.
@@ -211,7 +267,11 @@ fn render_file_list(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
-    let title = app.diff_path.clone().unwrap_or_else(|| "Diff".to_string());
+    let title = match (&app.diff_path, &app.diff.previous_path) {
+        (Some(new), Some(old)) => format!("{old} → {new}"),
+        (Some(new), None) => new.clone(),
+        (None, _) => "Diff".to_string(),
+    };
     let block = bordered(&title, app.focus == Focus::Diff);
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -267,7 +327,7 @@ fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
 
     // Composing: splice the input box under the last selected line, in display rows.
     // Cap the box at height-1 so a comment taller than the viewport can't hide its anchor.
-    let box_h = composer_height(app).min(height.saturating_sub(1)).max(1);
+    let box_h = composer_height(app, width).min(height.saturating_sub(1)).max(1);
     let diff_budget = height - box_h;
     let anchor = hi.clamp(app.diff_scroll, rows.saturating_sub(1));
     let above = display(app.diff_scroll..anchor + 1);
@@ -589,23 +649,9 @@ fn render_composer(frame: &mut Frame, app: &App, area: Rect) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(cat::PEACH))
         .title(title);
-    let input_lines: Vec<&str> = app.input.split('\n').collect();
-    let last = input_lines.len() - 1;
-    let lines: Vec<Line> = input_lines
-        .iter()
-        .enumerate()
-        .map(|(i, text)| {
-            if i == last {
-                Line::from(vec![
-                    Span::raw((*text).to_string()),
-                    Span::styled("█", Style::default().fg(cat::PEACH)),
-                ])
-            } else {
-                Line::from((*text).to_string())
-            }
-        })
-        .collect();
-    frame.render_widget(Paragraph::new(lines).block(block).wrap(Wrap { trim: false }), area);
+    let content_w = composer_content_width(area.width as usize);
+    let body = Paragraph::new(composer_lines(app, content_w)).block(block);
+    frame.render_widget(body, area);
 }
 
 fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {

@@ -123,6 +123,8 @@ pub enum FileState {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct FileDiff {
     pub path: String,
+    /// The old path when this file was renamed, for the `old → new` header; `None` otherwise.
+    pub previous_path: Option<String>,
     pub language: Option<String>,
     pub state: FileState,
     pub rows: Vec<Row>,
@@ -136,14 +138,28 @@ const MAX_BYTES: usize = 2_000_000;
 impl FileDiff {
     /// An empty placeholder, for when no file is selected.
     pub fn empty() -> Self {
-        Self { path: String::new(), language: None, state: FileState::Normal, rows: Vec::new() }
+        Self {
+            path: String::new(),
+            previous_path: None,
+            language: None,
+            state: FileState::Normal,
+            rows: Vec::new(),
+        }
     }
 
-    /// Build the model from `old` and `new` content, highlighting with `hl`.
-    pub fn build(path: String, old: &str, new: &str, hl: &Highlighter) -> Self {
+    /// Build the model from `old` and `new` content, highlighting with `hl`. `previous_path`
+    /// is the rename source, surfaced in the header; `None` for every other change.
+    pub fn build(
+        path: String,
+        previous_path: Option<String>,
+        old: &str,
+        new: &str,
+        hl: &Highlighter,
+    ) -> Self {
         let language = language_of(&path);
         let notice = |state| Self {
             path: path.clone(),
+            previous_path: previous_path.clone(),
             language: language.clone(),
             state,
             rows: Vec::new(),
@@ -192,7 +208,13 @@ impl FileDiff {
             }
         }
         compute_emphasis(&mut rows);
-        Self { path, language, state: FileState::Normal, rows: collapse_context(&rows) }
+        Self {
+            path,
+            previous_path,
+            language,
+            state: FileState::Normal,
+            rows: collapse_context(&rows),
+        }
     }
 }
 
@@ -404,15 +426,23 @@ impl DiffCache {
     }
 
     /// Return the cached diff when `old`/`new` are unchanged for `path`, else build,
-    /// cache, and return it.
-    pub fn get(&mut self, path: String, old: &str, new: &str, hl: &Highlighter) -> FileDiff {
+    /// cache, and return it. `previous_path` (the rename source) is metadata for the build,
+    /// not part of the cache key — it is stable for a given path within a scope.
+    pub fn get(
+        &mut self,
+        path: String,
+        previous_path: Option<String>,
+        old: &str,
+        new: &str,
+        hl: &Highlighter,
+    ) -> FileDiff {
         let key = content_hash(old, new);
         if let Some((cached, diff)) = self.entries.get(&path)
             && *cached == key
         {
             return diff.clone();
         }
-        let diff = FileDiff::build(path.clone(), old, new, hl);
+        let diff = FileDiff::build(path.clone(), previous_path, old, new, hl);
         if self.entries.len() >= CACHE_CAP {
             self.entries.clear();
         }
@@ -435,7 +465,7 @@ mod tests {
 
     fn build(old: &str, new: &str) -> FileDiff {
         let hl = Highlighter::new(None);
-        FileDiff::build("a.rs".into(), old, new, &hl)
+        FileDiff::build("a.rs".into(), None, old, new, &hl)
     }
 
     #[test]
@@ -604,8 +634,8 @@ mod tests {
     fn cache_reuses_an_unchanged_build() {
         let hl = Highlighter::new(None);
         let mut cache = DiffCache::new();
-        let d1 = cache.get("a.rs".into(), "x\n", "y\n", &hl);
-        let d2 = cache.get("a.rs".into(), "x\n", "y\n", &hl);
+        let d1 = cache.get("a.rs".into(), None, "x\n", "y\n", &hl);
+        let d2 = cache.get("a.rs".into(), None, "x\n", "y\n", &hl);
         assert_eq!(d1, d2);
     }
 }

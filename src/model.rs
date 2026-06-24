@@ -56,6 +56,9 @@ pub struct ChangedFile {
     pub kind: ChangeKind,
     pub additions: u32,
     pub deletions: u32,
+    /// The old path of a renamed file; `None` for every other kind. Its old content lives
+    /// at this path, so a rename diffs real content instead of reading as all-insertion.
+    pub previous_path: Option<String>,
 }
 
 /// Which side of the diff a comment's lines live on.

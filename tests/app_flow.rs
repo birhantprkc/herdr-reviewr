@@ -303,7 +303,7 @@ fn the_composer_reserve_keeps_the_anchored_line_visible() {
     // Mirror the event loop: reserve the box's rows, then clamp. The anchored line must
     // stay within the narrowed viewport so it renders above the box.
     let viewport = 12;
-    let effective = viewport - herdr_review::ui::composer_height(&app);
+    let effective = viewport - herdr_review::ui::composer_height(&app, 80);
     clamp(&mut app, effective);
     assert!(
         (app.diff_scroll..app.diff_scroll + effective).contains(&app.diff_cursor),
@@ -338,6 +338,39 @@ fn a_comment_can_be_written_across_multiple_lines() {
     let sent = target.last();
     assert!(sent.contains("first line\nsecond line"), "export preserves the break: {sent:?}");
     assert!(!sent.contains("\n\n\n"), "no blank-line run that could split a block");
+}
+
+#[test]
+fn ctrl_w_deletes_the_previous_word_in_a_comment() {
+    let r = edited_repo();
+    let mut app = app_on(&r);
+    app.focus = Focus::Diff;
+    app.diff_cursor = row_with(&app, '+');
+    app.start_comment();
+    for ch in "needs a closer look".chars() {
+        app.input_push(ch);
+    }
+    app.input_delete_word(); // drops "look"
+    assert_eq!(app.input, "needs a closer ");
+    app.input_delete_word(); // drops the space then "closer"
+    assert_eq!(app.input, "needs a ");
+}
+
+#[test]
+fn the_comment_box_grows_as_a_long_line_wraps() {
+    let r = edited_repo();
+    let mut app = app_on(&r);
+    app.focus = Focus::Diff;
+    app.diff_cursor = row_with(&app, '+');
+    app.start_comment();
+    // A single long line with no explicit newline must still report more than one row.
+    let width = 30; // narrow diff pane
+    let one_word = herdr_review::ui::composer_height(&app, width);
+    for ch in "the quick brown fox jumps over the lazy dog again and again".chars() {
+        app.input_push(ch);
+    }
+    let wrapped = herdr_review::ui::composer_height(&app, width);
+    assert!(wrapped > one_word, "box grew from {one_word} to {wrapped} rows as text wrapped");
 }
 
 #[test]

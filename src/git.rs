@@ -137,12 +137,12 @@ pub fn changed_files(repo: &Path, scope: Scope, base: Option<&str>) -> Result<Ve
     let counts = parse_numstat(&numstat);
     let mut seen = HashSet::new();
     let mut files = Vec::new();
-    for (kind, path) in parse_name_status(&name_status) {
+    for (kind, path, previous_path) in parse_name_status(&name_status) {
         if !seen.insert(path.clone()) {
             continue;
         }
         let (additions, deletions) = counts.get(&path).copied().unwrap_or((0, 0));
-        files.push(ChangedFile { path, kind, additions, deletions });
+        files.push(ChangedFile { path, kind, additions, deletions, previous_path });
     }
 
     if scope == Scope::Uncommitted {
@@ -154,6 +154,7 @@ pub fn changed_files(repo: &Path, scope: Scope, base: Option<&str>) -> Result<Ve
                     kind: ChangeKind::Untracked,
                     additions,
                     deletions: 0,
+                    previous_path: None,
                 });
             }
         }
@@ -198,22 +199,24 @@ fn parse_numstat(out: &str) -> HashMap<String, (u32, u32)> {
     map
 }
 
-/// `(kind, path)` pairs from `git diff --name-status`; renames take the new path.
-fn parse_name_status(out: &str) -> Vec<(ChangeKind, String)> {
+/// `(kind, path, previous_path)` from `git diff --name-status`. A rename takes the new path
+/// and carries its old path; every other kind has `previous_path == None`.
+fn parse_name_status(out: &str) -> Vec<(ChangeKind, String, Option<String>)> {
     let mut rows = Vec::new();
     for line in out.lines() {
         let mut it = line.split('\t');
         let Some(status) = it.next() else { continue };
         let first = it.next().unwrap_or("");
         let second = it.next();
-        let (kind, path) = match status.chars().next() {
-            Some('A') => (ChangeKind::Added, first),
-            Some('D') => (ChangeKind::Deleted, first),
-            Some('R') => (ChangeKind::Renamed, second.unwrap_or(first)),
-            _ => (ChangeKind::Modified, first),
+        let (kind, path, previous_path) = match status.chars().next() {
+            Some('A') => (ChangeKind::Added, first, None),
+            Some('D') => (ChangeKind::Deleted, first, None),
+            // `R<score>\told\tnew`: new path is the row, old path is the rename source.
+            Some('R') => (ChangeKind::Renamed, second.unwrap_or(first), Some(first.to_string())),
+            _ => (ChangeKind::Modified, first, None),
         };
         if !path.is_empty() {
-            rows.push((kind, path.to_string()));
+            rows.push((kind, path.to_string(), previous_path));
         }
     }
     rows
@@ -234,9 +237,12 @@ mod tests {
     fn name_status_kinds_and_rename_target() {
         let rows =
             parse_name_status("M\tsrc/a.rs\nA\tsrc/b.rs\nD\tsrc/c.rs\nR100\told.rs\tnew.rs\n");
-        assert_eq!(rows[0], (ChangeKind::Modified, "src/a.rs".to_string()));
-        assert_eq!(rows[1], (ChangeKind::Added, "src/b.rs".to_string()));
-        assert_eq!(rows[2], (ChangeKind::Deleted, "src/c.rs".to_string()));
-        assert_eq!(rows[3], (ChangeKind::Renamed, "new.rs".to_string()));
+        assert_eq!(rows[0], (ChangeKind::Modified, "src/a.rs".to_string(), None));
+        assert_eq!(rows[1], (ChangeKind::Added, "src/b.rs".to_string(), None));
+        assert_eq!(rows[2], (ChangeKind::Deleted, "src/c.rs".to_string(), None));
+        assert_eq!(
+            rows[3],
+            (ChangeKind::Renamed, "new.rs".to_string(), Some("old.rs".to_string()))
+        );
     }
 }

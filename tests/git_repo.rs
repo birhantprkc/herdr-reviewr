@@ -114,8 +114,10 @@ fn rename_is_reported_at_the_new_path() {
     r.git(&["mv", "old_name.rs", "new_name.rs"]);
 
     let files = changed_files(r.path(), Scope::Uncommitted, None).unwrap();
-    let renamed = files.iter().find(|f| f.kind == ChangeKind::Renamed);
-    assert_eq!(renamed.map(|f| f.path.as_str()), Some("new_name.rs"));
+    let renamed = files.iter().find(|f| f.kind == ChangeKind::Renamed).expect("a renamed file");
+    assert_eq!(renamed.path, "new_name.rs");
+    // The old path is carried so the diff can read the old content and show `old → new`.
+    assert_eq!(renamed.previous_path.as_deref(), Some("old_name.rs"));
 }
 
 #[test]

@@ -55,6 +55,20 @@ fn edited_app() -> App {
 }
 
 #[test]
+fn a_renamed_file_shows_old_arrow_new_in_the_header() {
+    let r = Repo::init();
+    r.write("old_name.rs", "stable contents that survive the move\nplus a second line\n");
+    r.commit_all("init");
+    r.git(&["mv", "old_name.rs", "new_name.rs"]);
+    r.write("new_name.rs", "stable contents that survive the move\nplus an edited line\n");
+    let mut app = App::new(r.path_buf(), Scope::Uncommitted, None);
+    app.reload().unwrap();
+
+    let out = render(&app);
+    assert!(out.contains("old_name.rs → new_name.rs"), "header shows the rename: {out:?}");
+}
+
+#[test]
 fn tabs_expand_to_spaces_in_the_diff() {
     let r = Repo::init();
     r.write("t.rs", "x\n");

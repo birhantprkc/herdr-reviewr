@@ -71,7 +71,7 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, poll: Duration) -> 
         let area = Rect::new(0, 0, size.width, size.height);
         let viewport = ui::diff_viewport_height(area);
         let effective = if app.composing() {
-            viewport.saturating_sub(ui::composer_height(app)).max(1)
+            viewport.saturating_sub(ui::composer_height(app, ui::diff_inner_width(area))).max(1)
         } else {
             viewport
         };
@@ -157,6 +157,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
             Enter if alt_or_shift => app.input_push('\n'),
             Enter => app.submit_comment(),
             Char('j') if ctrl => app.input_push('\n'),
+            Char('w') if ctrl => app.input_delete_word(),
             Backspace => app.input_backspace(),
             Char(c) if !ctrl => app.input_push(c),
             _ => {}
@@ -252,6 +253,10 @@ fn handle_mouse(app: &mut App, m: MouseEvent, area: Rect) -> Result<()> {
         }
         MouseEventKind::ScrollDown => app.scroll_diff(3),
         MouseEventKind::ScrollUp => app.scroll_diff(-3),
+        // Trackpad horizontal swipes scroll the diff sideways, but only with wrap off —
+        // with wrap on there is nothing offscreen to reach.
+        MouseEventKind::ScrollRight if !app.wrap => app.scroll_h(HALF_PAGE),
+        MouseEventKind::ScrollLeft if !app.wrap => app.scroll_h(-HALF_PAGE),
         _ => {}
     }
     Ok(())

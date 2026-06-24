@@ -170,7 +170,7 @@ impl App {
         };
         self.diff_path = Some(file.path.clone());
         let (old, new) = self.content_sides(&file);
-        self.diff = self.cache.get(file.path, &old, &new, &self.highlighter);
+        self.diff = self.cache.get(file.path, file.previous_path, &old, &new, &self.highlighter);
         self.rebuild_visible();
 
         if self.visible.is_empty() {
@@ -213,19 +213,23 @@ impl App {
     }
 
     /// The old and new content of `file` for the current scope: old from `HEAD` (or the
-    /// merge-base on the branch scope), new from the worktree (or `HEAD` on branch).
+    /// merge-base on the branch scope), new from the worktree (or `HEAD` on branch). A rename
+    /// reads its old side from `previous_path`, so the diff shows real edits, not a wholesale
+    /// delete-and-add.
     fn content_sides(&self, file: &ChangedFile) -> (String, String) {
-        let path = file.path.as_str();
+        let new_path = file.path.as_str();
+        let old_path = file.previous_path.as_deref().unwrap_or(new_path);
         match self.scope {
             Scope::Uncommitted => {
-                let old = git::file_content(&self.repo, "HEAD", path);
-                let new = worktree_content(&self.repo, path);
+                let old = git::file_content(&self.repo, "HEAD", old_path);
+                let new = worktree_content(&self.repo, new_path);
                 (old, new)
             }
             Scope::Branch => {
                 let mb = git::merge_base(&self.repo, self.base.as_deref());
-                let old = mb.map(|m| git::file_content(&self.repo, &m, path)).unwrap_or_default();
-                (old, git::file_content(&self.repo, "HEAD", path))
+                let old =
+                    mb.map(|m| git::file_content(&self.repo, &m, old_path)).unwrap_or_default();
+                (old, git::file_content(&self.repo, "HEAD", new_path))
             }
         }
     }
@@ -424,6 +428,17 @@ impl App {
         if self.composing() {
             self.input.pop();
         }
+    }
+
+    /// Delete the word before the cursor (`Ctrl+W`): first any trailing whitespace, then the
+    /// run of non-whitespace before it, so one press clears one word.
+    pub fn input_delete_word(&mut self) {
+        if !self.composing() {
+            return;
+        }
+        let trimmed = self.input.trim_end_matches(|c: char| c.is_whitespace());
+        let cut = trimmed.trim_end_matches(|c: char| !c.is_whitespace());
+        self.input.truncate(cut.len());
     }
 
     pub fn cancel_comment(&mut self) {
