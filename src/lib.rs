@@ -200,6 +200,9 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
         // `]` widens the file list, `[` narrows it (widening the diff).
         (Char(']'), _) => app.resize_list(4),
         (Char('['), _) => app.resize_list(-4),
+        // On a folder, `←`/`→` collapse/expand it; elsewhere they scroll the diff sideways.
+        (Right, _) if app.on_folder() => app.expand_dir(),
+        (Left, _) if app.on_folder() => app.collapse_dir(),
         (Right, _) => app.scroll_h(8),
         (Left, _) => app.scroll_h(-8),
         (Char('u'), false) => app.set_scope(Scope::Uncommitted)?,

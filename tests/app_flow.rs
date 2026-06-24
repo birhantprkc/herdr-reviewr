@@ -373,6 +373,30 @@ fn the_cursor_stays_on_a_folder_across_a_poll_and_toggle() {
 }
 
 #[test]
+fn arrows_collapse_and_expand_a_folder() {
+    let r = Repo::init();
+    r.write("src/a.rs", "x\n");
+    r.write("src/b.rs", "y\n");
+    r.commit_all("init");
+    r.write("src/a.rs", "x2\n");
+    r.write("src/b.rs", "y2\n");
+    let mut app = app_on(&r);
+    app.focus = Focus::Files;
+
+    let dir_row = app.file_rows.iter().position(|r| r.dir_path() == Some("src")).unwrap();
+    app.file_cursor = dir_row;
+    assert!(app.on_folder(), "the cursor is on the folder");
+    let expanded = app.file_rows.len();
+
+    app.collapse_dir(); // ←
+    assert!(app.file_rows.len() < expanded, "collapsing hides the children");
+    assert!(app.on_folder(), "the cursor stays on the folder row");
+
+    app.expand_dir(); // →
+    assert_eq!(app.file_rows.len(), expanded, "expanding shows them again");
+}
+
+#[test]
 fn the_pane_divider_resizes_and_clamps() {
     let r = edited_repo();
     let mut app = app_on(&r);

@@ -466,13 +466,45 @@ impl App {
     /// Collapse or expand the directory under the cursor, then rebuild the tree. The cursor
     /// stays on the directory row (still present, now toggled).
     fn toggle_dir(&mut self) {
-        let Some(path) = self.file_rows.get(self.file_cursor).and_then(|r| r.dir_path()) else {
-            return;
-        };
-        let path = path.to_string();
+        let Some(path) = self.dir_under_cursor() else { return };
         if !self.collapsed_dirs.remove(&path) {
             self.collapsed_dirs.insert(path);
         }
+        self.apply_dir_change();
+    }
+
+    /// Whether the cursor is on a directory row in the focused file list — the rows `←`/`→`
+    /// collapse and expand (elsewhere those keys scroll the diff).
+    pub fn on_folder(&self) -> bool {
+        self.focus == Focus::Files
+            && self.file_rows.get(self.file_cursor).is_some_and(|r| r.dir_path().is_some())
+    }
+
+    /// Expand the directory under the cursor (`→`); a no-op if it is a file or already open.
+    pub fn expand_dir(&mut self) {
+        if let Some(path) = self.dir_under_cursor()
+            && self.collapsed_dirs.remove(&path)
+        {
+            self.apply_dir_change();
+        }
+    }
+
+    /// Collapse the directory under the cursor (`←`); a no-op if it is a file or already shut.
+    pub fn collapse_dir(&mut self) {
+        if let Some(path) = self.dir_under_cursor()
+            && self.collapsed_dirs.insert(path)
+        {
+            self.apply_dir_change();
+        }
+    }
+
+    /// The path of the directory row under the cursor, if any.
+    fn dir_under_cursor(&self) -> Option<String> {
+        self.file_rows.get(self.file_cursor).and_then(|r| r.dir_path()).map(str::to_string)
+    }
+
+    /// Rebuild the tree after a directory's expansion changed, keeping the cursor in range.
+    fn apply_dir_change(&mut self) {
         self.rebuild_file_rows();
         self.file_cursor = self.file_cursor.min(self.file_rows.len().saturating_sub(1));
     }
