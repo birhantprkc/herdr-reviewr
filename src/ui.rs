@@ -334,12 +334,13 @@ fn file_row_item(
         let used: usize = spans.iter().map(Span::width).sum();
         let pad = width.saturating_sub(used + stats.width());
         spans.push(Span::raw(" ".repeat(pad)));
-        spans.push(Span::styled(stats, Style::default().fg(cat::OVERLAY0)));
+        spans.extend(stats_spans(additions, deletions));
     }
     selectable_row(spans, width, selected)
 }
 
-/// The `+a −d` stats, dropping a side that is zero (`+210`, `−4`, or empty).
+/// The `+a −d` stats text, dropping a side that is zero (`+210`, `−4`, or empty); used to
+/// measure the stats column. [`stats_spans`] paints the same text in green/red.
 fn stats_str(additions: u32, deletions: u32) -> String {
     match (additions, deletions) {
         (0, 0) => String::new(),
@@ -347,6 +348,22 @@ fn stats_str(additions: u32, deletions: u32) -> String {
         (0, d) => format!("−{d}"),
         (a, d) => format!("+{a} −{d}"),
     }
+}
+
+/// The `+a −d` stats as colored spans: additions in green, deletions in red, matching the
+/// diff's add/remove hues. Same glyphs (and width) as [`stats_str`].
+fn stats_spans(additions: u32, deletions: u32) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    if additions > 0 {
+        spans.push(Span::styled(format!("+{additions}"), Style::default().fg(cat::GREEN)));
+    }
+    if additions > 0 && deletions > 0 {
+        spans.push(Span::raw(" "));
+    }
+    if deletions > 0 {
+        spans.push(Span::styled(format!("−{deletions}"), Style::default().fg(cat::RED)));
+    }
+    spans
 }
 
 /// Shorten `name` to `max` columns by eliding its head behind a leading `…`, preferring to

@@ -341,6 +341,38 @@ fn a_comment_can_be_written_across_multiple_lines() {
 }
 
 #[test]
+fn the_cursor_stays_on_a_folder_across_a_poll_and_toggle() {
+    let r = Repo::init();
+    r.write("src/a.rs", "x\n");
+    r.write("src/b.rs", "y\n");
+    r.write("root.rs", "z\n");
+    r.commit_all("init");
+    r.write("src/a.rs", "x2\n");
+    r.write("src/b.rs", "y2\n"); // two changed files keep `src/` an expandable directory
+    r.write("root.rs", "z2\n");
+    let mut app = app_on(&r);
+    app.focus = Focus::Files;
+
+    // Land the cursor on the `src` directory row; the open diff is some file.
+    let dir_row = app.file_rows.iter().position(|r| r.dir_path() == Some("src")).unwrap();
+    app.file_cursor = dir_row;
+    let open = app.diff_path.clone();
+    assert!(open.is_some(), "a file diff is open");
+
+    // A poll must not yank the cursor onto the open file, nor blank the diff.
+    app.reload().unwrap();
+    assert_eq!(app.file_cursor, dir_row, "cursor stays on the folder across a poll");
+    assert_eq!(app.diff_path, open, "the open diff is unchanged");
+
+    // Collapsing then a poll keeps the cursor on the (now collapsed) folder.
+    app.activate_file_row(); // toggle the directory
+    app.reload().unwrap();
+    let dir_row = app.file_rows.iter().position(|r| r.dir_path() == Some("src")).unwrap();
+    assert_eq!(app.file_cursor, dir_row, "cursor stays on the folder after collapse + poll");
+    assert_eq!(app.diff_path, open, "the open diff is still unchanged");
+}
+
+#[test]
 fn the_pane_divider_resizes_and_clamps() {
     let r = edited_repo();
     let mut app = app_on(&r);

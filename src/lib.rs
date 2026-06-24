@@ -222,6 +222,7 @@ fn handle_mouse(app: &mut App, m: MouseEvent, area: Rect) -> Result<()> {
     if app.composing() {
         return Ok(());
     }
+    let shift = m.modifiers.contains(KeyModifiers::SHIFT);
     match m.kind {
         MouseEventKind::Down(MouseButton::Left) => {
             // The divider is checked first: a grab there starts a resize, not a selection.
@@ -267,12 +268,15 @@ fn handle_mouse(app: &mut App, m: MouseEvent, area: Rect) -> Result<()> {
             }
         }
         MouseEventKind::Up(MouseButton::Left) => app.resizing = false,
-        MouseEventKind::ScrollDown => app.scroll_diff(3),
-        MouseEventKind::ScrollUp => app.scroll_diff(-3),
-        // Trackpad horizontal swipes scroll the diff sideways, but only with wrap off —
-        // with wrap on there is nothing offscreen to reach.
+        // Horizontal scroll (wrap off only — nothing is offscreen with wrap on). Terminals
+        // deliver a trackpad horizontal swipe either as a native left/right wheel or, inside
+        // many multiplexers, as Shift + the vertical wheel; handle both.
         MouseEventKind::ScrollRight if !app.wrap => app.scroll_h(HALF_PAGE),
         MouseEventKind::ScrollLeft if !app.wrap => app.scroll_h(-HALF_PAGE),
+        MouseEventKind::ScrollDown if shift && !app.wrap => app.scroll_h(HALF_PAGE),
+        MouseEventKind::ScrollUp if shift && !app.wrap => app.scroll_h(-HALF_PAGE),
+        MouseEventKind::ScrollDown => app.scroll_diff(3),
+        MouseEventKind::ScrollUp => app.scroll_diff(-3),
         _ => {}
     }
     Ok(())

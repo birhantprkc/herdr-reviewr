@@ -31,6 +31,13 @@ pub enum Focus {
     Diff,
 }
 
+/// What the file-list cursor points at, by path, so it can be restored to the same target
+/// after the tree rebuilds on a poll.
+enum Anchor {
+    File(String),
+    Dir(String),
+}
+
 /// The interaction mode the UI is in.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Mode {
@@ -166,6 +173,35 @@ impl App {
         self.file_rows = file_list::build(&self.files, &self.collapsed_dirs);
     }
 
+    /// What the cursor currently points at — a file (by path) or a directory (by path) — so
+    /// the cursor can be put back on the same target after the tree rebuilds.
+    fn cursor_anchor(&self) -> Option<Anchor> {
+        self.file_rows.get(self.file_cursor).map(|r| match &r.kind {
+            RowKind::File { index, .. } => Anchor::File(self.files[*index].path.clone()),
+            RowKind::Dir { path, .. } => Anchor::Dir(path.clone()),
+        })
+    }
+
+    /// The visible-row index matching `anchor`, for restoring the cursor after a rebuild.
+    fn row_of_anchor(&self, anchor: &Anchor) -> Option<usize> {
+        self.file_rows.iter().position(|r| match (anchor, &r.kind) {
+            (Anchor::File(p), RowKind::File { index, .. }) => &self.files[*index].path == p,
+            (Anchor::Dir(p), RowKind::Dir { path, .. }) => path == p,
+            _ => false,
+        })
+    }
+
+    /// The file whose diff the pane shows: the file under the cursor, or — when the cursor
+    /// rests on a directory — the already-open file (matched by `diff_path`), so scanning the
+    /// tree never blanks the diff. `None` only when nothing is open.
+    fn shown_file(&self) -> Option<ChangedFile> {
+        if let Some(f) = self.current_file() {
+            return Some(f.clone());
+        }
+        let open = self.diff_path.as_deref()?;
+        self.files.iter().find(|f| f.path == open).cloned()
+    }
+
     /// Reload the changed-files list and (unless composing) the open diff.
     ///
     /// Never touches the comment store or the in-progress input — that is the
@@ -183,22 +219,24 @@ impl App {
             }
             return Ok(());
         }
-        // Preserve the open file by path; the collapsed-directory set survives untouched.
-        let prev = self.diff_path.clone();
+        // Keep the cursor on the same row target across the rebuild; fall back to the open
+        // file, then the first file. The collapsed-directory set survives untouched.
+        let anchor = self.cursor_anchor();
+        let open = self.diff_path.clone();
         self.files = git::changed_files(&self.repo, self.scope, self.base.as_deref())?;
         self.rebuild_file_rows();
-        self.file_cursor = prev
-            .as_deref()
-            .and_then(|p| self.file_row_of_path(p))
+        self.file_cursor = anchor
+            .and_then(|a| self.row_of_anchor(&a))
+            .or_else(|| open.as_deref().and_then(|p| self.file_row_of_path(p)))
             .or_else(|| self.first_file_row())
             .unwrap_or(0)
             .min(self.file_rows.len().saturating_sub(1));
         // While composing, the open diff is frozen so the anchor under the comment
         // cannot shift beneath the writer.
         if !self.composing() {
-            // A poll keeps the reader's position on the same file; only a different
-            // file under the cursor resets the diff view to the top.
-            if self.current_file().map(|f| f.path.as_str()) != self.diff_path.as_deref() {
+            // A poll keeps the reader on the same file; only a different shown file resets
+            // the diff view to the top.
+            if self.shown_file().map(|f| f.path) != self.diff_path {
                 self.reset_diff_view();
             }
             self.load_diff();
@@ -206,10 +244,10 @@ impl App {
         Ok(())
     }
 
-    /// Build the selected file's diff from its old and new content, flatten folds into
-    /// the visible rows, then clamp the cursor/scroll so a refresh keeps the position.
+    /// Build the shown file's diff from its old and new content, flatten folds into the
+    /// visible rows, then clamp the cursor/scroll so a refresh keeps the position.
     fn load_diff(&mut self) {
-        let Some(file) = self.current_file().cloned() else {
+        let Some(file) = self.shown_file() else {
             self.diff = FileDiff::empty();
             self.diff_path = None;
             self.visible.clear();
