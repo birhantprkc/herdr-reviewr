@@ -1,7 +1,7 @@
 ---
-Status: Draft
+Status: Current
 Created: 2026-06-24
-Last edited: 2026-06-24
+Last edited: 2026-06-25
 ---
 
 # File list
@@ -51,13 +51,12 @@ The list is a flat sequence of visible rows over the tree; a row is a directory 
 - The cursor moves over the visible rows; `j`/`k` and the arrows step row to row, skipping collapsed subtrees.
 - Activating a file row opens its diff in the left pane; activating a directory row toggles its `expanded` state.
 - A click selects the row under it — a file opens, a directory toggles.
-- A poll preserves the selected file and which directories are expanded, matching them by path; if the selected file left the changeset, its neighbour is selected.
+- A poll preserves the selected file and which directories are expanded, matching them by path; if the selected file left the changeset, the cursor falls back to the open file, then the first file.
 
 ### Presentation
 
 - A file row is `<marker> <name> <stats>`: the change marker colored by kind, the basename bright with its parent directories dimmed, and `+a −d` stats right-aligned against the pane edge.
 - When the row is too narrow, the path shortens with a middle ellipsis (`…/2026-06-23-changes/plan`) so both the basename and the stats stay visible.
-- A file that carries a comment but has left the changeset is marked stale, per `review-model.md`.
 
 ## Non-goals
 

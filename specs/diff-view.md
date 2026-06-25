@@ -1,7 +1,7 @@
 ---
-Status: Draft
+Status: Current
 Created: 2026-06-24
-Last edited: 2026-06-24
+Last edited: 2026-06-25
 ---
 
 # Diff view
@@ -38,7 +38,6 @@ What the reviewer sees (unified view, a renamed TypeScript file):
 | `path` | string | Repo-relative path; the new path for a rename. |
 | `previous_path` | string? | The old path when the file was renamed; absent otherwise. |
 | `change` | enum | One of `added`, `modified`, `deleted`, `renamed`, `untracked`. |
-| `language` | string? | Detected from the path for highlighting; absent when unknown (renders plain). |
 | `state` | enum | `normal` shows rows; `binary` and `too_large` show a notice instead. |
 | `rows` | Row[] | The render-and-cursor units, in display order. |
 
@@ -63,7 +62,7 @@ A row is one of four kinds. Content rows (`context`, `deletion`, `insertion`) ar
 - Content comes from git: the old version via `git show <rev>:<path>`, the new version from the worktree (or `git show` for branch scope). An `untracked` file has empty old content; a `deleted` file has empty new content.
 - The diff is computed with the `similar` crate (`TextDiff::from_lines`) over old vs new content, grouped into hunks with a context margin of 3 lines.
 - `emphasis` comes from `similar`'s inline word-level diff over related lines within a change block (a run of deletions then a run of insertions). Lines are matched by **homolog search**, not position (after git-delta): each deletion claims the first not-yet-taken insertion similar enough to be the same line edited; skipped insertions and unmatched deletions stay plain. A pair below the similarity bar — a wholesale rewrite sharing only scraps like indentation or `///` — gets no emphasis at all, since the line-level red/green already carries it and full-line highlighting would be noise. Adjacent changed words separated only by whitespace coalesce into one span (the whitespace is swallowed), so a changed phrase highlights as one block, not fragments; gaps holding any non-space character keep the words separate. Each span is then trimmed to its tokens — leading and trailing whitespace is never highlighted, so a deepened indent or the space before an added trailing comment paints nothing.
-- Highlighting comes from `syntect` over the broad bat/`two-face` syntax and theme set, so most languages color out of the box: the full old and new content are highlighted once each, and every row reads its line's `spans`. Full-file highlighting is why a multi-line string or comment colors correctly inside a hunk.
+- Highlighting comes from `syntect` over the broad bat/`two-face` syntax and theme set, so most languages color out of the box: the language is detected from the path (absent when unknown, which renders plain), the full old and new content are highlighted once each, and every row reads its line's `spans`. Full-file highlighting is why a multi-line string or comment colors correctly inside a hunk.
 - The diff and the highlighting are both cached per file by content; a poll that finds the file unchanged reuses the prior rows and spans rather than recomputing.
 
 ### Color

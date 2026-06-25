@@ -125,7 +125,6 @@ pub struct FileDiff {
     pub path: String,
     /// The old path when this file was renamed, for the `old → new` header; `None` otherwise.
     pub previous_path: Option<String>,
-    pub language: Option<String>,
     pub state: FileState,
     pub rows: Vec<Row>,
 }
@@ -141,7 +140,6 @@ impl FileDiff {
         Self {
             path: String::new(),
             previous_path: None,
-            language: None,
             state: FileState::Normal,
             rows: Vec::new(),
         }
@@ -160,7 +158,6 @@ impl FileDiff {
         let notice = |state| Self {
             path: path.clone(),
             previous_path: previous_path.clone(),
-            language: language.clone(),
             state,
             rows: Vec::new(),
         };
@@ -208,13 +205,7 @@ impl FileDiff {
             }
         }
         compute_emphasis(&mut rows);
-        Self {
-            path,
-            previous_path,
-            language,
-            state: FileState::Normal,
-            rows: collapse_context(&rows),
-        }
+        Self { path, previous_path, state: FileState::Normal, rows: collapse_context(&rows) }
     }
 }
 
