@@ -483,6 +483,46 @@ fn a_selection_cannot_cross_a_fold() {
 }
 
 #[test]
+fn paging_the_diff_cannot_cross_a_fold() {
+    let r = folded_repo();
+    let mut app = app_on(&r);
+    app.focus = Focus::Diff;
+    let tail = app.visible.iter().rposition(|row| row.hidden() > 0).unwrap();
+    app.diff_cursor = tail - 1;
+    app.toggle_select();
+    app.page_diff(50); // a big page that would jump well past the trailing fold
+    assert_eq!(app.diff_cursor, tail - 1, "page stops shy of the fold while selecting");
+}
+
+#[test]
+fn expanding_a_fold_does_not_bleed_into_another_file() {
+    use std::fmt::Write as _;
+    let r = Repo::init();
+    let mut body = String::new();
+    for i in 0..40 {
+        let _ = writeln!(body, "line {i}");
+    }
+    r.write("a.rs", &body);
+    r.write("b.rs", &body);
+    r.commit_all("init");
+    r.write("a.rs", &body.replace("line 20", "A20"));
+    r.write("b.rs", &body.replace("line 20", "B20"));
+    let mut app = app_on(&r); // a.rs opens first (sorted)
+
+    // Expand a.rs's leading fold (its anchor is line 1, same as b.rs's leading fold).
+    app.focus = Focus::Diff;
+    app.diff_cursor = app.visible.iter().position(|row| row.hidden() > 0).unwrap();
+    expand_fold(&mut app);
+    assert_eq!(app.diff_path.as_deref(), Some("a.rs"));
+
+    // Switching to b.rs must not carry a.rs's expansion across (shared line-number key).
+    app.focus = Focus::Files;
+    app.move_cursor(1).unwrap();
+    assert_eq!(app.diff_path.as_deref(), Some("b.rs"));
+    assert!(app.visible[0].hidden() > 0, "b.rs's leading fold stays collapsed");
+}
+
+#[test]
 fn expanding_a_fold_keeps_the_viewport_still() {
     let r = folded_repo();
 

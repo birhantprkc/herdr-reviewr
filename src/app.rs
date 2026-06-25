@@ -238,6 +238,7 @@ impl App {
             if !self.composing() {
                 self.diff = FileDiff::empty();
                 self.diff_path = None;
+                self.visible.clear(); // keep `visible` mirroring `diff` so no stale rows paint
                 self.reset_diff_view();
             }
             return Ok(());
@@ -286,6 +287,12 @@ impl App {
     /// Build the diff for a specific `file` regardless of whether its row is visible in the
     /// tree — so editing a comment can surface its file even from a collapsed directory.
     fn set_diff(&mut self, file: ChangedFile) {
+        // A different file opens with all folds collapsed. `expanded_folds` is keyed by line
+        // number, so without this a fold in the new file whose first hidden line matches an
+        // expanded one in the old file would render pre-expanded. A same-file poll keeps them.
+        if self.diff_path.as_deref() != Some(file.path.as_str()) {
+            self.expanded_folds.clear();
+        }
         self.diff_path = Some(file.path.clone());
         let (old, new) = self.content_sides(&file);
         self.diff = self.cache.get(file.path, file.previous_path, &old, &new, &self.highlighter);
@@ -340,7 +347,10 @@ impl App {
         };
         // Expanding replaces the 1 fold row with N context rows; rows below it shift by N-1.
         let shift = self.visible[fold_idx].hidden().saturating_sub(1);
-        // Display rows between the viewport top and the fold; < half ⇒ fold is in the top half.
+        // Display rows between the viewport top and the fold; < half ⇒ top half. When the fold
+        // is wheeled above the viewport (fold_idx < diff_scroll), the range is empty → above 0 →
+        // top half, which is correct: the inserted rows land above the viewport, so advancing
+        // diff_scroll by `shift` holds the visible content in place.
         let above: usize = heights.get(self.diff_scroll..fold_idx).map_or(0, |s| s.iter().sum());
         let top_half = above < viewport / 2;
         self.expanded_folds.insert(anchor);
@@ -610,7 +620,11 @@ impl App {
     /// keys when the diff is focused; the view follows the cursor like `j`/`k`.
     pub fn page_diff(&mut self, delta: isize) {
         if !self.visible.is_empty() {
-            self.diff_cursor = step(self.diff_cursor, delta, self.visible.len());
+            let mut target = step(self.diff_cursor, delta, self.visible.len());
+            if let Some(a) = self.select_anchor {
+                target = self.fold_clamped(a, target); // a selection cannot cross a fold
+            }
+            self.diff_cursor = target;
             self.reveal_diff = true;
         }
     }
@@ -1037,6 +1051,7 @@ impl App {
             idxs.iter().rev().copied().find(|&i| i < cur).or_else(|| idxs.last().copied())
         };
         if let Some(t) = target {
+            self.select_anchor = None; // a comment jump is navigation, not a selection extend
             self.diff_cursor = t;
             self.reveal_diff = true;
         }

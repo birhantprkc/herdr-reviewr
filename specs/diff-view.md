@@ -73,7 +73,7 @@ A row is one of four kinds. Content rows (`context`, `deletion`, `insertion`) ar
 ### Folding
 
 - An unchanged run longer than the context margin collapses to one `fold` row showing its hidden-line count, drawn as a distinct band so it reads as a hunk separator.
-- Expanding a `fold` replaces it with its lines as `context` rows; expansion is permanent for the session — an expand is intentional, so there is no collapse-back.
+- Expanding a `fold` replaces it with its lines as `context` rows; there is no manual collapse-back, and the expansion persists across refresh polls of the same file. It is per file (opening another file starts collapsed), and an edit that reshapes the fold may re-collapse it.
 - Expanding keeps the viewport visually still: a fold in the top half of the diff grows upward, so the lines below it hold their screen position; a fold in the bottom half grows downward, so the lines above it hold theirs.
 - A file's leading and trailing unchanged regions fold the same way, so the pane opens focused on the changes.
 
@@ -104,7 +104,7 @@ The viewer is read-only and recomputed on every refresh, so it never persists or
 - A file beyond the size budget renders as `too_large` with a notice — never a hang while diffing or highlighting.
 - A `binary` file renders `binary — no line comments`.
 - A highlighting failure (unknown language, grammar error) falls back to plain `spans`; the diff still renders.
-- A diff with no content lines — a pure rename, a mode-only change, an empty file — renders its header and a one-line notice, not an empty pane.
+- A diff with no rows at all — an empty file on both sides — renders its header and a one-line notice, not a blank pane. A pure rename or mode-only change (identical content) shows that content, collapsed to a fold.
 - A refresh recomputes the model from current content; the line numbers a saved or in-progress comment anchors to are unaffected, so no comment is lost or re-bound.
 
 ## Non-goals

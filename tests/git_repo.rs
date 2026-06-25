@@ -170,6 +170,16 @@ fn untracked_files_in_a_new_directory_are_listed_individually() {
 }
 
 #[test]
+fn a_repo_with_no_commits_lists_untracked_without_erroring() {
+    // A fresh `git init` has no HEAD; diffing against it would error and kill the process.
+    // Diffing against the empty tree lets a commitless repo list its files instead.
+    let r = Repo::init();
+    r.write("fresh.rs", "one\ntwo\n");
+    let files = changed_files(r.path(), Scope::Uncommitted, None).unwrap();
+    assert!(by_path(&files).contains_key("fresh.rs"), "lists files in a commitless repo");
+}
+
+#[test]
 fn a_binary_change_lists_with_zero_stats() {
     let r = Repo::init();
     r.write("blob.bin", "\0\0seed\0\0");

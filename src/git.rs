@@ -119,13 +119,30 @@ pub fn file_content(repo: &Path, rev: &str, path: &str) -> String {
     git_lenient(repo, &["show", &format!("{rev}:{path}")])
 }
 
+/// git's well-known empty-tree object, used as the diff base when a repo has no commits.
+const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+/// `HEAD` when the repo has a commit, else the empty tree (a commitless repo has no HEAD).
+fn diff_base(repo: &Path) -> String {
+    if git(repo, &["rev-parse", "--verify", "-q", "HEAD"]).is_ok() {
+        "HEAD".to_string()
+    } else {
+        EMPTY_TREE.to_string()
+    }
+}
+
 /// The changed files for `scope`, sorted by path. `base` overrides the branch base ref.
 pub fn changed_files(repo: &Path, scope: Scope, base: Option<&str>) -> Result<Vec<ChangedFile>> {
     let (numstat, name_status) = match scope {
-        Scope::Uncommitted => (
-            git(repo, &["diff", "HEAD", "--numstat", "-z"])?,
-            git(repo, &["diff", "HEAD", "--name-status", "-z"])?,
-        ),
+        Scope::Uncommitted => {
+            // A repo with no commits has no HEAD; diff against the empty tree so a fresh
+            // `git init` lists its files instead of erroring (which would kill the process).
+            let base = diff_base(repo);
+            (
+                git(repo, &["diff", &base, "--numstat", "-z"])?,
+                git(repo, &["diff", &base, "--name-status", "-z"])?,
+            )
+        }
         Scope::Branch => match range(repo, scope, base) {
             Some(r) => (
                 git(repo, &["diff", &r, "--numstat", "-z"])?,

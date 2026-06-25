@@ -60,7 +60,7 @@ These are not built here; the architecture only stays open to them.
 
 ## Open decisions
 
-- The exact JSON envelope of `herdr agent list` is not pinned by the CLI contract. The resolver accepts the three plausible shapes (a bare array, `result.agents`, and `agents`) until the format is confirmed, then collapses to the one real shape.
+- None. The `herdr agent list` envelope is confirmed as `result.agents[]` with snake_case `pane_id`/`tab_id`/`workspace_id` (verified live, herdr 0.7.1); the resolver keeps a small shape hedge defensively and excludes its own pane, since herdr lists the reviewr sidebar as an agent.
 
 ## Related specs
 

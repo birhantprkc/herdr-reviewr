@@ -78,7 +78,9 @@ impl ExportTarget for Agent {
     fn export(&self, text: &str) -> Result<()> {
         let pane = herdr::resolve_agent_pane()?;
         herdr::send_text(&pane, text)?;
-        herdr::focus(&pane)?;
+        // Focus is a convenience once the text is delivered; a focus failure must NOT fail the
+        // export, or the comments stay unconsumed and the next Send duplicates the whole review.
+        let _ = herdr::focus(&pane);
         Ok(())
     }
 }

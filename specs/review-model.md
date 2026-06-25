@@ -84,7 +84,7 @@ Comments are lightweight and short-lived: a review pass, not a durable record.
 A comment goes to the agent (the primary path) or the clipboard, as one block per comment, with the file, the line range, and the snippet it anchors to:
 
 ```
-extruct/core/llm_registry.py:40-41
+extruct/core/llm_registry.py:41
 -from .z import w
 +from .x import y
 this import path looks wrong

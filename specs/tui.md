@@ -107,7 +107,7 @@ The inline box is a plain-text field that behaves like an ordinary editor: the c
 
 - A poll never touches the comment input or saved comments — the draft text and the caret position survive a refresh — so you can comment while the agent writes files without losing anything.
 - A poll that finds no change makes no visible update: no flicker, no lost selection or scroll, no interruption to an in-progress comment.
-- A git or clipboard call runs off the draw path, so a slow call never freezes input.
+- Git, clipboard, and agent-send calls run synchronously between frames; they are fast for a typical repo, but a very large diff or a hung `herdr agent send` can briefly block input until it returns. Moving them off the draw path is a v1 non-goal.
 - A paste outside the comment editor is ignored; it never starts or mutates a comment.
 
 ## Non-goals
