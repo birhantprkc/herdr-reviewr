@@ -93,6 +93,7 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, poll: Duration) -> 
             viewport
         };
         app.clamp_diff_scroll(&ui::diff_row_heights(app, area), effective);
+        app.clamp_file_scroll(ui::file_viewport_height(area, app.list_pct));
         terminal.draw(|f| ui::render(f, app))?;
         // Wake at the status-expiry boundary too, so it clears on time when idle.
         let poll_left = poll.saturating_sub(last_poll.elapsed());
@@ -256,9 +257,14 @@ fn handle_mouse(app: &mut App, m: MouseEvent, area: Rect) -> Result<()> {
                     ui::HeaderHit::Scope => app.set_scope(app.scope.toggled())?,
                     ui::HeaderHit::Send => app.export(&Agent),
                 }
-            } else if let Some(i) =
-                ui::hit_file(area, app.list_pct, m.column, m.row, app.file_rows.len())
-            {
+            } else if let Some(i) = ui::hit_file(
+                area,
+                app.list_pct,
+                m.column,
+                m.row,
+                app.file_rows.len(),
+                app.file_scroll,
+            ) {
                 app.select_file(i)?;
             } else if let Some(i) = ui::hit_diff(
                 area,

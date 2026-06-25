@@ -49,6 +49,7 @@ The list is a flat sequence of visible rows over the tree; a row is a directory 
 ### Selection
 
 - The cursor moves over the visible rows; `j`/`k` and the arrows step row to row, skipping collapsed subtrees.
+- When the changeset is taller than the pane, the list scrolls to keep the cursor on screen, the same way the diff pane does.
 - Activating a file row opens its diff in the left pane; activating a directory row toggles its `expanded` state.
 - A click selects the row under it — a file opens, a directory toggles.
 - A poll preserves the selected file and which directories are expanded, matching them by path; if the selected file left the changeset, the cursor falls back to the open file, then the first file.

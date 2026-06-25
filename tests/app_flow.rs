@@ -61,6 +61,42 @@ fn clamp(app: &mut App, viewport: usize) {
     app.clamp_diff_scroll(&heights, viewport);
 }
 
+#[test]
+fn the_file_list_scrolls_to_keep_the_cursor_visible() {
+    let r = Repo::init();
+    for i in 0..20 {
+        r.write(&format!("f{i:02}.txt"), "one\n");
+    }
+    r.commit_all("init");
+    for i in 0..20 {
+        r.write(&format!("f{i:02}.txt"), "two\n");
+    }
+    let mut app = app_on(&r);
+    assert_eq!(app.file_rows.len(), 20);
+    assert_eq!(app.focus, Focus::Files);
+
+    let viewport = 6;
+    // Cursor at the top: the window starts at the top.
+    app.clamp_file_scroll(viewport);
+    assert_eq!(app.file_scroll, 0);
+
+    // Drive the cursor to the last row; the window scrolls so it stays visible.
+    for _ in 0..19 {
+        app.move_cursor(1).unwrap();
+    }
+    assert_eq!(app.file_cursor, 19);
+    app.clamp_file_scroll(viewport);
+    assert!(app.file_scroll <= app.file_cursor && app.file_cursor < app.file_scroll + viewport);
+    assert_eq!(app.file_scroll, 20 - viewport);
+
+    // Back to the top: the window follows back up, no blank tail.
+    for _ in 0..19 {
+        app.move_cursor(-1).unwrap();
+    }
+    app.clamp_file_scroll(viewport);
+    assert_eq!(app.file_scroll, 0);
+}
+
 /// The index of the first diff row with the given marker (`'+'`, `'-'`, or `' '`).
 fn row_with(app: &App, marker: char) -> usize {
     app.diff.rows.iter().position(|r| r.marker() == marker).expect("a row with that marker")

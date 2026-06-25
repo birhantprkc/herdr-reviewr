@@ -77,17 +77,33 @@ pub fn hit_divider(area: Rect, list_pct: u16, col: u16, row: u16) -> bool {
     in_body && col + 1 >= files_area.x && col <= files_area.x + 1
 }
 
-/// The file index a click at `(col, row)` lands on, or `None` if outside the list.
+/// The file-row index a click at `(col, row)` lands on, or `None` if outside the list.
+/// `file_scroll` is the top visible row, so a click maps to the scrolled-to row.
 #[must_use]
-pub fn hit_file(area: Rect, list_pct: u16, col: u16, row: u16, n_files: usize) -> Option<usize> {
+pub fn hit_file(
+    area: Rect,
+    list_pct: u16,
+    col: u16,
+    row: u16,
+    n_files: usize,
+    file_scroll: usize,
+) -> Option<usize> {
     let rows = vrows(area);
     let (_, files_area) = body_split(&rows, list_pct);
     let inner = inner_rect(files_area);
     if !contains(inner, col, row) {
         return None;
     }
-    let idx = (row - inner.y) as usize;
+    let idx = (row - inner.y) as usize + file_scroll;
     (idx < n_files).then_some(idx)
+}
+
+/// The number of file rows visible in the file pane, used to clamp the file-list scroll.
+#[must_use]
+pub fn file_viewport_height(area: Rect, list_pct: u16) -> usize {
+    let rows = vrows(area);
+    let (_, files_area) = body_split(&rows, list_pct);
+    inner_rect(files_area).height as usize
 }
 
 /// The logical diff-row index a click at `(col, row)` lands on, or `None` if outside the
@@ -295,10 +311,13 @@ fn render_file_list(frame: &mut Frame, app: &App, area: Rect) {
     }
 
     let width = inner.width as usize;
+    // Window the rows to the scrolled-to viewport; `file_scroll` keeps the cursor on screen.
     let items: Vec<ListItem> = app
         .file_rows
         .iter()
         .enumerate()
+        .skip(app.file_scroll)
+        .take(inner.height as usize)
         .map(|(i, row)| {
             let selected = i == app.file_cursor;
             let indent = "  ".repeat(row.depth);

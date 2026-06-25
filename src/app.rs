@@ -62,6 +62,9 @@ pub struct App {
     /// `file_cursor` indexes this, not `files`.
     pub file_rows: Vec<file_list::Row>,
     pub file_cursor: usize,
+    /// Top visible row of the file list, kept so `file_cursor` stays on screen when the
+    /// changeset is taller than the pane.
+    pub file_scroll: usize,
     /// Directory paths the user has collapsed; every other directory is expanded. Keyed by
     /// path, so it survives a poll that rebuilds the tree.
     collapsed_dirs: HashSet<String>,
@@ -108,6 +111,7 @@ impl App {
             files: Vec::new(),
             file_rows: Vec::new(),
             file_cursor: 0,
+            file_scroll: 0,
             collapsed_dirs: HashSet::new(),
             diff: FileDiff::empty(),
             visible: Vec::new(),
@@ -212,6 +216,7 @@ impl App {
             self.files.clear();
             self.file_rows.clear();
             self.file_cursor = 0;
+            self.file_scroll = 0;
             if !self.composing() {
                 self.diff = FileDiff::empty();
                 self.diff_path = None;
@@ -359,6 +364,24 @@ impl App {
         let list_cols = body_width.saturating_sub(x.min(body_width));
         let pct = (u32::from(list_cols) * 100 / u32::from(body_width)) as u16;
         self.list_pct = pct.clamp(MIN_LIST_PCT, MAX_LIST_PCT);
+    }
+
+    /// Keep `file_scroll` so `file_cursor` stays within a `viewport`-row window of the file
+    /// list, scrolling only when the cursor would leave it. File rows are height 1, so the
+    /// window is plain rows. Called once per frame.
+    pub fn clamp_file_scroll(&mut self, viewport: usize) {
+        if viewport == 0 || self.file_rows.is_empty() {
+            self.file_scroll = 0;
+            return;
+        }
+        let cursor = self.file_cursor.min(self.file_rows.len() - 1);
+        if cursor < self.file_scroll {
+            self.file_scroll = cursor;
+        } else if cursor >= self.file_scroll + viewport {
+            self.file_scroll = cursor + 1 - viewport;
+        }
+        // Don't leave a blank tail when a lower top would still fill the window.
+        self.file_scroll = self.file_scroll.min(self.file_rows.len().saturating_sub(viewport));
     }
 
     /// Keep `diff_scroll` so the cursor's logical row fits in a `viewport`-display-row
