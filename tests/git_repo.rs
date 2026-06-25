@@ -121,6 +121,50 @@ fn rename_is_reported_at_the_new_path() {
 }
 
 #[test]
+fn a_directory_removing_rename_keeps_its_stats() {
+    // Regression for the `-z` migration: `a/b/f.rs -> a/f.rs` once produced a `a//f.rs`
+    // numstat key that never matched, so the renamed+edited file showed +0 -0.
+    let r = Repo::init();
+    r.write("a/b/file.rs", "one\ntwo\nthree\nfour\nfive\nsix\n");
+    r.commit_all("init");
+    r.git(&["mv", "a/b/file.rs", "a/file.rs"]);
+    r.write("a/file.rs", "one\nTWO\nthree\nfour\nfive\nsix\n"); // small edit keeps it a rename
+
+    let files = changed_files(r.path(), Scope::Uncommitted, None).unwrap();
+    let renamed = files.iter().find(|f| f.kind == ChangeKind::Renamed).expect("a renamed file");
+    assert_eq!(renamed.path, "a/file.rs");
+    assert_eq!(renamed.previous_path.as_deref(), Some("a/b/file.rs"));
+    assert!(renamed.additions + renamed.deletions > 0, "the edit's stats are counted");
+}
+
+#[test]
+fn untracked_paths_with_spaces_survive_verbatim() {
+    // `-z` status never quotes or trims, so a name with spaces round-trips byte-for-byte.
+    let r = Repo::init();
+    r.write("seed.rs", "x\n");
+    r.commit_all("init");
+    r.write("a file with spaces.rs", "u\n");
+
+    let files = changed_files(r.path(), Scope::Uncommitted, None).unwrap();
+    let f = by_path(&files)["a file with spaces.rs"];
+    assert_eq!(f.kind, ChangeKind::Untracked);
+    assert_eq!(f.additions, 1);
+}
+
+#[test]
+fn a_binary_change_lists_with_zero_stats() {
+    let r = Repo::init();
+    r.write("blob.bin", "\0\0seed\0\0");
+    r.commit_all("init");
+    r.write("blob.bin", "\0\0changed\0\0\0");
+
+    let files = changed_files(r.path(), Scope::Uncommitted, None).unwrap();
+    let f = by_path(&files)["blob.bin"];
+    assert_eq!(f.kind, ChangeKind::Modified);
+    assert_eq!((f.additions, f.deletions), (0, 0));
+}
+
+#[test]
 fn git_access_never_mutates_the_repo() {
     let r = Repo::init();
     r.write("a.rs", "x\n");

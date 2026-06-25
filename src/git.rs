@@ -123,13 +123,14 @@ pub fn file_content(repo: &Path, rev: &str, path: &str) -> String {
 pub fn changed_files(repo: &Path, scope: Scope, base: Option<&str>) -> Result<Vec<ChangedFile>> {
     let (numstat, name_status) = match scope {
         Scope::Uncommitted => (
-            git(repo, &["diff", "HEAD", "--numstat"])?,
-            git(repo, &["diff", "HEAD", "--name-status"])?,
+            git(repo, &["diff", "HEAD", "--numstat", "-z"])?,
+            git(repo, &["diff", "HEAD", "--name-status", "-z"])?,
         ),
         Scope::Branch => match range(repo, scope, base) {
-            Some(r) => {
-                (git(repo, &["diff", &r, "--numstat"])?, git(repo, &["diff", &r, "--name-status"])?)
-            }
+            Some(r) => (
+                git(repo, &["diff", &r, "--numstat", "-z"])?,
+                git(repo, &["diff", &r, "--name-status", "-z"])?,
+            ),
             None => return Ok(Vec::new()),
         },
     };
@@ -164,15 +165,29 @@ pub fn changed_files(repo: &Path, scope: Scope, base: Option<&str>) -> Result<Ve
     Ok(files)
 }
 
-/// Untracked file paths from `git status --porcelain`.
+/// Untracked file paths from `git status --porcelain -z`. The `-z` form is NUL-delimited
+/// and never quotes or escapes a path, so names with spaces or special characters survive
+/// verbatim — no trimming or unquoting.
 fn untracked(repo: &Path) -> Result<Vec<String>> {
-    let status = git(repo, &["status", "--porcelain"])?;
-    Ok(status
-        .lines()
-        .filter_map(|l| l.strip_prefix("?? "))
-        .map(|p| p.trim().to_string())
-        .filter(|p| !p.is_empty())
-        .collect())
+    let status = git(repo, &["status", "--porcelain", "-z"])?;
+    let mut out = Vec::new();
+    let mut it = status.split('\0');
+    while let Some(entry) = it.next() {
+        // Each record is `XY␠PATH`; the first three bytes (status + space) are ASCII.
+        if entry.len() < 3 {
+            continue; // trailing empty field, or a malformed short record
+        }
+        let xy = &entry[..2];
+        // A rename/copy record carries a second NUL field (its source) — consume it so the
+        // iterator stays aligned with record boundaries.
+        if xy.contains('R') || xy.contains('C') {
+            it.next();
+        }
+        if xy == "??" {
+            out.push(entry[3..].to_string());
+        }
+    }
+    Ok(out)
 }
 
 /// Addition count of an untracked file via `diff --no-index` (0 for binary).
@@ -183,57 +198,63 @@ fn untracked_additions(repo: &Path, path: &str) -> u32 {
 
 // --- pure parsers (unit-tested without a repo) ---------------------------------
 
-/// Map of path to `(additions, deletions)` from `git diff --numstat`.
+/// Map of new-path to `(additions, deletions)` from `git diff --numstat -z`.
+///
+/// Under `-z` a non-rename record is `ADDS\tDELS\tPATH\0`; a rename/copy record is
+/// `ADDS\tDELS\t\0OLD\0NEW\0` — the counts ride the front, then old and new arrive as
+/// their own NUL fields (no `=>` arrow, no brace factoring). Binary files emit `-`/`-`,
+/// which parse to 0. The counts key under the new path, matching `parse_name_status`.
 fn parse_numstat(out: &str) -> HashMap<String, (u32, u32)> {
     let mut map = HashMap::new();
-    for line in out.lines() {
-        let mut it = line.split('\t');
-        let add = it.next().unwrap_or("0").parse().unwrap_or(0);
-        let del = it.next().unwrap_or("0").parse().unwrap_or(0);
-        if let Some(path) = it.next()
-            && !path.is_empty()
-        {
-            map.insert(numstat_new_path(path), (add, del));
+    let mut it = out.split('\0');
+    while let Some(field) = it.next() {
+        // `splitn(3)` keeps any tabs inside the path (verbatim under `-z`) intact.
+        let mut parts = field.splitn(3, '\t');
+        let add = parts.next().unwrap_or("0").parse().unwrap_or(0);
+        let del = parts.next().unwrap_or("0").parse().unwrap_or(0);
+        match parts.next() {
+            // Non-rename: the path rode this same field.
+            Some(path) if !path.is_empty() => {
+                map.insert(path.to_string(), (add, del));
+            }
+            // Rename/copy: the next two fields are the old and new paths.
+            Some(_) => {
+                let _old = it.next();
+                if let Some(new) = it.next().filter(|n| !n.is_empty()) {
+                    map.insert(new.to_string(), (add, del));
+                }
+            }
+            // No tab fields — a trailing empty record after the final NUL.
+            None => {}
         }
     }
     map
 }
 
-/// `git --numstat` renders a rename's path as `old => new`, optionally factoring the
-/// common prefix/suffix into a brace segment (`src/{old.rs => new.rs}`, `{src => lib}/f`).
-/// Reduce it to the new path so the counts key matches `--name-status`'s new path.
-fn numstat_new_path(path: &str) -> String {
-    if !path.contains("=>") {
-        return path.to_string();
-    }
-    if let Some(open) = path.find('{')
-        && let Some(close) = path[open..].find('}').map(|i| open + i)
-    {
-        let inner = &path[open + 1..close];
-        let new = inner.split("=>").nth(1).unwrap_or(inner).trim();
-        return format!("{}{}{}", &path[..open], new, &path[close + 1..]);
-    }
-    path.split("=>").nth(1).unwrap_or(path).trim().to_string()
-}
-
-/// `(kind, path, previous_path)` from `git diff --name-status`. A rename takes the new path
-/// and carries its old path; every other kind has `previous_path == None`.
+/// `(kind, path, previous_path)` from `git diff --name-status -z`. Under `-z` each record is
+/// `STATUS\0PATH\0`, except a rename/copy is `R<score>\0OLD\0NEW\0` (status, then old and new
+/// as separate fields). A rename or copy takes the new path and carries its old path; every
+/// other kind has `previous_path == None`. Copy folds into `Renamed` — a copy's old content
+/// lives at the old path exactly like a rename, which is what `content_sides` reads.
 fn parse_name_status(out: &str) -> Vec<(ChangeKind, String, Option<String>)> {
     let mut rows = Vec::new();
-    for line in out.lines() {
-        let mut it = line.split('\t');
-        let Some(status) = it.next() else { continue };
-        let first = it.next().unwrap_or("");
-        let second = it.next();
-        let (kind, path, previous_path) = match status.chars().next() {
-            Some('A') => (ChangeKind::Added, first, None),
-            Some('D') => (ChangeKind::Deleted, first, None),
-            // `R<score>\told\tnew`: new path is the row, old path is the rename source.
-            Some('R') => (ChangeKind::Renamed, second.unwrap_or(first), Some(first.to_string())),
-            _ => (ChangeKind::Modified, first, None),
+    let mut it = out.split('\0');
+    while let Some(status) = it.next() {
+        let row = match status.chars().next() {
+            Some('A') => it.next().map(|p| (ChangeKind::Added, p.to_string(), None)),
+            Some('D') => it.next().map(|p| (ChangeKind::Deleted, p.to_string(), None)),
+            Some('R' | 'C') => {
+                let old = it.next();
+                it.next().map(|new| (ChangeKind::Renamed, new.to_string(), old.map(str::to_string)))
+            }
+            // Modified, type-changed, etc.; also skips the trailing empty record.
+            Some(_) => it.next().map(|p| (ChangeKind::Modified, p.to_string(), None)),
+            None => None,
         };
-        if !path.is_empty() {
-            rows.push((kind, path.to_string(), previous_path));
+        if let Some((kind, path, prev)) = row
+            && !path.is_empty()
+        {
+            rows.push((kind, path, prev));
         }
     }
     rows
@@ -245,33 +266,59 @@ mod tests {
 
     #[test]
     fn numstat_parses_counts_and_ignores_binary() {
-        let m = parse_numstat("18\t8\tsrc/a.rs\n-\t-\tassets/logo.png\n");
+        let m = parse_numstat("18\t8\tsrc/a.rs\0-\t-\tassets/logo.png\0");
         assert_eq!(m["src/a.rs"], (18, 8));
         assert_eq!(m["assets/logo.png"], (0, 0));
     }
 
     #[test]
     fn numstat_keys_renames_under_the_new_path() {
-        // `--numstat` factors the rename into `old => new`, with a brace segment when the
-        // paths share a prefix/suffix; the counts must key under the new path.
-        let m = parse_numstat(
-            "3\t1\tsrc/{old.rs => new.rs}\n2\t0\told.txt => new.txt\n5\t4\t{src => lib}/x.rs\n",
-        );
+        // Under `-z` a rename is `ADDS\tDELS\t\0OLD\0NEW`: old and new are their own fields,
+        // no `=>` arrow or brace form. Counts must key under the new path.
+        let m = parse_numstat("3\t1\t\0src/old.rs\0src/new.rs\0");
         assert_eq!(m["src/new.rs"], (3, 1));
-        assert_eq!(m["new.txt"], (2, 0));
-        assert_eq!(m["lib/x.rs"], (5, 4));
+        assert!(!m.contains_key("src/old.rs"));
+    }
+
+    #[test]
+    fn numstat_dir_removing_rename_has_no_double_slash() {
+        // Regression: the old brace parser produced `a//file.rs` here, so counts never matched.
+        let m = parse_numstat("4\t2\t\0a/b/file.rs\0a/file.rs\0");
+        assert_eq!(m["a/file.rs"], (4, 2));
+        assert!(!m.contains_key("a//file.rs"));
+    }
+
+    #[test]
+    fn numstat_handles_a_mixed_stream() {
+        // binary, plain, rename, in sequence — the rename lookahead must stay aligned.
+        // `\x00` (= NUL) is used as the separator so the digits after it read clearly.
+        let m = parse_numstat("-\t-\tlogo.png\x009\t1\tsrc/a.rs\x005\t4\t\x00o.rs\x00n.rs\x00");
+        assert_eq!(m["logo.png"], (0, 0));
+        assert_eq!(m["src/a.rs"], (9, 1));
+        assert_eq!(m["n.rs"], (5, 4));
     }
 
     #[test]
     fn name_status_kinds_and_rename_target() {
         let rows =
-            parse_name_status("M\tsrc/a.rs\nA\tsrc/b.rs\nD\tsrc/c.rs\nR100\told.rs\tnew.rs\n");
+            parse_name_status("M\0src/a.rs\0A\0src/b.rs\0D\0src/c.rs\0R100\0old.rs\0new.rs\0");
         assert_eq!(rows[0], (ChangeKind::Modified, "src/a.rs".to_string(), None));
         assert_eq!(rows[1], (ChangeKind::Added, "src/b.rs".to_string(), None));
         assert_eq!(rows[2], (ChangeKind::Deleted, "src/c.rs".to_string(), None));
         assert_eq!(
             rows[3],
             (ChangeKind::Renamed, "new.rs".to_string(), Some("old.rs".to_string()))
+        );
+    }
+
+    #[test]
+    fn name_status_copy_keeps_the_new_path() {
+        // A copy carries old + new like a rename; it must key under the new path, not collapse
+        // to a Modified entry on the source path.
+        let rows = parse_name_status("C75\0orig.rs\0copy.rs\0");
+        assert_eq!(
+            rows[0],
+            (ChangeKind::Renamed, "copy.rs".to_string(), Some("orig.rs".to_string()))
         );
     }
 }
