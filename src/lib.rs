@@ -183,6 +183,10 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
     use KeyCode::{Backspace, Char, Down, Enter, Esc, Left, PageDown, PageUp, Right, Tab, Up};
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
+    // A keypress ends any in-progress divider drag, so opening a modal mid-drag (which makes
+    // the mouse handler ignore the releasing Up) can't strand `resizing` true.
+    app.resizing = false;
+
     if app.composing() {
         let alt_or_shift = key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT);
         match key.code {

@@ -192,10 +192,21 @@ fn untracked(repo: &Path) -> Result<Vec<String>> {
     Ok(out)
 }
 
-/// Addition count of an untracked file via `diff --no-index` (0 for binary).
+/// Addition count of an untracked file: its line count, which is what `git diff` against
+/// nothing reports (0 for empty or binary). Read locally rather than shelling
+/// `git diff --no-index` per file — with `--untracked-files=all` a large untracked tree
+/// would otherwise fork git once per file on every poll and freeze the UI.
 fn untracked_additions(repo: &Path, path: &str) -> u32 {
-    let ns = git_lenient(repo, &["diff", "--no-index", "--numstat", "--", "/dev/null", path]);
-    ns.lines().next().and_then(|l| l.split('\t').next()).and_then(|a| a.parse().ok()).unwrap_or(0)
+    let Ok(bytes) = std::fs::read(repo.join(path)) else { return 0 };
+    if bytes.is_empty() || bytes.contains(&0) {
+        return 0; // empty, or binary (a NUL byte) — git reports no line additions
+    }
+    // Lines = newline count, plus one for a final line with no trailing newline. A plain
+    // byte count is fine for one already-read file; no need for the bytecount crate.
+    #[allow(clippy::naive_bytecount)]
+    let newlines = bytes.iter().filter(|&&b| b == b'\n').count();
+    let trailing = usize::from(bytes.last() != Some(&b'\n'));
+    (newlines + trailing) as u32
 }
 
 // --- pure parsers (unit-tested without a repo) ---------------------------------
