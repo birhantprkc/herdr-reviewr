@@ -98,7 +98,7 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, poll: Duration) -> 
         if std::mem::take(&mut app.reveal_diff) || app.composing() {
             app.reveal_diff_cursor(&heights, effective);
         }
-        app.bound_diff_scroll(effective);
+        app.bound_diff_scroll(&heights, effective);
         let file_vp = ui::file_viewport_height(area, app.list_pct);
         if std::mem::take(&mut app.reveal_files) {
             app.reveal_file_cursor(file_vp);
@@ -246,8 +246,11 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
         (Char('b'), false) => app.set_scope(Scope::Branch)?,
         (Char('v'), _) => app.toggle_select(),
         (Char('c'), _) => app.start_comment(),
-        (Char('e'), _) => app.start_edit(),
-        (Char('d'), false) => app.delete_comment(),
+        // `e`/`d` act on the comment under the diff cursor, so they only fire with the diff
+        // focused — otherwise `d` would silently delete a comment under an off-screen cursor.
+        // (The comments-list overlay has its own `e`/`d`, which target the highlighted row.)
+        (Char('e'), _) if app.focus == Focus::Diff => app.start_edit(),
+        (Char('d'), false) if app.focus == Focus::Diff => app.delete_comment(),
         (Char('s' | 'S'), _) => app.export(&Agent),
         (Char('y' | 'Y'), _) => app.export(&Clipboard),
         (Char('n'), _) => app.jump_comment(1),

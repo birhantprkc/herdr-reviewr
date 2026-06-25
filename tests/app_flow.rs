@@ -59,7 +59,7 @@ fn app_on(r: &Repo) -> App {
 fn clamp(app: &mut App, viewport: usize) {
     let heights = vec![1usize; app.visible.len()];
     app.reveal_diff_cursor(&heights, viewport);
-    app.bound_diff_scroll(viewport);
+    app.bound_diff_scroll(&heights, viewport);
 }
 
 #[test]
@@ -133,13 +133,31 @@ fn long_diff_app(n: usize) -> App {
 }
 
 #[test]
+fn bound_diff_scroll_keeps_a_wrapped_bottom_reachable() {
+    // 30 logical rows, each 3 display lines tall, in a 20-display-row viewport. A row-count
+    // cap would stop the scroll at 30-20=10, hiding the last ~13 rows; the height-aware cap
+    // must reach the offset that shows the last row.
+    let mut app = long_diff_app(5);
+    let heights = vec![3usize; 30];
+    app.diff_scroll = 999; // wheel over-scroll
+    app.bound_diff_scroll(&heights, 20);
+    assert!(
+        app.diff_scroll > 10,
+        "height-aware bound passes the row-count cap: {}",
+        app.diff_scroll
+    );
+    assert!(app.diff_scroll <= 29);
+}
+
+#[test]
 fn the_wheel_scrolls_the_diff_without_moving_its_cursor() {
     let mut app = long_diff_app(40);
     app.focus = Focus::Diff;
     app.diff_cursor = 3;
     app.reveal_diff = false;
     app.wheel_diff(10);
-    app.bound_diff_scroll(8);
+    let h = vec![1usize; app.visible.len()];
+    app.bound_diff_scroll(&h, 8);
     assert_eq!(app.diff_cursor, 3, "the wheel leaves the comment cursor put");
     assert!(app.diff_scroll > 0, "the wheel moved the viewport");
     assert!(!app.reveal_diff, "the wheel does not request a reveal");
@@ -241,7 +259,8 @@ fn a_poll_preserves_the_wheel_scroll_in_both_panes() {
     app.select_file(file_row(&app, "big.rs")).unwrap();
     app.focus = Focus::Diff;
     app.wheel_diff(20);
-    app.bound_diff_scroll(10);
+    let h = vec![1usize; app.visible.len()];
+    app.bound_diff_scroll(&h, 10);
     let diff_scroll = app.diff_scroll;
     assert!(diff_scroll > 0);
     // Wheel the file list down too.
@@ -257,7 +276,8 @@ fn a_poll_preserves_the_wheel_scroll_in_both_panes() {
     app.reload().unwrap();
     assert!(!app.reveal_diff, "a poll does not reveal the diff cursor");
     assert!(!app.reveal_files, "a poll does not reveal the file cursor");
-    app.bound_diff_scroll(10);
+    let h = vec![1usize; app.visible.len()];
+    app.bound_diff_scroll(&h, 10);
     app.bound_file_scroll(6);
     assert_eq!(app.diff_scroll, diff_scroll, "the diff wheel scroll survives the poll");
     assert_eq!(app.file_scroll, file_scroll, "the file-list wheel scroll survives the poll");
@@ -722,6 +742,41 @@ fn a_comment_can_be_edited_then_deleted() {
     app.open_list();
     app.delete_comment();
     assert!(app.store.is_empty());
+}
+
+#[test]
+fn deleting_the_last_comment_closes_the_list_overlay() {
+    let r = edited_repo();
+    let mut app = app_on(&r);
+    comment_on(&mut app, '+', "only one");
+    app.open_list();
+    assert_eq!(app.mode, Mode::List);
+    app.delete_comment();
+    assert!(app.store.is_empty());
+    assert_eq!(app.mode, Mode::Normal, "an emptied overlay closes instead of stranding the user");
+}
+
+#[test]
+fn finishing_an_edit_returns_to_its_origin() {
+    let r = edited_repo();
+    let mut app = app_on(&r);
+    comment_on(&mut app, '+', "first");
+    comment_on(&mut app, ' ', "second");
+
+    // Edit from the comments-list overlay → returns to the list.
+    app.open_list();
+    app.start_edit();
+    app.input_push('!');
+    app.submit_comment();
+    assert_eq!(app.mode, Mode::List, "a list-initiated edit returns to the list");
+
+    // Edit from the diff → returns to Normal.
+    app.close_list();
+    app.focus = Focus::Diff;
+    app.diff_cursor = row_with(&app, '+');
+    app.start_edit();
+    app.submit_comment();
+    assert_eq!(app.mode, Mode::Normal, "a diff-initiated edit returns to Normal");
 }
 
 #[test]

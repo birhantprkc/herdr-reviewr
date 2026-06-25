@@ -74,6 +74,9 @@ pub struct App {
     /// Set by a navigation that moves `diff_cursor`; consumed once per frame to scroll the
     /// cursor into view. The wheel never sets it.
     pub reveal_diff: bool,
+    /// Whether the current compose was opened from the comments-list overlay, so finishing it
+    /// returns there rather than dropping to the diff.
+    resume_list: bool,
     /// Directory paths the user has collapsed; every other directory is expanded. Keyed by
     /// path, so it survives a poll that rebuilds the tree.
     collapsed_dirs: HashSet<String>,
@@ -123,6 +126,7 @@ impl App {
             file_scroll: 0,
             reveal_files: false,
             reveal_diff: false,
+            resume_list: false,
             collapsed_dirs: HashSet::new(),
             diff: FileDiff::empty(),
             visible: Vec::new(),
@@ -249,9 +253,10 @@ impl App {
             .min(self.file_rows.len().saturating_sub(1));
         // A poll preserves the file-list wheel scroll — it does not reveal the cursor.
         // Explicit actions (navigation, a scope switch) request their own reveal.
-        // While composing, the open diff is frozen so the anchor under the comment
-        // cannot shift beneath the writer.
-        if !self.composing() {
+        // While a modal is open — composing a comment, or the comments-list overlay — the
+        // open diff is frozen, so a poll can't shift the anchor beneath the writer or reset
+        // the scroll/selection under the overlay. The file list still updates above.
+        if !self.composing() && self.mode != Mode::List {
             // A poll keeps the reader on the same file; only a different shown file resets
             // the diff view to the top.
             if self.shown_file().map(|f| f.path) != self.diff_path {
@@ -436,9 +441,17 @@ impl App {
         self.diff_scroll = keep_in_view(cursor, self.diff_scroll, heights, viewport);
     }
 
-    /// Clamp `diff_scroll` within range (no blank tail). Called every frame.
-    pub fn bound_diff_scroll(&mut self, viewport: usize) {
-        self.diff_scroll = bound(self.diff_scroll, self.visible.len(), viewport);
+    /// Clamp `diff_scroll` within range (no blank tail). Called every frame. Height-aware:
+    /// the cap is the offset that shows the LAST row at the bottom — computed from `heights`,
+    /// not the row count, so a wrapped diff (tall rows) stays fully reachable. A row-count cap
+    /// would stop short of the bottom whenever rows span more than one display line.
+    pub fn bound_diff_scroll(&mut self, heights: &[usize], viewport: usize) {
+        if heights.is_empty() {
+            self.diff_scroll = 0;
+            return;
+        }
+        let max_top = keep_in_view(heights.len() - 1, self.diff_scroll, heights, viewport);
+        self.diff_scroll = self.diff_scroll.min(max_top);
     }
 
     /// Switch the changeset scope and reload. A no-op while composing, so a comment
@@ -448,8 +461,10 @@ impl App {
             self.scope = scope;
             self.file_cursor = 0;
             // A file's old side can differ between scopes at the same path+new-content, so
-            // drop cached diffs rather than risk returning the other scope's build.
+            // drop cached diffs rather than risk returning the other scope's build. Fold
+            // expansions are keyed by line number within a diff, so drop them too.
             self.cache = DiffCache::new();
+            self.expanded_folds.clear();
             self.reset_diff_view();
             self.reload()?;
             // An explicit scope switch resets to the top, so reveal the reset cursor (a poll,
@@ -647,11 +662,14 @@ impl App {
             self.diff_cursor = self.selection_range().1;
             self.reveal_diff = true; // scroll the anchored line into view before the box opens
             self.input.clear();
+            self.resume_list = false; // a fresh diff comment returns to the diff, not the list
             self.mode = Mode::Composing { editing: None };
         }
     }
 
     pub fn start_edit(&mut self) {
+        // Editing from the comments-list overlay returns there on finish (else to the diff).
+        let from_list = self.mode == Mode::List;
         let Some(i) = self.target_comment() else { return };
         let Some(c) = self.store.get(i) else { return };
         let (file, side, start, end, text) =
@@ -688,6 +706,7 @@ impl App {
         self.focus = Focus::Diff;
         self.reveal_diff = true; // scroll the edited line into view before the box opens
         self.input = text;
+        self.resume_list = from_list;
         self.mode = Mode::Composing { editing: Some(i) };
     }
 
@@ -715,8 +734,20 @@ impl App {
     }
 
     pub fn cancel_comment(&mut self) {
+        self.leave_compose();
+    }
+
+    /// Leave compose mode, returning to the comments-list overlay if the compose was opened
+    /// from it (and any comments remain), else to Normal.
+    fn leave_compose(&mut self) {
         self.input.clear();
-        self.mode = Mode::Normal;
+        let resume = std::mem::take(&mut self.resume_list);
+        if resume && !self.store.is_empty() {
+            self.list_cursor = self.list_cursor.min(self.store.len() - 1);
+            self.mode = Mode::List;
+        } else {
+            self.mode = Mode::Normal;
+        }
     }
 
     /// Save the in-progress comment — editing the existing one or anchoring a new one
@@ -742,9 +773,8 @@ impl App {
                 }
             }
         }
-        self.input.clear();
         self.select_anchor = None;
-        self.mode = Mode::Normal;
+        self.leave_compose();
     }
 
     /// Whether the selection has at least one content row a comment can attach to —
@@ -837,6 +867,10 @@ impl App {
             self.store.take(i);
             self.clamp_list_cursor();
             self.status = "comment deleted".to_string();
+            // Don't strand the user in an empty "Comments (0)" overlay, matching `export`.
+            if self.store.is_empty() {
+                self.close_list();
+            }
         }
     }
 
