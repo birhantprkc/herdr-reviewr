@@ -16,19 +16,18 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{App, Focus, Mode};
-use crate::diff::{FileState, Row};
+use crate::diff::{FileDiff, FileState, Row};
 use crate::file_list::RowKind;
 use crate::model::{ChangeKind, Comment};
 
 pub fn render(frame: &mut Frame, app: &App) {
     let area = frame.area();
-    let rows = vrows(area);
-    let (diff_area, files_area) = body_split(&rows, app.list_pct);
+    let p = panes(area, app.list_pct);
 
-    render_tab_bar(frame, app, rows[0]);
-    render_diff_view(frame, app, diff_area);
-    render_file_list(frame, app, files_area);
-    render_status_bar(frame, app, rows[2]);
+    render_tab_bar(frame, app, p.tab);
+    render_diff_view(frame, app, p.diff);
+    render_file_list(frame, app, p.files);
+    render_status_bar(frame, app, p.status);
 
     if app.mode == Mode::List {
         render_comments_list(frame, app, area);
@@ -51,14 +50,26 @@ fn footer_height(width: u16) -> u16 {
     FOOTER_COLS.div_ceil(width.max(1)).clamp(1, 3)
 }
 
-/// The body split into `(diff, files)` outer rects, the file list taking `list_pct` percent.
-fn body_split(rows: &[Rect], list_pct: u16) -> (Rect, Rect) {
-    let body = Layout::horizontal([
+/// The frame's layout rects: the diff pane, the file pane, and the whole body band. One
+/// place computes the vertical bands and the horizontal split, so every geometry helper and
+/// the renderer agree by construction (a layout change can't desync hit-testing from paint).
+struct Panes {
+    tab: Rect,
+    diff: Rect,
+    files: Rect,
+    body: Rect,
+    status: Rect,
+}
+
+fn panes(area: Rect, list_pct: u16) -> Panes {
+    let rows = vrows(area);
+    let body = rows[1];
+    let split = Layout::horizontal([
         Constraint::Percentage(100 - list_pct),
         Constraint::Percentage(list_pct),
     ])
-    .split(rows[1]);
-    (body[0], body[1])
+    .split(body);
+    Panes { tab: rows[0], diff: split[0], files: split[1], body, status: rows[2] }
 }
 
 /// The whole body band (between the tab bar and status bar), for divider hit-testing.
@@ -70,11 +81,10 @@ pub fn body_rect(area: Rect) -> Rect {
 /// Whether `(col, row)` lands on the draggable divider between the two panes.
 #[must_use]
 pub fn hit_divider(area: Rect, list_pct: u16, col: u16, row: u16) -> bool {
-    let rows = vrows(area);
-    let (_, files_area) = body_split(&rows, list_pct);
-    let in_body = row >= rows[1].y && row < rows[1].y + rows[1].height;
+    let p = panes(area, list_pct);
+    let in_body = row >= p.body.y && row < p.body.y + p.body.height;
     // A 3-column grab zone straddling the abutting pane borders.
-    in_body && col + 1 >= files_area.x && col <= files_area.x + 1
+    in_body && col + 1 >= p.files.x && col <= p.files.x + 1
 }
 
 /// The file-row index a click at `(col, row)` lands on, or `None` if outside the list.
@@ -88,9 +98,7 @@ pub fn hit_file(
     n_files: usize,
     file_scroll: usize,
 ) -> Option<usize> {
-    let rows = vrows(area);
-    let (_, files_area) = body_split(&rows, list_pct);
-    let inner = inner_rect(files_area);
+    let inner = inner_rect(panes(area, list_pct).files);
     if !contains(inner, col, row) {
         return None;
     }
@@ -101,17 +109,13 @@ pub fn hit_file(
 /// The number of file rows visible in the file pane, used to clamp the file-list scroll.
 #[must_use]
 pub fn file_viewport_height(area: Rect, list_pct: u16) -> usize {
-    let rows = vrows(area);
-    let (_, files_area) = body_split(&rows, list_pct);
-    inner_rect(files_area).height as usize
+    inner_rect(panes(area, list_pct).files).height as usize
 }
 
 /// Whether `(col, row)` falls in the file pane, so the wheel scrolls the list it is over.
 #[must_use]
 pub fn in_files_pane(area: Rect, list_pct: u16, col: u16, row: u16) -> bool {
-    let rows = vrows(area);
-    let (_, files_area) = body_split(&rows, list_pct);
-    contains(files_area, col, row)
+    contains(panes(area, list_pct).files, col, row)
 }
 
 /// The logical diff-row index a click at `(col, row)` lands on, or `None` if outside the
@@ -126,9 +130,7 @@ pub fn hit_diff(
     heights: &[usize],
     diff_scroll: usize,
 ) -> Option<usize> {
-    let rows = vrows(area);
-    let (diff_area, _) = body_split(&rows, list_pct);
-    let inner = inner_rect(diff_area);
+    let inner = inner_rect(panes(area, list_pct).diff);
     if !contains(inner, col, row) {
         return None;
     }
@@ -146,20 +148,14 @@ pub fn hit_diff(
 /// The number of diff rows visible in the diff pane, used to clamp the scroll.
 #[must_use]
 pub fn diff_viewport_height(area: Rect, list_pct: u16) -> usize {
-    let rows = vrows(area);
-    let (diff_area, _) = body_split(&rows, list_pct);
-    inner_rect(diff_area).height as usize
+    inner_rect(panes(area, list_pct).diff).height as usize
 }
 
 /// The display height (rows on screen) of each visible logical diff row, honoring wrap.
 #[must_use]
 pub fn diff_row_heights(app: &App, area: Rect) -> Vec<usize> {
-    let rows = vrows(area);
-    let (diff_area, _) = body_split(&rows, app.list_pct);
-    let width = inner_rect(diff_area).width as usize;
-    let total_lines: usize =
-        app.diff.rows.iter().map(|r| if r.is_content() { 1 } else { r.hidden() }).sum();
-    let gutter_w = gutter_width(total_lines);
+    let width = inner_rect(panes(area, app.list_pct).diff).width as usize;
+    let gutter_w = gutter_for(&app.diff);
     // A row's display height is its wrapped code lines plus any inline comment cards under
     // it (excluding a card whose comment is being edited), so scroll-clamping and hit-testing
     // match what the renderer paints.
@@ -207,9 +203,7 @@ fn composer_content_width(width: usize) -> usize {
 /// reserve the comment box without a `Frame` (mirrors [`diff_viewport_height`]).
 #[must_use]
 pub fn diff_inner_width(area: Rect, list_pct: u16) -> usize {
-    let rows = vrows(area);
-    let (diff_area, _) = body_split(&rows, list_pct);
-    inner_rect(diff_area).width as usize
+    inner_rect(panes(area, list_pct).diff).width as usize
 }
 
 /// The comment box's display lines at `content_w`: each input line word-wrapped (via the
@@ -528,11 +522,7 @@ fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
         return;
     }
     let width = inner.width as usize;
-    // Size the gutter to the file's largest line number, so it does not resize when a
-    // fold toggles (folds hide lines but keep the numbering).
-    let total_lines: usize =
-        app.diff.rows.iter().map(|r| if r.is_content() { 1 } else { r.hidden() }).sum();
-    let gutter_w = gutter_width(total_lines);
+    let gutter_w = gutter_for(&app.diff);
     let layout = RowLayout {
         gutter_w,
         width,
@@ -651,6 +641,16 @@ fn cursor_bg(focused: bool) -> Color {
 /// The line-number column width for a diff of `rows` lines.
 fn gutter_width(rows: usize) -> usize {
     rows.to_string().len().max(3)
+}
+
+/// The gutter width for a whole `FileDiff`, sized to its largest line number so it does not
+/// resize when a fold toggles (folds hide lines but keep the numbering). One definition,
+/// shared by `diff_row_heights` (measuring) and `render_diff_view` (painting), so the
+/// measured and painted geometry can never disagree.
+fn gutter_for(diff: &FileDiff) -> usize {
+    let total_lines: usize =
+        diff.rows.iter().map(|r| if r.is_content() { 1 } else { r.hidden() }).sum();
+    gutter_width(total_lines)
 }
 
 /// The gutter prefix width: the change bar plus the right-aligned line number and a space.

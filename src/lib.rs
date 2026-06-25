@@ -137,9 +137,9 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, poll: Duration) -> 
                     );
                 }
                 Event::Mouse(m) => {
-                    let size = terminal.size()?;
-                    let area = Rect::new(0, 0, size.width, size.height);
-                    if let Err(e) = handle_mouse(app, m, area) {
+                    // Reuse this frame's `area` and `heights` (computed above for the scroll
+                    // settle) so a drag-select doesn't re-measure the whole diff per motion.
+                    if let Err(e) = handle_mouse(app, m, area, &heights) {
                         app.status = format!("error: {e}");
                     }
                     logln!(
@@ -258,7 +258,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
     Ok(())
 }
 
-fn handle_mouse(app: &mut App, m: MouseEvent, area: Rect) -> Result<()> {
+fn handle_mouse(app: &mut App, m: MouseEvent, area: Rect, heights: &[usize]) -> Result<()> {
     // A modal (the comment composer or the comments-list overlay) captures the screen and is
     // keyboard-driven, so the mouse is inert while one is open — otherwise clicks and the
     // wheel would drive the panes drawn underneath it.
@@ -284,14 +284,9 @@ fn handle_mouse(app: &mut App, m: MouseEvent, area: Rect) -> Result<()> {
                 app.file_scroll,
             ) {
                 app.select_file(i)?;
-            } else if let Some(i) = ui::hit_diff(
-                area,
-                app.list_pct,
-                m.column,
-                m.row,
-                &ui::diff_row_heights(app, area),
-                app.diff_scroll,
-            ) {
+            } else if let Some(i) =
+                ui::hit_diff(area, app.list_pct, m.column, m.row, heights, app.diff_scroll)
+            {
                 app.focus = Focus::Diff;
                 app.diff_cursor = i;
                 app.select_anchor = None;
@@ -303,14 +298,9 @@ fn handle_mouse(app: &mut App, m: MouseEvent, area: Rect) -> Result<()> {
             if app.resizing {
                 let body = ui::body_rect(area);
                 app.drag_divider(body.width, m.column.saturating_sub(body.x));
-            } else if let Some(i) = ui::hit_diff(
-                area,
-                app.list_pct,
-                m.column,
-                m.row,
-                &ui::diff_row_heights(app, area),
-                app.diff_scroll,
-            ) {
+            } else if let Some(i) =
+                ui::hit_diff(area, app.list_pct, m.column, m.row, heights, app.diff_scroll)
+            {
                 app.drag_select_to(i);
             }
         }
