@@ -15,7 +15,7 @@ The viewer renders a `FileDiff` — the selected file modeled as a list of rows,
 What the reviewer sees (unified view, a renamed TypeScript file):
 
 ```
- utils.ts → code_utils.ts                                      −7 +4
+ utils.ts → code_utils.ts
  ⋯   11 unmodified lines
  15    export function createSpanFromToken(token: ThemedToken) {
  16 ▌ const element = document.createElement('div');     ← deletion (red bar + tint)
@@ -37,7 +37,6 @@ What the reviewer sees (unified view, a renamed TypeScript file):
 |-------|------|---------|
 | `path` | string | Repo-relative path; the new path for a rename. |
 | `previous_path` | string? | The old path when the file was renamed; absent otherwise. |
-| `change` | enum | One of `added`, `modified`, `deleted`, `renamed`, `untracked`. |
 | `state` | enum | `normal` shows rows; `binary` and `too_large` show a notice instead. |
 | `rows` | Row[] | The render-and-cursor units, in display order. |
 
@@ -104,7 +103,7 @@ The viewer is read-only and recomputed on every refresh, so it never persists or
 - A file beyond the size budget renders as `too_large` with a notice — never a hang while diffing or highlighting.
 - A `binary` file renders `binary — no line comments`.
 - A highlighting failure (unknown language, grammar error) falls back to plain `spans`; the diff still renders.
-- A diff with no content lines — a pure rename, a mode-only change, an empty file — renders its header and a one-line notice, not an empty pane. A `\ No newline at end of file` marker renders as a dim trailing note, not a content row.
+- A diff with no content lines — a pure rename, a mode-only change, an empty file — renders its header and a one-line notice, not an empty pane.
 - A refresh recomputes the model from current content; the line numbers a saved or in-progress comment anchors to are unaffected, so no comment is lost or re-bound.
 
 ## Non-goals

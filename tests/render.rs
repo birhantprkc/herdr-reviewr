@@ -385,6 +385,13 @@ fn file_and_diff_clicks_map_to_row_indices() {
     let heights = ui::diff_row_heights(&app, AREA);
     assert_eq!(ui::hit_diff(AREA, app.list_pct, 10, 2, &heights, 0), Some(0));
     assert_eq!(ui::hit_diff(AREA, app.list_pct, 10, 3, &heights, 0), Some(1));
+    // With a nonzero scroll and wrapped (multi-row) lines, the click must skip the
+    // scrolled-off rows and account for each visible row's display height. Rows are
+    // 2 tall each; diff_scroll=1 puts row index 1 at the top of the pane (inner.y == 2).
+    let tall = [2usize, 2, 2, 2];
+    assert_eq!(ui::hit_diff(AREA, app.list_pct, 10, 2, &tall, 1), Some(1)); // top visible row
+    assert_eq!(ui::hit_diff(AREA, app.list_pct, 10, 3, &tall, 1), Some(1)); // its second display row
+    assert_eq!(ui::hit_diff(AREA, app.list_pct, 10, 4, &tall, 1), Some(2)); // next logical row
 }
 
 #[test]

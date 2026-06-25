@@ -55,7 +55,7 @@ These are not built here; the architecture only stays open to them.
 
 ## Open decisions
 
-- None.
+- The exact JSON envelope of `herdr agent list` is not pinned by the CLI contract. The resolver accepts the three plausible shapes (a bare array, `result.agents`, and `agents`) until the format is confirmed, then collapses to the one real shape.
 
 ## Related specs
 

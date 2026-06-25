@@ -15,7 +15,7 @@ categories = ["command-line-utilities", "development-tools"]
 anyhow = "1"
 ratatui = "0.30"
 serde_json = "1"
-similar = { version = "3.1.1", features = ["text", "inline"] }
+similar = { version = "3.1.1", features = ["text"] }
 syntect = { version = "5.3.0", default-features = false, features = ["default-fancy"] }
 two-face = "0.5.1"
 unicode-width = "0.2"

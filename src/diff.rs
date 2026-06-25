@@ -2,8 +2,7 @@
 //! content, syntax-highlighted, ready to paint.
 //!
 //! See `specs/diff-view.md`. This module is terminal-free — a `Span` carries an RGB
-//! color, and `src/ui.rs` maps it to a ratatui color. Milestone 1 renders the whole
-//! file (no folds, no word emphasis); both arrive in milestone 2.
+//! color, and `src/ui.rs` maps it to a ratatui color.
 
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -470,7 +469,7 @@ mod tests {
         assert_eq!(ins.new_no(), Some(2));
         assert_eq!(del.marker_text(), "-beta");
         assert_eq!(ins.marker_text(), "+BETA");
-        // The whole file is shown — context rows surround the change (no folds in M1).
+        // The whole file is shown — context rows surround the change.
         assert!(d.rows.iter().filter(|r| matches!(r, Row::Context { .. })).count() >= 2);
     }
 

@@ -58,6 +58,7 @@ scripts/old_runner.py                 D   -47
 | field | type | meaning |
 |-------|------|---------|
 | `path` | string | Repo-relative path; the new path for a rename. |
+| `previous_path` | string? | The old path when the file was renamed, for diffing against its real old content; absent otherwise. |
 | `kind` | enum | One of `added`, `modified`, `deleted`, `renamed`, `untracked`. |
 | `additions` | integer | Lines added in the scope; an untracked file counts as all additions. |
 | `deletions` | integer | Lines removed in the scope. |

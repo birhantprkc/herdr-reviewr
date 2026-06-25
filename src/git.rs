@@ -193,10 +193,27 @@ fn parse_numstat(out: &str) -> HashMap<String, (u32, u32)> {
         if let Some(path) = it.next()
             && !path.is_empty()
         {
-            map.insert(path.to_string(), (add, del));
+            map.insert(numstat_new_path(path), (add, del));
         }
     }
     map
+}
+
+/// `git --numstat` renders a rename's path as `old => new`, optionally factoring the
+/// common prefix/suffix into a brace segment (`src/{old.rs => new.rs}`, `{src => lib}/f`).
+/// Reduce it to the new path so the counts key matches `--name-status`'s new path.
+fn numstat_new_path(path: &str) -> String {
+    if !path.contains("=>") {
+        return path.to_string();
+    }
+    if let Some(open) = path.find('{')
+        && let Some(close) = path[open..].find('}').map(|i| open + i)
+    {
+        let inner = &path[open + 1..close];
+        let new = inner.split("=>").nth(1).unwrap_or(inner).trim();
+        return format!("{}{}{}", &path[..open], new, &path[close + 1..]);
+    }
+    path.split("=>").nth(1).unwrap_or(path).trim().to_string()
 }
 
 /// `(kind, path, previous_path)` from `git diff --name-status`. A rename takes the new path
@@ -231,6 +248,18 @@ mod tests {
         let m = parse_numstat("18\t8\tsrc/a.rs\n-\t-\tassets/logo.png\n");
         assert_eq!(m["src/a.rs"], (18, 8));
         assert_eq!(m["assets/logo.png"], (0, 0));
+    }
+
+    #[test]
+    fn numstat_keys_renames_under_the_new_path() {
+        // `--numstat` factors the rename into `old => new`, with a brace segment when the
+        // paths share a prefix/suffix; the counts must key under the new path.
+        let m = parse_numstat(
+            "3\t1\tsrc/{old.rs => new.rs}\n2\t0\told.txt => new.txt\n5\t4\t{src => lib}/x.rs\n",
+        );
+        assert_eq!(m["src/new.rs"], (3, 1));
+        assert_eq!(m["new.txt"], (2, 0));
+        assert_eq!(m["lib/x.rs"], (5, 4));
     }
 
     #[test]
