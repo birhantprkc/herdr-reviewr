@@ -247,7 +247,8 @@ impl App {
             .or_else(|| self.first_file_row())
             .unwrap_or(0)
             .min(self.file_rows.len().saturating_sub(1));
-        self.reveal_files = true; // the tree may have reshuffled; keep the cursor visible
+        // A poll preserves the file-list wheel scroll — it does not reveal the cursor.
+        // Explicit actions (navigation, a scope switch) request their own reveal.
         // While composing, the open diff is frozen so the anchor under the comment
         // cannot shift beneath the writer.
         if !self.composing() {
@@ -286,10 +287,16 @@ impl App {
             self.reset_diff_view();
         } else {
             let last = self.visible.len() - 1;
-            self.diff_cursor = self.diff_cursor.min(last);
+            let clamped = self.diff_cursor.min(last);
+            // A poll preserves the wheel scroll: only re-settle when a shrunk diff forced the
+            // cursor to move. Revealing unconditionally here would snap the viewport back to
+            // the cursor on every refresh, undoing a wheel scroll.
+            if clamped != self.diff_cursor {
+                self.reveal_diff = true;
+            }
+            self.diff_cursor = clamped;
             self.diff_scroll = self.diff_scroll.min(last);
             self.select_anchor = self.select_anchor.map(|a| a.min(last));
-            self.reveal_diff = true; // a shrunk diff may have clamped the cursor; re-settle
         }
     }
 
@@ -445,6 +452,9 @@ impl App {
             self.cache = DiffCache::new();
             self.reset_diff_view();
             self.reload()?;
+            // An explicit scope switch resets to the top, so reveal the reset cursor (a poll,
+            // which also calls reload, deliberately does not).
+            self.reveal_files = true;
         }
         Ok(())
     }

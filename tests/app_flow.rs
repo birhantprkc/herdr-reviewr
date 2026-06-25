@@ -217,6 +217,52 @@ fn horizontal_scroll_is_inert_while_wrapping() {
     assert_eq!(app.h_scroll, 8, "h-scroll moves once wrap is off");
 }
 
+#[test]
+fn a_poll_preserves_the_wheel_scroll_in_both_panes() {
+    use std::fmt::Write as _;
+    let r = Repo::init();
+    let (mut old, mut new) = (String::new(), String::new());
+    for i in 0..60 {
+        let _ = writeln!(old, "line {i}");
+        let _ = writeln!(new, "LINE {i}");
+    }
+    r.write("big.rs", &old);
+    for i in 0..20 {
+        r.write(&format!("f{i:02}.txt"), "one\n");
+    }
+    r.commit_all("init");
+    r.write("big.rs", &new);
+    for i in 0..20 {
+        r.write(&format!("f{i:02}.txt"), "two\n");
+    }
+    let mut app = app_on(&r);
+
+    // Open the long file and wheel its diff down; the cursor stays at the top.
+    app.select_file(file_row(&app, "big.rs")).unwrap();
+    app.focus = Focus::Diff;
+    app.wheel_diff(20);
+    app.bound_diff_scroll(10);
+    let diff_scroll = app.diff_scroll;
+    assert!(diff_scroll > 0);
+    // Wheel the file list down too.
+    app.wheel_files(8);
+    app.bound_file_scroll(6);
+    let file_scroll = app.file_scroll;
+    assert!(file_scroll > 0);
+
+    // A poll reloads the same unchanged content. It must request no reveal, so the next
+    // frame leaves both wheel scrolls where they are (the regression snapped them to the top).
+    app.reveal_diff = false;
+    app.reveal_files = false;
+    app.reload().unwrap();
+    assert!(!app.reveal_diff, "a poll does not reveal the diff cursor");
+    assert!(!app.reveal_files, "a poll does not reveal the file cursor");
+    app.bound_diff_scroll(10);
+    app.bound_file_scroll(6);
+    assert_eq!(app.diff_scroll, diff_scroll, "the diff wheel scroll survives the poll");
+    assert_eq!(app.file_scroll, file_scroll, "the file-list wheel scroll survives the poll");
+}
+
 /// The index of the first diff row with the given marker (`'+'`, `'-'`, or `' '`).
 fn row_with(app: &App, marker: char) -> usize {
     app.diff.rows.iter().position(|r| r.marker() == marker).expect("a row with that marker")
