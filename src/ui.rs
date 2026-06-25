@@ -624,8 +624,8 @@ mod cat {
 }
 
 // Structural diff fills tuned for the dark base; syntax token colors come from the theme.
-const DEL_BG: Color = Color::Rgb(0x3a, 0x27, 0x30);
-const INS_BG: Color = Color::Rgb(0x22, 0x33, 0x2b);
+const DEL_BG: Color = Color::Rgb(0x45, 0x23, 0x2f);
+const INS_BG: Color = Color::Rgb(0x1f, 0x3a, 0x2a);
 // Word-emphasis fills — a brighter shade of the row tint over the changed words.
 const EMPH_DEL_BG: Color = Color::Rgb(0x6e, 0x34, 0x46);
 const EMPH_INS_BG: Color = Color::Rgb(0x30, 0x55, 0x3f);
