@@ -46,9 +46,9 @@ Every action has a keyboard binding. The mouse-relevant ones also work by click 
 | collapse / expand the directory under the cursor | `←` / `→` | click the directory row |
 | switch focus between the file list and the diff | `tab` | click a pane |
 | scroll the focused pane (diff or file list) | `PageUp` / `PageDown` / `ctrl+u` / `ctrl+d` | wheel over the pane |
-| scroll the diff horizontally, when wrap is off | `←` / `→` | — |
+| scroll the diff horizontally, when wrap is off and not on a fold | `←` / `→` | — |
 | switch scope | `u` uncommitted / `b` branch | click the scope in the header |
-| expand the fold under the cursor | `enter` | click the `⋯` fold row |
+| expand the fold under the cursor | `→` | click the `⋯` fold row |
 | toggle line wrap | `w` | — |
 | resize the panes — widen / narrow the file list | `]` / `[` | drag the divider between the panes |
 | select a line range, removed lines included | `v` then move | click-drag in the diff |

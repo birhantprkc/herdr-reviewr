@@ -498,6 +498,13 @@ impl App {
             && self.file_rows.get(self.file_cursor).is_some_and(|r| r.dir_path().is_some())
     }
 
+    /// Whether the diff cursor is on a fold row — the row `→` expands (elsewhere `→` scrolls
+    /// the diff sideways). Folds are expand-only, so `←` never collapses one.
+    pub fn on_fold(&self) -> bool {
+        self.focus == Focus::Diff
+            && self.visible.get(self.diff_cursor).and_then(Row::fold_anchor).is_some()
+    }
+
     /// Expand the directory under the cursor (`→`); a no-op if it is a file or already open.
     pub fn expand_dir(&mut self) {
         if let Some(path) = self.dir_under_cursor()

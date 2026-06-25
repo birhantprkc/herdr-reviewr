@@ -221,9 +221,6 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
         (Char('q'), _) => app.should_quit = true,
         (Char('r'), _) => app.reload()?,
         (Tab, _) => app.toggle_focus(),
-        // `enter` expands a fold in the diff. In the file list it does nothing: selecting a
-        // file already opens it, `←`/`→` toggle a directory, and `tab` switches focus.
-        (Enter, _) if app.focus == Focus::Diff => app.expand_fold(),
         (Char('j') | Down, _) => app.move_cursor(1)?,
         (Char('k') | Up, _) => app.move_cursor(-1)?,
         // Page keys scroll the focused pane.
@@ -235,9 +232,11 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
         // `]` widens the file list, `[` narrows it (widening the diff).
         (Char(']'), _) => app.resize_list(4),
         (Char('['), _) => app.resize_list(-4),
-        // On a folder, `←`/`→` collapse/expand it; elsewhere they scroll the diff sideways.
+        // `←`/`→` expand/collapse the collapsible under the cursor — a directory in the file
+        // list, a fold in the diff (expand-only); elsewhere they scroll the diff sideways.
         (Right, _) if app.on_folder() => app.expand_dir(),
         (Left, _) if app.on_folder() => app.collapse_dir(),
+        (Right, _) if app.on_fold() => app.expand_fold(),
         (Right, _) => app.scroll_h(8),
         (Left, _) => app.scroll_h(-8),
         (Char('u'), false) => app.set_scope(Scope::Uncommitted)?,

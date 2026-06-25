@@ -151,12 +151,14 @@ fn a_fold_expands_permanently_and_keeps_the_cursor_in_range() {
     let folded = app.visible.len();
     assert!(app.visible.iter().any(|row| row.hidden() > 0), "opens folded");
 
-    // Land on the leading fold and expand it — the visible row count grows.
+    // Land on the leading fold and expand it (the `→` action) — the visible count grows.
     app.diff_cursor = app.visible.iter().position(|row| row.hidden() > 0).unwrap();
+    assert!(app.on_fold(), "`→` expands here");
     app.expand_fold();
     let expanded = app.visible.len();
     assert!(expanded > folded, "expanding reveals the hidden lines");
     assert!(app.diff_cursor < app.visible.len(), "cursor stays in range");
+    assert!(!app.on_fold(), "the fold is gone, so `→` now scrolls instead");
 
     // Expansion is permanent — pressing again on a revealed content line does nothing.
     app.expand_fold();
