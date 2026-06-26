@@ -10,7 +10,22 @@ permissions:
   contents: write
 
 jobs:
+  # A tag push creates no Release object on its own, and the upload action below uploads to an
+  # existing release — so create it first (idempotent), and have the matrix depend on it.
+  create-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create the release if it doesn't exist
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            || gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+                 --title "herdr-reviewr $GITHUB_REF_NAME" --verify-tag --generate-notes
+
   binaries:
+    needs: create-release
     name: ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     strategy:
