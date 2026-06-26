@@ -5,11 +5,11 @@ mod common;
 use std::collections::HashMap;
 
 use common::Repo;
-use herdr_review::git::{
+use herdr_reviewr::git::{
     all_files, changed_against_tree, changed_files, file_content, merge_base, read_baseline_ref,
     snapshot_worktree, worktree_key, write_baseline_ref,
 };
-use herdr_review::model::{ChangeKind, ChangedFile, Scope};
+use herdr_reviewr::model::{ChangeKind, ChangedFile, Scope};
 
 fn by_path(files: &[ChangedFile]) -> HashMap<&str, &ChangedFile> {
     files.iter().map(|f| (f.path.as_str(), f)).collect()

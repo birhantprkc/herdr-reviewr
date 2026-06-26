@@ -70,7 +70,7 @@ if [ -z "$pane" ]; then
 fi
 [ -n "$pane" ] || exit 0
 
-new=$("$H" plugin pane open --plugin "${HERDR_PLUGIN_ID:-reviewr}" --entrypoint sidebar \
+new=$("$H" plugin pane open --plugin "${HERDR_PLUGIN_ID:-persiyanov.reviewr}" --entrypoint sidebar \
   --placement split --direction right --target-pane "$pane" --cwd "$cwd" --no-focus 2>/dev/null \
   | jq -r '.result.plugin_pane.pane.pane_id // empty' 2>/dev/null)
 [ -n "$new" ] && printf '%s' "$new" > "$state"

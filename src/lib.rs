@@ -1,4 +1,4 @@
-//! herdr-review — a herdr-native review sidebar.
+//! herdr-reviewr — a herdr-native review sidebar.
 //!
 //! Browse an agent's changes (uncommitted / branch), leave line-range comments,
 //! and send them back to the agent (or the clipboard) — entirely in a herdr pane.

@@ -1,6 +1,6 @@
 # Specs
 
-The living design of herdr-review. One concept per doc, always current.
+The living design of herdr-reviewr. One concept per doc, always current.
 
 Each doc states end-state truth: what must be *true* when a change is done, never what is built today or when. The code holds the implementation; these specs hold the meaning, the invariants, and the decisions behind them.
 

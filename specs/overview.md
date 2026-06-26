@@ -4,13 +4,13 @@ Created: 2026-06-23
 Last edited: 2026-06-26
 ---
 
-# herdr-review
+# herdr-reviewr
 
-herdr-review is a terminal review sidebar that runs in a herdr pane, where you browse a coding agent's changes, comment on line ranges, and send those comments back to the agent.
+herdr-reviewr is a terminal review sidebar that runs in a herdr pane, where you browse a coding agent's changes, comment on line ranges, and send those comments back to the agent.
 
 ## Overview
 
-The product is one binary (`herdr-review`, Rust + ratatui) in a right-hand herdr split pane, pointed at one git worktree. It never edits the worktree and sends nothing on its own; its only git write is a private `last-turn` baseline ref (`herdr-host.md`). It renders in your real terminal, so fonts and theming are whatever you already run.
+The product is one binary (`herdr-reviewr`, Rust + ratatui) in a right-hand herdr split pane, pointed at one git worktree. It never edits the worktree and sends nothing on its own; its only git write is a private `last-turn` baseline ref (`herdr-host.md`). It renders in your real terminal, so fonts and theming are whatever you already run.
 
 A reviewer's loop:
 

@@ -1,50 +1,129 @@
-# herdr-review
+# herdr-reviewr
 
-A herdr-native review sidebar — a persistent right-pane TUI for reviewing an
-agent's changes and sending comments back to the agent, inspired by Conductor's
-review sidebar but living entirely in the terminal.
+A native terminal **code-review sidebar** for [herdr](https://herdr.dev) — review a coding
+agent's changes in a right-hand pane and send line comments back to the chat, without leaving
+the terminal.
 
-## Goal
+![demo](assets/demo.gif)
 
-A single pane, always present on the right of a herdr workspace, with tabs:
+## What it does
 
-- **All files** — the repo file tree
-- **Changes** — changed files + stats; click a file → its diff
-- **Checks** — PR/CI status (via `gh`), git status, and the comment list
+A persistent split pane beside your agent, pointed at one git worktree:
+
+- **Changes tab** — the changed files for the active scope, with `+/-` stats; pick a file to
+  read its syntax-highlighted diff.
+- **All files tab** — browse the whole worktree tree, not just what changed; the same diff pane
+  renders any file's current content.
+- **Comments** — select a line range in a diff, write a comment, repeat. The comment list is a
+  surface of its own.
 
 …and the core loop:
 
-> select a line range in a diff → write a comment → repeat →
-> **Add all to chat** → each comment is sent to the agent as `path:start-end - comment`.
+> select a line range → write a comment → repeat → **Add all to chat** → each comment lands in
+> the agent's input as `path:start-end — comment`, ready for you to add context and send.
 
-Diff scopes: **uncommitted**, **all changes on branch**, and (nice-to-have)
-**last turn** (snapshot the worktree on each agent `working→idle` transition).
+It **never edits your worktree** and sends nothing on its own. Its only git write is a private
+`last-turn` baseline ref under `refs/reviewr/`.
 
-## Design (minimal, no external review engine)
+### Diff scopes
 
+- **uncommitted** — working tree vs `HEAD` (staged, unstaged, and untracked).
+- **branch** — `HEAD` vs the merge-base with the base branch (`origin/main` → `origin/master`
+  → `main` → `master`, or `--base`).
+- **last turn** — only what the agent changed since its most recent turn started (see
+  [Limitations](#limitations)).
+
+## Requirements
+
+- **herdr ≥ 0.7.0** (the plugin system).
+- **git** on `PATH`.
+- A **truecolor (24-bit), dark** terminal with Unicode box-drawing support.
+- macOS or Linux.
+
+## Install
+
+From the herdr marketplace (downloads a prebuilt binary — no Rust toolchain needed):
+
+```bash
+herdr plugin install persiyanov/herdr-reviewr
 ```
-herdr plugin (herdr-plugin.toml)
-  ├─ [[panes]] split (right)  → runs `herdr-review`
-  ├─ keybind  prefix+d        → toggle
-  └─ [[events]] pane.agent_status_changed → snapshot worktree for "last turn"
 
-herdr-review  (one binary; ratatui)
-  ├─ data:     git status / diff / merge-base   (+ gh later for Checks)
-  ├─ comments: Vec<Comment { path, start, end, text }>   (in-memory)
-  └─ herdr:    $HERDR_SOCKET_PATH → events.subscribe; agent.send for "Add all to chat"
+Then open the sidebar with the **reviewr: toggle sidebar** action (bind it in your herdr config),
+or let it auto-open on `worktree.created`.
+
+### From source (for contributors)
+
+`herdr plugin link` skips the download build step, so place a locally built binary where the
+pane command looks for it — `$HERDR_PLUGIN_ROOT/bin/herdr-reviewr`:
+
+```bash
+git clone https://github.com/persiyanov/herdr-reviewr
+cd herdr-reviewr
+cargo build --release
+mkdir -p bin && cp target/release/herdr-reviewr bin/
+herdr plugin link .
 ```
 
-No dependency on tuicr/hunk/revdiff — comments are a plain in-memory list; the
-only "API" we lean on is the herdr CLI/socket (`agent send`, `events.subscribe`,
-`pane.split`) plus `git`/`gh`.
+## Configuration
 
-## Status
+CLI flags on the pane command (there is no config file yet):
 
-Bootstrapping. First milestone: a wiring spike that proves the three foundations —
-(1) a split pane opens reliably, (2) `herdr agent send` lands text in the agent
-pane, (3) `events.subscribe` fires on `pane.agent_status_changed`.
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--poll <ms>` | `2000` | worktree poll interval (min `200`) |
+| `--base <ref>` | auto | base branch for `branch` scope |
+| `--theme <name>` | Catppuccin Mocha | **syntax** theme (structural UI colors are fixed) |
+| `--wrap` | off | soft-wrap long diff lines |
 
-## References
+## Limitations
 
-- herdr socket API: https://herdr.dev/docs/socket-api/
-- herdr plugins: https://herdr.dev/docs/plugins/
+This is a focused v0.1. Known constraints, honestly:
+
+**Terminal & theme**
+- **Truecolor required** — colors are 24-bit RGB with no 256/8-color fallback; basic terminals
+  render wrong.
+- **Dark terminal assumed** — the structural UI colors are **hardcoded to Catppuccin Mocha**.
+  `--theme` only swaps the *syntax* theme (and silently falls back on an unknown name); there is
+  no light theme and no configurable UI palette.
+- **Add/remove are distinguished by red/green** — no secondary cue for colorblind users yet.
+- Unicode box-drawing glyphs are required (no Nerd Font needed).
+
+**Platform**
+- **macOS and Linux only** (no Windows).
+- **Clipboard export** uses `pbcopy` (macOS) or `wl-copy`/`xclip`/`xsel` (Linux); if none is
+  installed it errors clearly — use **Add all to chat** instead. (OSC 52 and Windows are roadmap.)
+
+**herdr coupling**
+- **Add all to chat** needs a resolvable agent pane (the agent in your tab, or the sole agent in
+  the workspace); otherwise it no-ops and keeps your comments. Browsing and diffing need no herdr.
+- **last turn is poll-based** (2 s default): a turn that starts and finishes inside one poll is
+  never snapshotted on its own, so the scope shows everything since the last *observed* turn start
+  — never lines the agent didn't write, but possibly more than one turn.
+
+**Review model**
+- **Comments are in-memory and single-session** — closing the pane loses any not yet exported.
+- **Bulk export only**, consume-on-success: a send delivers the whole set and clears it (no
+  duplicates, no per-comment send); a failed send leaves everything in place.
+- **No line-number rebasing** — a comment's diff snippet, not its line number, keeps it locatable;
+  stale comments are flagged, never silently dropped.
+- **One sidebar per worktree** (two on the same worktree race the baseline ref, last-writer-wins).
+
+**Budgets**
+- Files over **2 MB** or **50,000 lines** show a "too large" notice; **binary** files aren't
+  diffed.
+
+## Roadmap
+
+A Checks/CI tab (`gh` PR + CI status), a config file, customizable keybindings, structured
+(JSON) export, in-diff search, a side-by-side split view, mark-file-reviewed, a selectable/light
+UI theme, and OSC 52 clipboard.
+
+## Design
+
+The living design lives in [`specs/`](specs/) — one concept per doc, always current.
+
+## License
+
+[MIT](LICENSE). Bundled syntax theme: [Catppuccin Mocha](https://github.com/catppuccin/bat)
+(`assets/Catppuccin Mocha.tmTheme`, MIT). Syntax highlighting via
+[syntect](https://github.com/trishume/syntect) and [two-face](https://github.com/CosmicHorrorDev/two-face).

@@ -41,7 +41,17 @@ pub trait ExportTarget {
     fn label(&self) -> &'static str;
 }
 
-/// The system clipboard, via `pbcopy`.
+/// A clipboard tool and the args that make it read stdin into the system clipboard. Tried in
+/// order — the first one present on `PATH` wins. macOS ships `pbcopy`; Linux needs one of these
+/// installed (Wayland `wl-copy`, or X11 `xclip`/`xsel`). OSC 52 and Windows are roadmap.
+const CLIPBOARD_TOOLS: &[(&str, &[&str])] = &[
+    ("pbcopy", &[]),
+    ("wl-copy", &[]),
+    ("xclip", &["-selection", "clipboard"]),
+    ("xsel", &["--clipboard", "--input"]),
+];
+
+/// The system clipboard, via the first available platform clipboard tool.
 #[derive(Debug)]
 pub struct Clipboard;
 
@@ -51,19 +61,43 @@ impl ExportTarget for Clipboard {
     }
 
     fn export(&self, text: &str) -> Result<()> {
-        let mut child =
-            Command::new("pbcopy").stdin(Stdio::piped()).spawn().context("spawning pbcopy")?;
+        let (cmd, args) = select_tool(CLIPBOARD_TOOLS, tool_on_path).context(
+            "no clipboard tool found (install wl-clipboard, xclip, or xsel) — \
+             use \"Add all to chat\" instead",
+        )?;
+        let mut child = Command::new(cmd)
+            .args(args)
+            .stdin(Stdio::piped())
+            .spawn()
+            .with_context(|| format!("spawning {cmd}"))?;
         child
             .stdin
             .as_mut()
-            .context("pbcopy stdin unavailable")?
+            .with_context(|| format!("{cmd} stdin unavailable"))?
             .write_all(text.as_bytes())
-            .context("writing to pbcopy")?;
-        if !child.wait().context("waiting for pbcopy")?.success() {
-            bail!("pbcopy exited non-zero");
+            .with_context(|| format!("writing to {cmd}"))?;
+        if !child.wait().with_context(|| format!("waiting for {cmd}"))?.success() {
+            bail!("{cmd} exited non-zero");
         }
         Ok(())
     }
+}
+
+/// The first clipboard tool the `present` predicate accepts, preserving list order.
+fn select_tool(
+    tools: &'static [(&'static str, &'static [&'static str])],
+    present: impl Fn(&str) -> bool,
+) -> Option<(&'static str, &'static [&'static str])> {
+    tools.iter().copied().find(|(cmd, _)| present(cmd))
+}
+
+/// Whether `name` resolves to a file on `PATH` — a dependency-free `which` for the clipboard
+/// probe (both shipped platforms are unix, so a file in a `PATH` dir is the executable).
+fn tool_on_path(name: &str) -> bool {
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|dir| dir.join(name).is_file())
 }
 
 /// The agent pane: fill its input via `herdr agent send`, then focus it.
@@ -87,8 +121,24 @@ impl ExportTarget for Agent {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_all, format_comment};
+    use super::{CLIPBOARD_TOOLS, format_all, format_comment, select_tool};
     use crate::model::{Comment, Side};
+
+    #[test]
+    fn clipboard_tool_selection_prefers_list_order_and_can_be_empty() {
+        // None present -> no tool (the caller surfaces the "install one" error).
+        assert!(select_tool(CLIPBOARD_TOOLS, |_| false).is_none());
+        // Only an X11 tool present -> it's chosen, with its selection args.
+        assert_eq!(
+            select_tool(CLIPBOARD_TOOLS, |c| c == "xclip"),
+            Some(("xclip", &["-selection", "clipboard"][..]))
+        );
+        // When several are present, earlier in the list wins (pbcopy over xclip).
+        assert_eq!(
+            select_tool(CLIPBOARD_TOOLS, |c| c == "pbcopy" || c == "xclip").map(|(cmd, _)| cmd),
+            Some("pbcopy")
+        );
+    }
 
     fn comment(file: &str, side: Side, start: u32, end: u32, lines: &str, text: &str) -> Comment {
         Comment {

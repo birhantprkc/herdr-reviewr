@@ -1,25 +1,25 @@
 ---
 Status: Current
 Created: 2026-06-23
-Last edited: 2026-06-25
+Last edited: 2026-06-26
 ---
 
 # herdr host
 
-How herdr-review runs inside herdr, finds its repo, sends comments to the agent, exports to the clipboard, and tracks the agent's turns for the `last-turn` scope.
+How herdr-reviewr runs inside herdr, finds its repo, sends comments to the agent, exports to the clipboard, and tracks the agent's turns for the `last-turn` scope.
 
 ## Overview
 
-herdr-review ships as a herdr plugin (`herdr-plugin.toml`): a `sidebar` pane entrypoint that runs the binary, a `toggle` action bound to a key, and a `worktree.created` event that auto-opens it for a freshly created worktree. Opening and closing the pane is herdr's job; the binary just runs in it.
+herdr-reviewr ships as a herdr plugin (`herdr-plugin.toml`): a `sidebar` pane entrypoint that runs the binary, a `toggle` action bound to a key, and a `worktree.created` event that auto-opens it for a freshly created worktree. Opening and closing the pane is herdr's job; the binary just runs in it.
 
 The plugin opens the sidebar as a right split (see `../docs/herdr-api-notes.md`):
 
 ```
-herdr plugin pane open --plugin reviewr --entrypoint sidebar \
+herdr plugin pane open --plugin persiyanov.reviewr --entrypoint sidebar \
   --placement split --direction right --target-pane <pane> --cwd <repo> --no-focus
 ```
 
-The toggle script (`herdr/sidebar.sh`) opens the sidebar for the focused pane's repo, or closes it if one is already open in the workspace (tracked in `HERDR_PLUGIN_STATE_DIR`). It is bound in user config with `[[keys.command]] type = "plugin_action"`. The pane runs `herdr-review` **by name** — resolved on `PATH`, since the pane's cwd is the repo under review, not the plugin root — so the plugin's build step installs the binary with `cargo install --path .`.
+The toggle script (`herdr/sidebar.sh`) opens the sidebar for the focused pane's repo, or closes it if one is already open in the workspace (tracked in `HERDR_PLUGIN_STATE_DIR`). It is bound in user config with `[[keys.command]] type = "plugin_action"`. The pane runs the binary by **absolute path** under the plugin root (`$HERDR_PLUGIN_ROOT/bin/herdr-reviewr`), since the pane's cwd is the repo under review, not the plugin root, and the binary is not on `PATH`. On `herdr plugin install` the build step (`herdr/install.sh`) downloads the prebuilt binary for the platform from the matching GitHub Release into that `bin/` dir; `herdr plugin link` skips the build, so a local checkout populates the same `bin/` itself (`cargo build --release && cp target/release/herdr-reviewr bin/`).
 
 ### Repo discovery
 
@@ -68,7 +68,8 @@ These are not built here; the architecture only stays open to them.
 ## Decisions
 
 - A herdr plugin, not raw pane splits — the official plugin system (`herdr-plugin.toml` with pane entrypoints, actions, and events) gives the keybind, the right-split sidebar, and worktree autolaunch, and is installable/shareable via `herdr plugin install`. Rejected: a user-config `[[keys.command]]` shell script driving `herdr pane split`, which can't declare an entrypoint pane or an event hook.
-- Pane command by name, not a relative path — a split pane runs with the repo as its cwd, so `./target/release/herdr-review` resolves against the wrong directory; the binary is invoked as `herdr-review` on `PATH`.
+- Pane command by absolute path under the plugin root, not a relative path or a bare name — a split pane runs with the repo as its cwd, so `./target/release/herdr-reviewr` resolves against the wrong directory, and the prebuilt binary is not on `PATH`; it is invoked as `$HERDR_PLUGIN_ROOT/bin/herdr-reviewr`.
+- Prebuilt binaries over build-on-install — `herdr/install.sh` downloads a release binary so users need no Rust toolchain and the install is fast; building from source stays the path for `herdr plugin link` and contributors.
 - Send via the herdr CLI, not the raw socket — `$HERDR_BIN_PATH agent send/focus/list` is the documented, transport-stable interface.
 - Browsing and clipboard need no herdr — only the agent-send export and `last-turn` tracking depend on herdr, so the rest of the review loop degrades gracefully without it.
 - Poll `agent_status`, not subscribe to events — the existing worktree poll already runs every couple of seconds and the CLI already lists agent status, so reading it there adds no socket plumbing or listener thread; the cost is missing a turn shorter than a poll. Rejected: a `pane.agent_status_changed` socket subscription, precise but heavier — a persistent socket connection and a listener thread.

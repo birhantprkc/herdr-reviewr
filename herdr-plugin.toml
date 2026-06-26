@@ -1,22 +1,24 @@
-id = "reviewr"
+id = "persiyanov.reviewr"
 name = "reviewr"
 version = "0.1.0"
 min_herdr_version = "0.7.0"
 platforms = ["macos", "linux"]
 description = "Native terminal code-review sidebar for herdr."
 
-# Installs the `herdr-review` binary to ~/.cargo/bin on `herdr plugin install`; skipped by
-# `herdr plugin link` (install it yourself with `cargo install --path .`).
+# On `herdr plugin install`, download the prebuilt `herdr-reviewr` binary for this platform from
+# the matching GitHub Release into $HERDR_PLUGIN_ROOT/bin (no Rust toolchain needed). Skipped by
+# `herdr plugin link` — for a local checkout, build it yourself with `cargo install --path .`.
 [[build]]
-command = ["cargo", "install", "--path", "."]
+command = ["bash", "herdr/install.sh"]
 
-# The sidebar pane runs the reviewr binary by name (resolved on PATH, since the pane's cwd is
-# the repo under review, not the plugin root); the toggle action places it as a right split.
+# The sidebar pane runs the downloaded binary by absolute path under the plugin root, since the
+# pane's cwd is the repo under review (not the plugin root) and the binary isn't on PATH. The
+# toggle action places it as a right split.
 [[panes]]
 id = "sidebar"
 title = "reviewr"
 placement = "split"
-command = ["herdr-review"]
+command = ["sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/herdr-reviewr\""]
 
 [[actions]]
 id = "toggle"

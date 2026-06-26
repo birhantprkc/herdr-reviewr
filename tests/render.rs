@@ -4,9 +4,9 @@
 mod common;
 
 use common::Repo;
-use herdr_review::app::{App, Focus};
-use herdr_review::model::Scope;
-use herdr_review::ui::{self, HeaderHit};
+use herdr_reviewr::app::{App, Focus};
+use herdr_reviewr::model::Scope;
+use herdr_reviewr::ui::{self, HeaderHit};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
@@ -535,7 +535,7 @@ fn last_turn_without_a_baseline_renders_the_waiting_state() {
 
 #[test]
 fn all_files_tab_bar_footer_and_count_read_for_the_tab() {
-    use herdr_review::app::Tab;
+    use herdr_reviewr::app::Tab;
     let r = Repo::init();
     r.write("a.rs", "one\n");
     r.commit_all("init");
@@ -577,7 +577,7 @@ fn a_narrow_overflowing_header_does_not_mis_map_a_click_to_send() {
 
 #[test]
 fn all_files_empty_pane_reads_select_a_file() {
-    use herdr_review::app::Tab;
+    use herdr_reviewr::app::Tab;
     let r = Repo::init();
     r.write("src/a.rs", "x\n");
     r.write("src/b.rs", "y\n"); // two children so src/ is a real collapsed dir, not a folded file

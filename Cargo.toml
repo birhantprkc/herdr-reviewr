@@ -1,12 +1,12 @@
 [package]
-name = "herdr-review"
+name = "herdr-reviewr"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.90"
 description = "A herdr-native review sidebar: browse an agent's changes and send comments back to chat, in the terminal."
 authors = ["Dmitry Persiyanov <dmitry.persiyanov@gmail.com>"]
 license = "MIT"
-repository = "https://github.com/persijano/herdr-review"
+repository = "https://github.com/persiyanov/herdr-reviewr"
 readme = "README.md"
 keywords = ["herdr", "tui", "diff", "review", "agent"]
 categories = ["command-line-utilities", "development-tools"]

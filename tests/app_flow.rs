@@ -7,9 +7,9 @@ use std::cell::RefCell;
 
 use anyhow::{Result, bail};
 use common::Repo;
-use herdr_review::app::{App, Focus, Mode};
-use herdr_review::export::ExportTarget;
-use herdr_review::model::{Scope, Side};
+use herdr_reviewr::app::{App, Focus, Mode};
+use herdr_reviewr::export::ExportTarget;
+use herdr_reviewr::model::{Scope, Side};
 
 /// An export target that records what it was handed and can be made to fail.
 struct FakeTarget {
@@ -739,7 +739,7 @@ fn the_composer_reserve_keeps_the_anchored_line_visible() {
     // Mirror the event loop: reserve the box's rows, then clamp. The anchored line must
     // stay within the narrowed viewport so it renders above the box.
     let viewport = 12;
-    let effective = viewport - herdr_review::ui::composer_height(&app, 80);
+    let effective = viewport - herdr_reviewr::ui::composer_height(&app, 80);
     clamp(&mut app, effective);
     assert!(
         (app.diff_scroll..app.diff_scroll + effective).contains(&app.diff_cursor),
@@ -879,11 +879,11 @@ fn the_comment_box_grows_as_a_long_line_wraps() {
     app.start_comment();
     // A single long line with no explicit newline must still report more than one row.
     let width = 30; // narrow diff pane
-    let one_word = herdr_review::ui::composer_height(&app, width);
+    let one_word = herdr_reviewr::ui::composer_height(&app, width);
     for ch in "the quick brown fox jumps over the lazy dog again and again".chars() {
         app.input_push(ch);
     }
-    let wrapped = herdr_review::ui::composer_height(&app, width);
+    let wrapped = herdr_reviewr::ui::composer_height(&app, width);
     assert!(wrapped > one_word, "box grew from {one_word} to {wrapped} rows as text wrapped");
 }
 
@@ -1064,7 +1064,7 @@ fn scope_cannot_change_while_composing() {
 
 #[test]
 fn tab_cannot_change_while_composing() {
-    use herdr_review::app::Tab;
+    use herdr_reviewr::app::Tab;
     let r = edited_repo();
     let mut app = app_on(&r);
     app.focus = Focus::Diff;
@@ -1367,8 +1367,8 @@ fn file_row_of(app: &App, path: &str) -> Option<usize> {
 
 #[test]
 fn all_files_tab_browses_the_whole_worktree_and_renders_content() {
-    use herdr_review::app::Tab;
-    use herdr_review::diff::View;
+    use herdr_reviewr::app::Tab;
+    use herdr_reviewr::diff::View;
     let r = Repo::init();
     r.write("src/app.rs", "fn main() {}\n");
     r.write("src/ui.rs", "fn render() {}\n");
@@ -1403,8 +1403,8 @@ fn all_files_tab_browses_the_whole_worktree_and_renders_content() {
 
 #[test]
 fn switching_tabs_restores_each_tab_selection() {
-    use herdr_review::app::Tab;
-    use herdr_review::diff::View;
+    use herdr_reviewr::app::Tab;
+    use herdr_reviewr::diff::View;
     let r = Repo::init();
     r.write("src/app.rs", "fn main() {}\n");
     r.write("README.md", "# hi\n");
@@ -1436,8 +1436,8 @@ fn switching_tabs_restores_each_tab_selection() {
 
 #[test]
 fn changed_count_and_staleness_stay_scope_based_on_all_files() {
-    use herdr_review::app::Tab;
-    use herdr_review::model::Comment;
+    use herdr_reviewr::app::Tab;
+    use herdr_reviewr::model::Comment;
     let r = Repo::init();
     r.write("a.rs", "one\n");
     r.write("b.rs", "two\n");
@@ -1470,8 +1470,8 @@ fn changed_count_and_staleness_stay_scope_based_on_all_files() {
 /// The annotation on the `All files` row for `path`: `Some(Some(_))` annotated, `Some(None)`
 /// listed-but-unchanged, `None` not visible.
 #[allow(clippy::option_option)] // outer = row found, inner = its annotation
-fn annotation_of(app: &App, path: &str) -> Option<Option<herdr_review::file_list::Annotation>> {
-    use herdr_review::file_list::RowKind;
+fn annotation_of(app: &App, path: &str) -> Option<Option<herdr_reviewr::file_list::Annotation>> {
+    use herdr_reviewr::file_list::RowKind;
     app.file_rows.iter().find_map(|row| match &row.kind {
         RowKind::File { index, annotation } if app.entries[*index].path == path => {
             Some(annotation.clone())
@@ -1482,8 +1482,8 @@ fn annotation_of(app: &App, path: &str) -> Option<Option<herdr_review::file_list
 
 #[test]
 fn all_files_annotates_changed_files_only() {
-    use herdr_review::app::Tab;
-    use herdr_review::model::ChangeKind;
+    use herdr_reviewr::app::Tab;
+    use herdr_reviewr::model::ChangeKind;
     let r = Repo::init();
     r.write("a.rs", "one\n");
     r.write("b.rs", "two\n");
@@ -1504,7 +1504,7 @@ fn all_files_annotates_changed_files_only() {
 
 #[test]
 fn switching_scope_on_all_files_remarks_in_place() {
-    use herdr_review::app::Tab;
+    use herdr_reviewr::app::Tab;
     let r = Repo::init();
     r.write("a.rs", "one\n");
     r.write("b.rs", "two\n");
@@ -1531,7 +1531,7 @@ fn switching_scope_on_all_files_remarks_in_place() {
 
 #[test]
 fn content_comment_is_stale_only_when_its_file_is_deleted() {
-    use herdr_review::app::Tab;
+    use herdr_reviewr::app::Tab;
     let r = Repo::init();
     r.write("a.rs", "alpha\nbeta\n");
     r.commit_all("init");
@@ -1558,7 +1558,7 @@ fn content_comment_is_stale_only_when_its_file_is_deleted() {
 
 #[test]
 fn the_tabs_keep_independent_selections() {
-    use herdr_review::app::Tab;
+    use herdr_reviewr::app::Tab;
     let r = Repo::init();
     r.write("a.rs", "one\n");
     r.commit_all("init"); // a clean worktree — no changes
@@ -1578,7 +1578,7 @@ fn the_tabs_keep_independent_selections() {
 
 #[test]
 fn a_file_view_comment_exports_as_path_line_with_a_context_snippet() {
-    use herdr_review::app::Tab;
+    use herdr_reviewr::app::Tab;
     let r = Repo::init();
     r.write("a.rs", "alpha\nbeta\ngamma\n");
     r.commit_all("init");
@@ -1604,8 +1604,8 @@ fn a_file_view_comment_exports_as_path_line_with_a_context_snippet() {
 
 #[test]
 fn an_oversize_file_in_all_files_degrades_to_a_notice() {
-    use herdr_review::app::Tab;
-    use herdr_review::diff::{FileState, View};
+    use herdr_reviewr::app::Tab;
+    use herdr_reviewr::diff::{FileState, View};
     let r = Repo::init();
     r.write("small.rs", "fn main() {}\n");
     r.write("big.bin", &"x\n".repeat(1_100_000)); // ~2.2 MB, over the 2 MB budget
@@ -1621,7 +1621,7 @@ fn an_oversize_file_in_all_files_degrades_to_a_notice() {
 
 #[test]
 fn switching_to_an_empty_file_view_focuses_the_tree() {
-    use herdr_review::app::Tab;
+    use herdr_reviewr::app::Tab;
     let r = Repo::init();
     r.write("a.rs", "alpha\n");
     r.commit_all("init");
@@ -1635,8 +1635,8 @@ fn switching_to_an_empty_file_view_focuses_the_tree() {
 
 #[test]
 fn a_diff_comment_does_not_render_in_the_file_view() {
-    use herdr_review::app::Tab;
-    use herdr_review::diff::View;
+    use herdr_reviewr::app::Tab;
+    use herdr_reviewr::diff::View;
     let r = Repo::init();
     r.write("a.rs", "alpha\nbeta\ngamma\n");
     r.commit_all("init");
@@ -1663,8 +1663,8 @@ fn a_diff_comment_does_not_render_in_the_file_view() {
 
 #[test]
 fn editing_a_comment_on_all_files_opens_the_file_view() {
-    use herdr_review::app::Tab;
-    use herdr_review::diff::View;
+    use herdr_reviewr::app::Tab;
+    use herdr_reviewr::diff::View;
     let r = Repo::init();
     r.write("a.rs", "alpha\nbeta\n");
     r.write("b.rs", "one\ntwo\n");
@@ -1696,7 +1696,7 @@ fn editing_a_comment_on_all_files_opens_the_file_view() {
 fn changing_scope_on_all_files_snaps_the_changes_diff_to_the_top() {
     use std::fmt::Write as _;
 
-    use herdr_review::app::Tab;
+    use herdr_reviewr::app::Tab;
     let r = Repo::init();
     let mut body = String::new();
     for i in 0..40 {
