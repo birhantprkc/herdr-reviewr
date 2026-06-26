@@ -23,3 +23,4 @@ Add a second tab, `All files`, that browses the whole worktree and turns it into
 
 - 2026-06-25: initial strategy from the approved Draft specs.
 - 2026-06-26: M1 built and reviewed. A focused review of the diff caught two regressions from the `files`→`entries` rename — the header count and `stale_files()` read the active tab's list, wrong on `All files`. Fixed by computing the scope changeset every reload regardless of tab (`changed_paths`), pinned by a test; M1's exit state gains `changed_paths` / `changed_count()`.
+- 2026-06-26: M2 shipped, then a UX-review pass, then live testing. Dropped tab-switch **seeding** (the cursor-line carry) entirely — the cross-tab carry felt unpredictable in use. Tabs are now fully independent: each keeps its own opened file and scroll, and a switch never carries a file between them (the per-tab state swap already delivers this). The header count reads `changed` on both tabs. Specs `tui.md` / `file-list.md` updated.

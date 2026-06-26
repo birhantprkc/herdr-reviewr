@@ -320,7 +320,7 @@ fn shows_tab_bar_file_list_and_diff() {
     assert!(out.contains("uncommitted"), "current scope shown");
     assert!(out.contains("hello.rs"), "file appears in the list");
     assert!(out.contains("BETA"), "diff content is rendered");
-    assert!(out.contains("file(s)"), "status bar shown");
+    assert!(out.contains("changed"), "status bar shows the changed count");
 }
 
 #[test]

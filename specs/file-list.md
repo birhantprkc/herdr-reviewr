@@ -67,7 +67,6 @@ The list is a flat sequence of visible rows over the tree; a row is a directory 
 - A directory collapses or expands with `←` / `→` or a click; `tab` moves focus to the diff to navigate and comment. There is no `enter` activation in the list — selecting a file already opens it.
 - A click selects the row under it — a file opens, a directory toggles.
 - A poll preserves the selected file and which directories are expanded, matching them by path; if the selected file left the changeset, the cursor falls back to the open file, then the first file.
-- `All files` reveals a file by expanding its ancestor directories and selecting it, used when a tab switch seeds the selection (`tui.md`).
 - In `All files` a poll adds and removes files as the worktree changes, preserving the cursor, scroll, and expanded directories by path.
 - Switching scope re-marks the `All files` tree in place — the cursor, scroll, and expanded directories hold; only the markers and stats change.
 

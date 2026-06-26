@@ -105,9 +105,6 @@ pub struct App {
     /// Set by a navigation that moves `diff_cursor`; consumed once per frame to scroll the
     /// cursor into view. The wheel never sets it.
     pub reveal_diff: bool,
-    /// Set by a tab-switch seed; consumed once to center the seeded line in the diff pane,
-    /// rather than the minimal nudge `reveal_diff` does.
-    pub center_diff: bool,
     /// Whether the current compose was opened from the comments-list overlay, so finishing it
     /// returns there rather than dropping to the diff.
     resume_list: bool,
@@ -179,7 +176,6 @@ impl App {
             file_scroll: 0,
             reveal_files: false,
             reveal_diff: false,
-            center_diff: false,
             resume_list: false,
             toggled_dirs: HashSet::new(),
             stash: TabStash::default(),
@@ -636,17 +632,6 @@ impl App {
         self.diff_scroll = keep_in_view(cursor, self.diff_scroll, heights, viewport);
     }
 
-    /// Center `diff_cursor` in the `viewport` — used for a tab-switch seed, so the carried line
-    /// lands comfortably in view rather than pinned to an edge. `bound_diff_scroll` then clamps.
-    pub fn center_diff_cursor(&mut self, viewport: usize) {
-        if self.visible.is_empty() {
-            self.diff_scroll = 0;
-            return;
-        }
-        let cursor = self.diff_cursor.min(self.visible.len() - 1);
-        self.diff_scroll = cursor.saturating_sub(viewport / 2);
-    }
-
     /// Clamp `diff_scroll` within range (no blank tail). Called every frame. Height-aware:
     /// the cap is the offset that shows the LAST row at the bottom — computed from `heights`,
     /// not the row count, so a wrapped diff (tall rows) stays fully reachable. A row-count cap
@@ -682,94 +667,25 @@ impl App {
         Ok(())
     }
 
-    /// Switch to `tab`, saving the active tab's navigation and left-pane state and restoring
-    /// the target's, then reloading it against the current worktree. A no-op on the active tab
-    /// or while composing. Focus stays on the same side across the switch (specs/tui.md).
+    /// Switch to `tab`, saving the active tab's navigation and left-pane state and restoring the
+    /// target's, then reloading it against the current worktree. Each tab keeps its own opened
+    /// file and scroll, so returning to a tab lands exactly where you left it (specs/tui.md). A
+    /// no-op on the active tab or while composing; focus stays on the same side.
     pub fn set_tab(&mut self, tab: Tab) -> Result<()> {
         if self.tab == tab || self.composing() {
             return Ok(());
         }
-        // Capture the file and line under the reader now, before the swap moves them into the
-        // stash — so an unselected target tab can be seeded with the same code (specs/tui.md).
-        let seed = self.diff_path.clone().map(|path| (path, self.carried_line()));
         self.swap_active_with_stash();
         self.tab = tab;
-        // Whether the entered tab had a selection of its own, read from its restored stash
-        // before `reload` auto-opens a first file and masks it.
-        let target_was_empty = self.diff_path.is_none();
         self.reload()?;
-        // Seed only a first-visit tab, and only from a file it actually contains; otherwise its
-        // own restored selection stands. The seed overrides `reload`'s alphabetical auto-open.
-        if target_was_empty
-            && let Some((path, line)) = seed
-            && self.entries.iter().any(|e| e.path == path)
-        {
-            self.seed_file(&path, line);
-        }
-        // An empty left pane (an un-seedable file, e.g. a deletion) focuses the tree, so the
-        // cursor keys aren't trapped on a pane with nothing to move (specs/tui.md).
+        // An empty left pane — a first visit landing on a collapsed tree, or an open file gone
+        // empty — focuses the tree, so the cursor keys aren't trapped on a pane with nothing to
+        // move (specs/tui.md).
         if self.visible.is_empty() {
             self.focus = Focus::Files;
         }
-        self.reveal_files = true; // pull the restored or seeded cursor back into view
+        self.reveal_files = true; // pull the restored cursor back into view
         Ok(())
-    }
-
-    /// Seed an unselected tab from the file carried across a switch: reveal the file in the
-    /// tree, open it, and land the cursor on the carried line (specs/tui.md).
-    fn seed_file(&mut self, path: &str, line: Option<u32>) {
-        self.reveal_path(path);
-        self.load_left();
-        // Land on the row whose new-side line matches; on a miss — the line was folded away in
-        // the target, or came off a deletion with no new side — land on the nearest content row.
-        if let Some(line) = line
-            && let Some(idx) = self.nearest_row_to_line(line)
-        {
-            self.diff_cursor = idx;
-        }
-        self.center_diff = true; // place the carried line comfortably, not pinned to an edge
-    }
-
-    /// The new-side line under the diff cursor, carried across a tab switch — the File view has
-    /// only new-side numbers. A deletion row has none, so fall back to the nearest content row.
-    fn carried_line(&self) -> Option<u32> {
-        let cur = self.diff_cursor;
-        if let Some(n) = self.visible.get(cur).and_then(Row::new_no) {
-            return Some(n);
-        }
-        let after = self.visible.iter().skip(cur).find_map(Row::new_no);
-        let before = self.visible[..cur.min(self.visible.len())].iter().rev().find_map(Row::new_no);
-        after.or(before)
-    }
-
-    /// The visible content row whose new-side line is nearest `line`; `None` when no row has a
-    /// new-side number (an empty, binary, or too-large view).
-    fn nearest_row_to_line(&self, line: u32) -> Option<usize> {
-        self.visible
-            .iter()
-            .enumerate()
-            .filter_map(|(i, r)| r.new_no().map(|n| (i, n)))
-            .min_by_key(|&(_, n)| n.abs_diff(line))
-            .map(|(i, _)| i)
-    }
-
-    /// Expand every ancestor directory of `path` so its row is visible, rebuild the tree, and
-    /// move the cursor onto it (specs/file-list.md).
-    fn reveal_path(&mut self, path: &str) {
-        let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-        let mut prefix = String::new();
-        // Expand each ancestor directory (every segment but the file). A single-child chain
-        // folds into one file row with no dir for its prefixes, so expanding such a prefix is a
-        // no-op now; if a later poll adds a sibling and unfolds the chain, the prefix renders
-        // expanded — which is correct, since the seed deliberately revealed this path.
-        for seg in &segs[..segs.len().saturating_sub(1)] {
-            prefix = if prefix.is_empty() { (*seg).to_string() } else { format!("{prefix}/{seg}") };
-            self.set_dir_expanded(&prefix, true);
-        }
-        self.rebuild_file_rows();
-        if let Some(row) = self.file_row_of_path(path) {
-            self.file_cursor = row;
-        }
     }
 
     /// Exchange the active per-tab fields with the inactive tab's saved snapshot. Every

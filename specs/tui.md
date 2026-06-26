@@ -29,7 +29,7 @@ The terminal interface: how the review is laid out, how you drive it by keyboard
 - The header shows the active tab, the scope, the count of files changed in the scope, and a clickable `Send` button with the comment count.
 - The left pane is the selected file's diff — syntax-highlighted, with line numbers, change bars, word-level emphasis, and foldable context, defined in `diff-view.md`.
 - The right pane is the changed-files navigator for the current scope — a directory tree, defined in `file-list.md`.
-- Comments are one set across both tabs and export together; per-tab selection and seeding are in **Tabs**.
+- Comments are one set across both tabs and export together; each tab otherwise owns its state (see **Tabs**).
 - The comment input opens **inline, directly under the last line of the selection**, pushing the diff below it down; it grows as you type more lines. It is not a footer band.
 - The footer is a key-hint and status line.
 
@@ -71,10 +71,9 @@ On save the input box closes and the comment stays visible: it renders as a **re
 
 ### Tabs
 
-- Each tab keeps its own selected file and scroll, so switching away and back restores that tab exactly.
-- Switching into a tab with no selection yet seeds it from the file you were viewing, when that file exists in the target tab — `All files` then reveals and opens that file's content (`file-list.md`).
-- A seed carries the cursor's line, not just the file — `All files` opens the seeded file at the line you were reading and places it comfortably in view, so flipping to the full file lands on the same code.
-- A file that cannot be seeded — a `Changes` deletion absent from the worktree — leaves `All files` empty until you pick a file.
+- Each tab owns its state: its opened file, the diff/content scroll, the cursor, and which directories are expanded. Nothing carries between the tabs.
+- Switching away and back restores the tab exactly — the same file open at the same scroll — so the two tabs are independent workspaces.
+- A first visit to a tab opens its first file (or, on a collapsed tree with the cursor on a directory, nothing until you pick one).
 - A tab switch keeps the focused side — content or tree — so keyboard navigation continues; an empty left pane focuses the tree.
 
 ### Comment editor

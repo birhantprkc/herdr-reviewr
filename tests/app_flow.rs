@@ -1364,12 +1364,12 @@ fn all_files_tab_browses_the_whole_worktree_and_renders_content() {
     assert_eq!(app.entries.len(), 1);
     assert_eq!(app.diff_path.as_deref(), Some("README.md"));
 
-    // All files lists the whole worktree and seeds the carried top-level file, so src/ stays
-    // collapsed by default.
+    // All files lists the whole worktree and opens its first file (README, the top-level one),
+    // so src/ stays collapsed by default.
     app.set_tab(Tab::AllFiles).unwrap();
     assert_eq!(app.tab, Tab::AllFiles);
     assert!(app.entries.iter().any(|e| e.path == "src/ui.rs"), "an unchanged file is listed");
-    assert_eq!(app.diff_path.as_deref(), Some("README.md"), "seeded to the carried file");
+    assert_eq!(app.diff_path.as_deref(), Some("README.md"), "All files opens its first file");
     assert!(app.file_rows.iter().any(|row| row.dir_path() == Some("src")), "src/ is a dir row");
     assert!(file_row_of(&app, "src/ui.rs").is_none(), "a collapsed dir hides its children");
 
@@ -1539,57 +1539,7 @@ fn content_comment_is_stale_only_when_its_file_is_deleted() {
 }
 
 #[test]
-fn a_tab_switch_seeds_the_carried_file_at_its_line() {
-    use std::fmt::Write as _;
-
-    use herdr_review::app::Tab;
-    use herdr_review::diff::View;
-    let r = Repo::init();
-    let mut body = String::new();
-    for i in 0..30 {
-        writeln!(body, "line {i}").unwrap();
-    }
-    r.write("src/app.rs", &body);
-    r.write("README.md", "# hi\n");
-    r.commit_all("init");
-    r.write("src/app.rs", &body.replace("line 10", "LINE 10"));
-    let mut app = app_on(&r);
-
-    // In Changes, land the diff cursor on a content row a few lines down; note its line.
-    app.focus = Focus::Diff;
-    let target = app
-        .visible
-        .iter()
-        .enumerate()
-        .filter(|(_, r)| r.line_no().is_some())
-        .nth(3)
-        .map(|(i, _)| i)
-        .expect("a content row");
-    app.diff_cursor = target;
-    let line = app.visible[target].line_no().unwrap();
-
-    // Switch to All files: seeded to the same file's content at the same line.
-    app.set_tab(Tab::AllFiles).unwrap();
-    assert_eq!(app.diff_path.as_deref(), Some("src/app.rs"), "seeded to the carried file");
-    assert_eq!(app.diff.view, View::File);
-    assert_eq!(app.visible[app.diff_cursor].line_no(), Some(line), "landed on the carried line");
-
-    // Move within All files, then bounce away and back: the second visit restores the moved
-    // spot — it does not re-seed to the original line.
-    app.focus = Focus::Diff;
-    app.move_cursor(2).unwrap();
-    let moved = app.visible[app.diff_cursor].line_no();
-    app.set_tab(Tab::Changes).unwrap();
-    app.set_tab(Tab::AllFiles).unwrap();
-    assert_eq!(
-        app.visible[app.diff_cursor].line_no(),
-        moved,
-        "the second visit restores, not re-seeds"
-    );
-}
-
-#[test]
-fn a_file_outside_the_changeset_does_not_seed_changes() {
+fn the_tabs_keep_independent_selections() {
     use herdr_review::app::Tab;
     let r = Repo::init();
     r.write("a.rs", "one\n");
@@ -1603,9 +1553,9 @@ fn a_file_outside_the_changeset_does_not_seed_changes() {
     app.select_file(row).unwrap();
     assert_eq!(app.diff_path.as_deref(), Some("a.rs"), "viewing a.rs in All files");
 
-    // Back to Changes: a.rs is not in the (empty) changeset, so it cannot seed.
+    // Back to Changes: nothing carries over, so its own (empty) state stands.
     app.set_tab(Tab::Changes).unwrap();
-    assert!(app.diff_path.is_none(), "an unchanged file does not seed the Changes tab");
+    assert!(app.diff_path.is_none(), "the All files selection does not carry into Changes");
 }
 
 #[test]
@@ -1663,53 +1613,4 @@ fn switching_to_an_empty_file_view_focuses_the_tree() {
     app.set_tab(Tab::AllFiles).unwrap();
     assert!(app.visible.is_empty(), "the deleted file's content view is empty");
     assert_eq!(app.focus, Focus::Files, "an empty left pane focuses the tree, not traps the keys");
-}
-
-#[test]
-fn a_deletion_row_carry_lands_on_the_nearest_new_side_line() {
-    use herdr_review::app::Tab;
-    let r = Repo::init();
-    r.write("f.rs", "keep-a\nkeep-b\nkeep-c\ndel-1\ndel-2\ndel-3\nafter-1\nafter-2\nafter-3\n");
-    r.commit_all("init");
-    r.write("f.rs", "keep-a\nkeep-b\nkeep-c\nafter-1\nafter-2\nafter-3\n"); // removed del-1..3
-    let mut app = app_on(&r);
-    app.focus = Focus::Diff;
-    let del = app.visible.iter().position(|row| row.text() == "del-2").expect("del-2 deletion row");
-    app.diff_cursor = del;
-    app.set_tab(Tab::AllFiles).unwrap();
-    // The carry takes the new-side line nearest the deletion (after-1, which survives), not the
-    // old line number — so the File view lands on after-1, not unrelated code at that old number.
-    assert_eq!(app.diff_path.as_deref(), Some("f.rs"));
-    assert_eq!(app.visible[app.diff_cursor].text(), "after-1", "lands on the surviving line");
-}
-
-#[test]
-fn a_seed_centers_the_carried_line() {
-    use std::fmt::Write as _;
-
-    use herdr_review::app::Tab;
-    let r = Repo::init();
-    let mut body = String::new();
-    for i in 0..60 {
-        writeln!(body, "line {i}").unwrap();
-    }
-    r.write("app.rs", &body);
-    r.commit_all("init");
-    r.write("app.rs", &body.replace("line 40", "LINE 40")); // change deep in the file
-    let mut app = app_on(&r);
-    app.focus = Focus::Diff;
-    let deep = app.visible.iter().position(|row| row.new_no() == Some(41)).expect("line 41 row");
-    app.diff_cursor = deep;
-    app.set_tab(Tab::AllFiles).unwrap();
-    assert!(app.center_diff, "a seed requests centering");
-
-    let viewport = 20;
-    app.center_diff_cursor(viewport);
-    let cursor = app.diff_cursor;
-    assert!(app.diff_scroll > 0, "a deep seeded line is not pinned to the top");
-    assert!(
-        cursor >= app.diff_scroll && cursor < app.diff_scroll + viewport,
-        "the line is in view"
-    );
-    assert_eq!(app.diff_scroll, cursor.saturating_sub(viewport / 2), "the line sits mid-viewport");
 }

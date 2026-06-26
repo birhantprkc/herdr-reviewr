@@ -413,12 +413,9 @@ fn send_button(app: &App) -> String {
 
 fn render_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
     let chip = scope_chip(app);
-    // The count is the active scope's changeset on both tabs; name it `changed` in `All files`
-    // so it doesn't read as a miscount of the whole-worktree tree beside it.
-    let suffix = match app.tab {
-        Tab::AllFiles => format!("  {} changed", app.changed_count()),
-        Tab::Changes => format!("  {} file(s)", app.changed_count()),
-    };
+    // The count is the active scope's changeset on both tabs — `changed` names it consistently,
+    // and stops it reading as a miscount of the whole-worktree tree in `All files`.
+    let suffix = format!("  {} changed", app.changed_count());
     let button = send_button(app);
     let used = header_prefix_len() + chip.len() + suffix.len() + button.len();
     let pad = (area.width as usize).saturating_sub(used);
@@ -1090,8 +1087,7 @@ fn render_composer(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
-    let count_label = if app.tab == Tab::AllFiles { "changed" } else { "file(s)" };
-    let left = format!(" {} {count_label} · {} comment(s) ", app.changed_count(), app.store.len());
+    let left = format!(" {} changed · {} comment(s) ", app.changed_count(), app.store.len());
     let mid = if app.status.is_empty() { String::new() } else { format!("· {} ", app.status) };
     let hints = match app.mode {
         Mode::Composing { .. } => "enter save · alt/shift+enter newline · esc cancel",

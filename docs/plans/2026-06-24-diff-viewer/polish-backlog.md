@@ -38,4 +38,3 @@ The UX review of the All files tab fixed the high-value items (A–H); these wer
 - **`set_scope` reveals the cursor.** A scope switch sets `reveal_files = true`, which can yank a wheel-scrolled All files viewport back to the cursor, against file-list.md's "scroll holds". Minor; only after a wheel scroll.
 - **Header count vs. visible markers.** The count is the changeset (e.g. `3 changed`) while a deletion in that set has no row in the worktree tree, so the number can exceed the marked rows. Spec-sanctioned; no change.
 - **Symlinks render target content.** `worktree_content`'s `fs::read` follows links. Acceptable; a broken symlink reads empty → "empty file".
-- **Dropped: prune `reveal_path`'s folded-prefix toggles.** Considered, not done — those toggles encode "the seed revealed this path", so on a later unfold keeping the path expanded keeps the seeded file visible (correct), not a surprise.
