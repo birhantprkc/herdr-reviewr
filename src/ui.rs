@@ -15,10 +15,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{App, Focus, Mode};
+use crate::app::{App, Focus, Mode, Tab};
 use crate::diff::{FileDiff, FileState, Row};
-use crate::file_list::RowKind;
-use crate::model::{ChangeKind, Comment};
+use crate::file_list::{Annotation, RowKind};
+use crate::model::Comment;
 
 pub fn render(frame: &mut Frame, app: &App) {
     let area = frame.area();
@@ -348,6 +348,7 @@ fn wrap_text(s: &str, width: usize) -> Vec<String> {
 /// A clickable region in the header.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum HeaderHit {
+    Tab(Tab),
     Scope,
     Send,
 }
@@ -358,9 +359,14 @@ pub fn hit_header(area: Rect, app: &App, col: u16, row: u16) -> Option<HeaderHit
     if row != area.y {
         return None;
     }
-    let scope_start = HEADER_PREFIX.len() as u16;
+    for (tab, start, end) in tab_spans() {
+        if (start as u16..end as u16).contains(&col) {
+            return Some(HeaderHit::Tab(tab));
+        }
+    }
+    let scope_start = header_prefix_len() as u16;
     let scope_end = scope_start + scope_chip(app).len() as u16;
-    let button_start = area.width.saturating_sub(send_button(app).len() as u16);
+    let button_start = send_button_col(app, area.width as usize) as u16;
     if (scope_start..scope_end).contains(&col) {
         Some(HeaderHit::Scope)
     } else if col >= button_start && col < area.width {
@@ -370,7 +376,32 @@ pub fn hit_header(area: Rect, app: &App, col: u16, row: u16) -> Option<HeaderHit
     }
 }
 
-const HEADER_PREFIX: &str = " Changes  ";
+/// The two tabs and their labels, left to right. All-ASCII labels keep the byte length equal
+/// to the display width, so the header column math stays simple.
+const TABS: [(Tab, &str); 2] = [(Tab::Changes, "1 Changes"), (Tab::AllFiles, "2 All files")];
+const HEADER_LEAD: &str = " ";
+const TAB_GAP: &str = "  ";
+const HEADER_GAP: &str = "  ";
+
+/// Each tab's `(tab, start_col, end_col)` in the header, the single source the bar paints and
+/// the click hit-tests against.
+fn tab_spans() -> Vec<(Tab, usize, usize)> {
+    let mut col = HEADER_LEAD.len();
+    let mut out = Vec::new();
+    for (i, (tab, label)) in TABS.iter().enumerate() {
+        if i > 0 {
+            col += TAB_GAP.len();
+        }
+        out.push((*tab, col, col + label.len()));
+        col += label.len();
+    }
+    out
+}
+
+/// The column where the scope chip starts: past the tab bar and its trailing gap.
+fn header_prefix_len() -> usize {
+    tab_spans().last().map_or(HEADER_LEAD.len(), |&(_, _, end)| end) + HEADER_GAP.len()
+}
 
 fn scope_chip(app: &App) -> String {
     format!("[{}]", app.scope.label())
@@ -380,25 +411,53 @@ fn send_button(app: &App) -> String {
     format!("[ Send ({}) ]", app.store.len())
 }
 
+/// The header suffix: the active scope's changed-file count. Shared so the painter and the
+/// hit-test place the right-aligned `Send` button at the same column.
+fn header_suffix(app: &App) -> String {
+    format!("  {} changed", app.changed_count())
+}
+
+/// The column the `Send` button paints at, matching `render_tab_bar`'s layout: right-aligned
+/// when the header fits, packed left right after the suffix when the bar overflows (`pad`
+/// collapses to 0). `hit_header` must use this, not a bare right-alignment, or a `Send` click
+/// mis-fires (and on a narrow sidebar lands in a tab span) when the header overflows.
+fn send_button_col(app: &App, width: usize) -> usize {
+    let before = header_prefix_len() + scope_chip(app).len() + header_suffix(app).len();
+    before + width.saturating_sub(before + send_button(app).len())
+}
+
 fn render_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
     let chip = scope_chip(app);
-    let suffix = format!("  {} file(s)", app.files.len());
+    let suffix = header_suffix(app);
     let button = send_button(app);
-    let used = HEADER_PREFIX.len() + chip.len() + suffix.len() + button.len();
+    let used = header_prefix_len() + chip.len() + suffix.len() + button.len();
     let pad = (area.width as usize).saturating_sub(used);
 
-    // A quiet surface bar: the title in lavender, the clickable scope and Send controls
-    // accented so they read as buttons without a loud full-width fill.
+    // A quiet surface bar: the active tab in bright lavender, the inactive one dimmed, the
+    // clickable scope and Send controls accented so they read as buttons.
     let bar = Style::default().bg(cat::SURFACE0);
+    let mut spans = vec![Span::styled(HEADER_LEAD, bar)];
+    for (i, (tab, label)) in TABS.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(TAB_GAP, bar));
+        }
+        // The active tab is bright + underlined so the bar reads as tabs; the inactive one sits
+        // at `SUBTEXT0` (available), not the `OVERLAY0` disabled tone.
+        let style = if *tab == app.tab {
+            bar.fg(cat::LAVENDER).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+        } else {
+            bar.fg(cat::SUBTEXT0)
+        };
+        spans.push(Span::styled(*label, style));
+    }
+    spans.push(Span::styled(HEADER_GAP, bar));
+    spans.push(Span::styled(chip, bar.fg(cat::YELLOW).add_modifier(Modifier::BOLD)));
+    spans.push(Span::styled(suffix, bar.fg(cat::OVERLAY0)));
+
     let send_fg = if app.store.is_empty() { cat::OVERLAY0 } else { cat::GREEN };
-    let line = Line::from(vec![
-        Span::styled(HEADER_PREFIX, bar.fg(cat::LAVENDER).add_modifier(Modifier::BOLD)),
-        Span::styled(chip, bar.fg(cat::YELLOW).add_modifier(Modifier::BOLD)),
-        Span::styled(suffix, bar.fg(cat::OVERLAY0)),
-        Span::styled(" ".repeat(pad), bar),
-        Span::styled(button, bar.fg(send_fg).add_modifier(Modifier::BOLD)),
-    ]);
-    frame.render_widget(Paragraph::new(line), area);
+    spans.push(Span::styled(" ".repeat(pad), bar));
+    spans.push(Span::styled(button, bar.fg(send_fg).add_modifier(Modifier::BOLD)));
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn render_file_list(frame: &mut Frame, app: &App, area: Rect) {
@@ -407,8 +466,11 @@ fn render_file_list(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(block, area);
 
     if app.file_rows.is_empty() {
-        let msg =
-            if app.awaiting_turn() { "waiting for the agent's next turn" } else { "no changes" };
+        let msg = match app.tab {
+            Tab::AllFiles => "no files",
+            Tab::Changes if app.awaiting_turn() => "waiting for the agent's next turn",
+            Tab::Changes => "no changes",
+        };
         frame.render_widget(dim_paragraph(msg), inner);
         return;
     }
@@ -440,8 +502,8 @@ fn render_file_list(frame: &mut Frame, app: &App, area: Rect) {
                     ];
                     selectable_row(spans, width, fill)
                 }
-                RowKind::File { change, additions, deletions, .. } => {
-                    file_row_item(&indent, *change, &row.name, *additions, *deletions, width, fill)
+                RowKind::File { annotation, .. } => {
+                    file_row_item(&indent, annotation.as_ref(), &row.name, width, fill)
                 }
             }
         })
@@ -451,17 +513,17 @@ fn render_file_list(frame: &mut Frame, app: &App, area: Rect) {
 
 /// A file row: `<indent><marker> <name> <stats>` — the marker colored by kind, the basename
 /// bright with its parent directories dimmed, and the `+a −d` stats right-aligned against the
-/// pane edge. A name too wide for the row keeps its tail behind a leading `…/`.
+/// pane edge. A name too wide for the row keeps its tail behind a leading `…/`. An unannotated
+/// row (an unchanged `All files` file) drops the marker and stats, showing just the name.
 fn file_row_item(
     indent: &str,
-    change: ChangeKind,
+    annotation: Option<&Annotation>,
     name: &str,
-    additions: u32,
-    deletions: u32,
     width: usize,
     fill: Option<Color>,
 ) -> ListItem<'static> {
-    let marker = format!("{} ", change.marker());
+    let marker = annotation.map_or(String::new(), |a| format!("{} ", a.change.marker()));
+    let (additions, deletions) = annotation.map_or((0, 0), |a| (a.additions, a.deletions));
     let stats = stats_str(additions, deletions);
     let gap = if stats.is_empty() { 0 } else { 2 };
     let fixed = indent.width() + marker.width() + stats.width() + gap;
@@ -472,10 +534,10 @@ fn file_row_item(
         None => ("", shown.as_str()),
     };
 
-    let mut spans = vec![
-        Span::styled(indent.to_string(), text_style()),
-        Span::styled(marker, Style::default().fg(kind_color(change.marker()))),
-    ];
+    let mut spans = vec![Span::styled(indent.to_string(), text_style())];
+    if let Some(a) = annotation {
+        spans.push(Span::styled(marker, Style::default().fg(kind_color(a.change.marker()))));
+    }
     if !dim.is_empty() {
         spans.push(Span::styled(dim.to_string(), Style::default().fg(cat::OVERLAY0)));
     }
@@ -602,21 +664,32 @@ fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
     let title = match (&app.diff_path, &app.diff.previous_path) {
         (Some(new), Some(old)) => format!("{old} → {new}"),
         (Some(new), None) => new.clone(),
-        (None, _) => "Diff".to_string(),
+        (None, _) => match app.tab {
+            Tab::AllFiles => "File",
+            Tab::Changes => "Diff",
+        }
+        .to_string(),
     };
     let block = bordered(&title, app.focus == Focus::Diff);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
     if app.visible.is_empty() {
-        let msg = if app.awaiting_turn() {
-            "waiting for the agent's next turn"
-        } else {
-            match app.diff.state {
+        // `All files` is a content browser, not a diff, so its empty/notice copy avoids diff
+        // vocabulary and never shows the last-turn "waiting" state.
+        let msg = match app.tab {
+            Tab::AllFiles => match app.diff.state {
+                FileState::Binary => "binary — no line comments",
+                FileState::TooLarge => "file too large",
+                FileState::Normal if app.diff_path.is_some() => "empty file",
+                FileState::Normal => "select a file to read",
+            },
+            Tab::Changes if app.awaiting_turn() => "waiting for the agent's next turn",
+            Tab::Changes => match app.diff.state {
                 FileState::Binary => "binary — no line comments",
                 FileState::TooLarge => "file too large to diff",
                 FileState::Normal => "no diff",
-            }
+            },
         };
         frame.render_widget(dim_paragraph(msg), inner);
         return;
@@ -1027,13 +1100,13 @@ fn render_composer(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
-    let left = format!(" {} file(s) · {} comment(s) ", app.files.len(), app.store.len());
+    let left = format!(" {} changed · {} comment(s) ", app.changed_count(), app.store.len());
     let mid = if app.status.is_empty() { String::new() } else { format!("· {} ", app.status) };
     let hints = match app.mode {
         Mode::Composing { .. } => "enter save · alt/shift+enter newline · esc cancel",
         Mode::List => "↑↓ move · s send · y copy · e edit · d delete · esc close",
         Mode::Normal => {
-            "tab focus · u/b/t scope · v select · c comment · s send · y copy · n/N jump · l list · r refresh · q quit"
+            "1/2 tab · ⇥ pane · u/b/t scope · v select · c comment · s send · y copy · n/N jump · l list · r refresh · q quit"
         }
     };
     let line = Line::from(vec![
@@ -1059,7 +1132,6 @@ fn render_comments_list(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(block, popup);
 
     let width = inner.width as usize;
-    let stale = app.stale_files();
     let items: Vec<ListItem> = app
         .store
         .iter()
@@ -1070,8 +1142,9 @@ fn render_comments_list(frame: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(cat::MAUVE).add_modifier(Modifier::BOLD),
             );
             let mut spans = vec![loc, Span::styled(format!("  {}", c.text), text_style())];
-            // A comment whose file has left the changeset is flagged but kept.
-            if stale.contains(&c.file) {
+            // A comment whose anchor may have moved (file left the changeset, or a content
+            // comment's file was deleted) is flagged but kept.
+            if app.is_stale(c) {
                 spans.push(Span::styled("  (stale)", Style::default().fg(cat::RED)));
             }
             // The list overlay is the active modal, so its row reads at full brightness.

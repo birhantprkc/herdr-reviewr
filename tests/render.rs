@@ -320,7 +320,7 @@ fn shows_tab_bar_file_list_and_diff() {
     assert!(out.contains("uncommitted"), "current scope shown");
     assert!(out.contains("hello.rs"), "file appears in the list");
     assert!(out.contains("BETA"), "diff content is rendered");
-    assert!(out.contains("file(s)"), "status bar shown");
+    assert!(out.contains("changed"), "status bar shows the changed count");
 }
 
 #[test]
@@ -472,7 +472,7 @@ fn a_binary_file_shows_the_no_line_comments_message() {
     r.write("logo.bin", "\0\0\0\0changed\0\0\0");
     let mut app = App::new(r.path_buf(), Scope::Uncommitted, None);
     app.reload().unwrap();
-    let idx = app.files.iter().position(|f| f.path == "logo.bin").expect("binary file listed");
+    let idx = app.entries.iter().position(|f| f.path == "logo.bin").expect("binary file listed");
     app.select_file(idx).unwrap();
 
     let out = render(&app);
@@ -531,4 +531,62 @@ fn last_turn_without_a_baseline_renders_the_waiting_state() {
     let out = render(&app);
     assert!(out.contains("[last turn]"), "the scope chip reads last turn");
     assert!(out.contains("waiting for the agent's next turn"), "the cold-start empty state shows");
+}
+
+#[test]
+fn all_files_tab_bar_footer_and_count_read_for_the_tab() {
+    use herdr_review::app::Tab;
+    let r = Repo::init();
+    r.write("a.rs", "one\n");
+    r.commit_all("init");
+    r.write("a.rs", "ONE\n"); // one change
+    let mut app = App::new(r.path_buf(), Scope::Uncommitted, None);
+    app.reload().unwrap();
+    app.set_tab(Tab::AllFiles).unwrap();
+
+    let out = render(&app);
+    assert!(out.contains("1 Changes"), "tab labels carry their switch digit:\n{out}");
+    assert!(out.contains("2 All files"));
+    assert!(out.contains("1 changed"), "the count is named 'changed' in All files:\n{out}");
+    assert!(out.contains("1/2 tab"), "the footer hints the tab keys:\n{out}");
+    assert!(!out.contains("tab focus"), "the colliding 'tab focus' hint is renamed:\n{out}");
+}
+
+#[test]
+fn a_narrow_overflowing_header_does_not_mis_map_a_click_to_send() {
+    let r = Repo::init();
+    r.write("a.rs", "x\n");
+    r.commit_all("init");
+    r.write("a.rs", "y\n");
+    let mut app = App::new(r.path_buf(), Scope::Uncommitted, None);
+    app.reload().unwrap();
+
+    // At a narrow sidebar width the two-tab header overflows and the Send button is off-screen.
+    // No on-screen column may map to Send — the old right-aligned hit-zone landed a phantom Send
+    // over the chip/tab region, swallowing those clicks as a Send.
+    let width: u16 = 34;
+    let area = Rect::new(0, 0, width, 40);
+    let phantom = (0..width).any(|c| ui::hit_header(area, &app, c, 0) == Some(HeaderHit::Send));
+    assert!(!phantom, "no on-screen column mis-maps to Send when the narrow header overflows");
+
+    // At a wide width the Send button is right-aligned and clickable.
+    let wide = Rect::new(0, 0, 140, 40);
+    let send = (0..140).any(|c| ui::hit_header(wide, &app, c, 0) == Some(HeaderHit::Send));
+    assert!(send, "Send is clickable when the header fits");
+}
+
+#[test]
+fn all_files_empty_pane_reads_select_a_file() {
+    use herdr_review::app::Tab;
+    let r = Repo::init();
+    r.write("src/a.rs", "x\n");
+    r.write("src/b.rs", "y\n"); // two children so src/ is a real collapsed dir, not a folded file
+    r.commit_all("init");
+    let mut app = App::new(r.path_buf(), Scope::Uncommitted, None);
+    app.reload().unwrap();
+    app.set_tab(Tab::AllFiles).unwrap(); // clean repo: no seed; cursor rests on collapsed src/
+
+    let out = render(&app);
+    assert!(out.contains("select a file to read"), "the empty All files left pane copy:\n{out}");
+    assert!(!out.contains("no diff"), "no diff vocabulary in the content browser:\n{out}");
 }

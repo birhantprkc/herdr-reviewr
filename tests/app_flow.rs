@@ -292,7 +292,7 @@ fn row_with(app: &App, marker: char) -> usize {
 fn file_row(app: &App, path: &str) -> usize {
     app.file_rows
         .iter()
-        .position(|r| r.file_index().is_some_and(|i| app.files[i].path == path))
+        .position(|r| r.file_index().is_some_and(|i| app.entries[i].path == path))
         .expect("a file row for the path")
 }
 
@@ -321,7 +321,7 @@ fn editing_a_comment_surfaces_its_file_from_a_collapsed_directory() {
     assert!(
         !app.file_rows
             .iter()
-            .any(|r| r.file_index().is_some_and(|i| app.files[i].path == "src/foo.rs")),
+            .any(|r| r.file_index().is_some_and(|i| app.entries[i].path == "src/foo.rs")),
         "foo's row is hidden under the collapsed src/"
     );
 
@@ -604,7 +604,7 @@ fn comment_anchors_to_gits_real_line_numbers() {
 fn comments_on_added_and_removed_lines_capture_the_snippet() {
     let r = edited_repo();
     let mut app = app_on(&r);
-    assert_eq!(app.files.len(), 1);
+    assert_eq!(app.entries.len(), 1);
 
     comment_on(&mut app, '+', "this addition needs a test");
     comment_on(&mut app, '-', "why was this dropped?");
@@ -637,7 +637,7 @@ fn a_saved_comment_survives_a_refresh() {
 
     assert_eq!(app.store.len(), 1, "refresh must not drop a saved comment");
     assert_eq!(app.store.iter().next().unwrap().text, "keep me");
-    assert!(app.files.iter().any(|f| f.path == "b.rs"), "file list still refreshed");
+    assert!(app.entries.iter().any(|f| f.path == "b.rs"), "file list still refreshed");
 }
 
 #[test]
@@ -659,7 +659,7 @@ fn a_refresh_while_composing_freezes_input_and_diff() {
     assert!(app.composing(), "still composing");
     assert_eq!(app.input, "half-written thought", "input untouched");
     assert_eq!(app.diff, frozen_diff, "the open diff is frozen while composing");
-    assert!(app.files.iter().any(|f| f.path == "c.rs"), "file list still refreshes");
+    assert!(app.entries.iter().any(|f| f.path == "c.rs"), "file list still refreshes");
 }
 
 #[test]
@@ -956,7 +956,7 @@ fn editing_from_the_list_navigates_to_the_comments_file() {
     app.reload().unwrap();
 
     // Comment on b.rs, then move the view to a.rs.
-    let bi = app.files.iter().position(|f| f.path == "b.rs").unwrap();
+    let bi = app.entries.iter().position(|f| f.path == "b.rs").unwrap();
     app.select_file(bi).unwrap();
     app.focus = Focus::Diff;
     app.diff_cursor = row_with(&app, '+');
@@ -965,7 +965,7 @@ fn editing_from_the_list_navigates_to_the_comments_file() {
         app.input_push(ch);
     }
     app.submit_comment();
-    let ai = app.files.iter().position(|f| f.path == "a.rs").unwrap();
+    let ai = app.entries.iter().position(|f| f.path == "a.rs").unwrap();
     app.select_file(ai).unwrap();
     assert_eq!(app.diff_path.as_deref(), Some("a.rs"));
 
@@ -988,9 +988,10 @@ fn a_comment_on_a_reverted_file_is_flagged_stale() {
     r.write("a.rs", "alpha\nbeta\ngamma\ndelta\n"); // back to committed state
     app.reload().unwrap();
 
-    assert!(app.files.iter().all(|f| f.path != "a.rs"), "file left the changeset");
+    assert!(app.entries.iter().all(|f| f.path != "a.rs"), "file left the changeset");
     assert_eq!(app.store.len(), 1, "the comment still exists");
-    assert!(app.stale_files().contains("a.rs"), "and is flagged stale");
+    let c = app.store.get(0).unwrap();
+    assert!(app.is_stale(c), "a diff comment whose file left the changeset is stale");
 }
 
 #[test]
@@ -1005,12 +1006,12 @@ fn switching_scope_swaps_the_changeset() {
 
     let mut app = App::new(r.path_buf(), Scope::Uncommitted, Some("main".to_string()));
     app.reload().unwrap();
-    assert!(app.files.iter().any(|f| f.path == "dirty.rs"));
-    assert!(app.files.iter().all(|f| f.path != "committed.rs"));
+    assert!(app.entries.iter().any(|f| f.path == "dirty.rs"));
+    assert!(app.entries.iter().all(|f| f.path != "committed.rs"));
 
     app.set_scope(Scope::Branch).unwrap();
-    assert!(app.files.iter().any(|f| f.path == "committed.rs"));
-    assert!(app.files.iter().all(|f| f.path != "dirty.rs"));
+    assert!(app.entries.iter().any(|f| f.path == "committed.rs"));
+    assert!(app.entries.iter().all(|f| f.path != "dirty.rs"));
 }
 
 #[test]
@@ -1062,6 +1063,24 @@ fn scope_cannot_change_while_composing() {
 }
 
 #[test]
+fn tab_cannot_change_while_composing() {
+    use herdr_review::app::Tab;
+    let r = edited_repo();
+    let mut app = app_on(&r);
+    app.focus = Focus::Diff;
+    app.diff_cursor = row_with(&app, '+');
+    app.start_comment();
+    app.input_push('x');
+
+    // A tab switch mid-comment must be a no-op, so the panes never swap out from under the
+    // open composer (the compose-freeze invariant), matching set_scope.
+    app.set_tab(Tab::AllFiles).unwrap();
+    assert_eq!(app.tab, Tab::Changes, "the tab is frozen mid-comment");
+    assert!(app.composing(), "still composing");
+    assert_eq!(app.input, "x", "input untouched");
+}
+
+#[test]
 fn the_app_reads_branch_scoped_diffs_not_working_tree() {
     let r = Repo::init();
     r.write("shared.rs", "base\n");
@@ -1073,7 +1092,8 @@ fn the_app_reads_branch_scoped_diffs_not_working_tree() {
     let mut app = App::new(r.path_buf(), Scope::Branch, Some("main".to_string()));
     app.reload().unwrap();
 
-    let idx = app.files.iter().position(|f| f.path == "on_branch.rs").expect("branch file listed");
+    let idx =
+        app.entries.iter().position(|f| f.path == "on_branch.rs").expect("branch file listed");
     app.select_file(idx).unwrap();
 
     // The diff the App loaded for branch scope is base...HEAD, so it shows the
@@ -1175,7 +1195,7 @@ fn the_diff_title_stays_on_the_composed_file_through_a_refresh() {
     // the file cursor now points elsewhere. (No title/body mismatch.)
     assert!(app.composing());
     assert_eq!(app.diff_path.as_deref(), Some("a.rs"), "diff title frozen on composed file");
-    assert_ne!(app.current_file().map(|f| f.path.as_str()), Some("a.rs"));
+    assert_ne!(app.current_entry().map(|f| f.path.as_str()), Some("a.rs"));
 }
 
 #[test]
@@ -1193,7 +1213,7 @@ fn a_comment_submitted_after_its_file_left_the_changeset_anchors_to_that_file() 
     r.write("a.rs", "alpha\nbeta\ngamma\ndelta\n");
     r.write("z.rs", "new\n");
     app.reload().unwrap();
-    assert_ne!(app.current_file().map(|f| f.path.as_str()), Some("a.rs"));
+    assert_ne!(app.current_entry().map(|f| f.path.as_str()), Some("a.rs"));
 
     app.submit_comment();
     let c = app.store.iter().next().unwrap();
@@ -1221,7 +1241,7 @@ fn a_non_repo_path_yields_an_empty_state_not_an_error() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = App::new(dir.path().to_path_buf(), Scope::Uncommitted, None);
     assert!(app.reload().is_ok(), "a non-repo reload is graceful, not an error");
-    assert!(app.files.is_empty());
+    assert!(app.entries.is_empty());
     assert!(app.diff.rows.is_empty());
 }
 
@@ -1247,7 +1267,7 @@ fn last_turn_is_empty_until_a_turn_is_observed() {
     let mut app = App::new(r.path_buf(), Scope::LastTurn, None);
     app.reload().unwrap();
     assert!(app.awaiting_turn(), "no baseline captured yet");
-    assert!(app.files.is_empty(), "the scope is empty before a turn");
+    assert!(app.entries.is_empty(), "the scope is empty before a turn");
 }
 
 #[test]
@@ -1262,7 +1282,7 @@ fn last_turn_shows_a_change_producing_turn() {
     app.apply_agent_status(Some("working")); // first change promotes the baseline
     app.reload().unwrap();
     assert!(!app.awaiting_turn(), "the baseline is now set");
-    assert!(app.files.iter().any(|f| f.path == "a.rs"), "the turn's edit shows");
+    assert!(app.entries.iter().any(|f| f.path == "a.rs"), "the turn's edit shows");
 }
 
 #[test]
@@ -1282,7 +1302,7 @@ fn a_question_only_turn_keeps_the_previous_turns_diff() {
     app.apply_agent_status(Some("idle"));
     app.reload().unwrap();
     assert!(
-        app.files.iter().any(|f| f.path == "a.rs"),
+        app.entries.iter().any(|f| f.path == "a.rs"),
         "A's diff persists across a question-only turn"
     );
 }
@@ -1301,8 +1321,9 @@ fn a_permission_pause_stays_one_turn() {
     r.write("a.rs", "one\nbefore\nafter\n"); // edit after the prompt
     app.apply_agent_status(Some("working"));
     app.reload().unwrap();
-    let a = app.files.iter().find(|f| f.path == "a.rs").expect("a.rs changed");
-    assert_eq!(a.additions, 2, "both the pre- and post-prompt edits belong to one turn");
+    let a = app.entries.iter().find(|f| f.path == "a.rs").expect("a.rs changed");
+    let annotation = a.annotation.as_ref().expect("a changed file is annotated");
+    assert_eq!(annotation.additions, 2, "both the pre- and post-prompt edits belong to one turn");
 }
 
 #[test]
@@ -1321,7 +1342,7 @@ fn the_baseline_survives_a_restart() {
     let mut restarted = App::new(r.path_buf(), Scope::LastTurn, None);
     restarted.reload().unwrap();
     assert!(!restarted.awaiting_turn(), "baseline resumed from the private ref");
-    assert!(restarted.files.iter().any(|f| f.path == "a.rs"), "the turn's edit still shows");
+    assert!(restarted.entries.iter().any(|f| f.path == "a.rs"), "the turn's edit still shows");
 }
 
 #[test]
@@ -1335,4 +1356,370 @@ fn no_agent_status_pauses_tracking() {
     app.apply_agent_status(None);
     app.reload().unwrap();
     assert!(app.awaiting_turn(), "without a status signal the baseline never forms");
+}
+
+/// The visible-row index of the file at `path`, or `None` when it is hidden/absent.
+fn file_row_of(app: &App, path: &str) -> Option<usize> {
+    app.file_rows
+        .iter()
+        .position(|row| row.file_index().is_some_and(|i| app.entries[i].path == path))
+}
+
+#[test]
+fn all_files_tab_browses_the_whole_worktree_and_renders_content() {
+    use herdr_review::app::Tab;
+    use herdr_review::diff::View;
+    let r = Repo::init();
+    r.write("src/app.rs", "fn main() {}\n");
+    r.write("src/ui.rs", "fn render() {}\n");
+    r.write("README.md", "# hi\n");
+    r.commit_all("init");
+    r.write("README.md", "# changed\n"); // change a top-level file (no dir to reveal)
+    let mut app = app_on(&r);
+
+    // Changes lists only the changed file and opens its diff.
+    assert_eq!(app.tab, Tab::Changes);
+    assert_eq!(app.entries.len(), 1);
+    assert_eq!(app.diff_path.as_deref(), Some("README.md"));
+
+    // All files lists the whole worktree and opens its first file (README, the top-level one),
+    // so src/ stays collapsed by default.
+    app.set_tab(Tab::AllFiles).unwrap();
+    assert_eq!(app.tab, Tab::AllFiles);
+    assert!(app.entries.iter().any(|e| e.path == "src/ui.rs"), "an unchanged file is listed");
+    assert_eq!(app.diff_path.as_deref(), Some("README.md"), "All files opens its first file");
+    assert!(app.file_rows.iter().any(|row| row.dir_path() == Some("src")), "src/ is a dir row");
+    assert!(file_row_of(&app, "src/ui.rs").is_none(), "a collapsed dir hides its children");
+
+    // Expanding src/ (a click on the directory) then opening a file shows its full content.
+    let src_row = app.file_rows.iter().position(|row| row.dir_path() == Some("src")).unwrap();
+    app.select_file(src_row).unwrap();
+    let ui_row = file_row_of(&app, "src/ui.rs").expect("src/ui.rs visible once src/ is expanded");
+    app.select_file(ui_row).unwrap();
+    assert_eq!(app.diff_path.as_deref(), Some("src/ui.rs"));
+    assert_eq!(app.diff.view, View::File);
+    assert!(app.diff.rows.iter().any(|row| row.text().contains("fn render")));
+}
+
+#[test]
+fn switching_tabs_restores_each_tab_selection() {
+    use herdr_review::app::Tab;
+    use herdr_review::diff::View;
+    let r = Repo::init();
+    r.write("src/app.rs", "fn main() {}\n");
+    r.write("README.md", "# hi\n");
+    r.commit_all("init");
+    r.write("src/app.rs", "fn main() { run() }\n");
+    let mut app = app_on(&r);
+    let changes_open = app.diff_path.clone();
+    assert_eq!(changes_open.as_deref(), Some("src/app.rs"));
+
+    // In All files, open README.md.
+    app.set_tab(Tab::AllFiles).unwrap();
+    let readme_row = file_row_of(&app, "README.md").expect("README.md at the top level");
+    app.select_file(readme_row).unwrap();
+    assert_eq!(app.diff_path.as_deref(), Some("README.md"));
+    assert_eq!(app.diff.view, View::File);
+
+    // Back to Changes: its own selection and diff are restored, not All files'.
+    app.set_tab(Tab::Changes).unwrap();
+    assert_eq!(app.tab, Tab::Changes);
+    assert_eq!(app.entries.len(), 1, "Changes still lists only the changed file");
+    assert_eq!(app.diff_path, changes_open);
+    assert_eq!(app.diff.view, View::Diff);
+
+    // Forward again: All files restored README.md, not the Changes selection.
+    app.set_tab(Tab::AllFiles).unwrap();
+    assert_eq!(app.diff_path.as_deref(), Some("README.md"));
+    assert_eq!(app.diff.view, View::File);
+}
+
+#[test]
+fn changed_count_and_staleness_stay_scope_based_on_all_files() {
+    use herdr_review::app::Tab;
+    use herdr_review::model::Comment;
+    let r = Repo::init();
+    r.write("a.rs", "one\n");
+    r.write("b.rs", "two\n");
+    r.commit_all("init");
+    r.write("a.rs", "ONE\n"); // exactly one changed file
+    let mut app = app_on(&r);
+    assert_eq!(app.changed_count(), 1, "Changes counts the one changed file");
+
+    // A diff comment on b.rs, which is in the worktree but not in the changeset.
+    let comment = Comment {
+        file: "b.rs".into(),
+        side: Side::New,
+        start: 1,
+        end: 1,
+        lines: " two".into(),
+        text: "?".into(),
+        diff_anchored: true,
+    };
+    app.store.add(comment.clone());
+
+    app.set_tab(Tab::AllFiles).unwrap();
+    assert!(app.entries.len() >= 2, "All files lists the whole worktree");
+    assert_eq!(app.changed_count(), 1, "the count is the changeset, not the worktree total");
+    assert!(
+        app.is_stale(&comment),
+        "a diff comment keys on the changeset even while All files lists b.rs"
+    );
+}
+
+/// The annotation on the `All files` row for `path`: `Some(Some(_))` annotated, `Some(None)`
+/// listed-but-unchanged, `None` not visible.
+#[allow(clippy::option_option)] // outer = row found, inner = its annotation
+fn annotation_of(app: &App, path: &str) -> Option<Option<herdr_review::file_list::Annotation>> {
+    use herdr_review::file_list::RowKind;
+    app.file_rows.iter().find_map(|row| match &row.kind {
+        RowKind::File { index, annotation } if app.entries[*index].path == path => {
+            Some(annotation.clone())
+        }
+        _ => None,
+    })
+}
+
+#[test]
+fn all_files_annotates_changed_files_only() {
+    use herdr_review::app::Tab;
+    use herdr_review::model::ChangeKind;
+    let r = Repo::init();
+    r.write("a.rs", "one\n");
+    r.write("b.rs", "two\n");
+    r.commit_all("init");
+    r.write("a.rs", "ONE\n"); // a.rs changed, b.rs unchanged
+    let mut app = app_on(&r);
+    app.set_tab(Tab::AllFiles).unwrap();
+    assert!(
+        matches!(annotation_of(&app, "a.rs"), Some(Some(a)) if a.change == ChangeKind::Modified),
+        "a changed file carries its marker"
+    );
+    assert_eq!(
+        annotation_of(&app, "b.rs"),
+        Some(None),
+        "an unchanged file is listed without a marker"
+    );
+}
+
+#[test]
+fn switching_scope_on_all_files_remarks_in_place() {
+    use herdr_review::app::Tab;
+    let r = Repo::init();
+    r.write("a.rs", "one\n");
+    r.write("b.rs", "two\n");
+    r.commit_all("init");
+    r.write("a.rs", "ONE\n"); // one uncommitted change
+    let mut app = app_on(&r);
+    app.set_tab(Tab::AllFiles).unwrap();
+    app.focus = Focus::Files;
+    app.move_cursor(1).unwrap();
+    let cursor = app.file_cursor;
+    assert_eq!(app.changed_count(), 1, "uncommitted has one change");
+    assert!(
+        matches!(annotation_of(&app, "a.rs"), Some(Some(_))),
+        "a.rs is marked under uncommitted"
+    );
+
+    // Branch scope has no changes in a one-commit repo, so the marks clear — in place.
+    app.set_scope(Scope::Branch).unwrap();
+    assert_eq!(app.file_cursor, cursor, "the cursor holds across a scope re-mark");
+    assert_eq!(app.changed_count(), 0, "branch scope clears the marks");
+    assert_eq!(annotation_of(&app, "a.rs"), Some(None), "a.rs is now unmarked");
+    assert!(app.entries.iter().any(|e| e.path == "b.rs"), "the listing is unchanged");
+}
+
+#[test]
+fn content_comment_is_stale_only_when_its_file_is_deleted() {
+    use herdr_review::app::Tab;
+    let r = Repo::init();
+    r.write("a.rs", "alpha\nbeta\n");
+    r.commit_all("init");
+    let mut app = app_on(&r);
+    app.set_tab(Tab::AllFiles).unwrap();
+    let row = file_row_of(&app, "a.rs").expect("a.rs at the top level");
+    app.select_file(row).unwrap();
+    app.focus = Focus::Diff;
+    app.diff_cursor = 0;
+    app.start_comment();
+    for ch in "note".chars() {
+        app.input_push(ch);
+    }
+    app.submit_comment();
+    let c = app.store.get(0).expect("a comment was made").clone();
+    assert!(!c.diff_anchored, "a File-view comment is content-anchored");
+
+    app.reload().unwrap();
+    assert!(!app.is_stale(&c), "a content comment on an existing, unchanged file is not stale");
+    r.remove("a.rs");
+    app.reload().unwrap();
+    assert!(app.is_stale(&c), "it becomes stale only once its file is deleted");
+}
+
+#[test]
+fn the_tabs_keep_independent_selections() {
+    use herdr_review::app::Tab;
+    let r = Repo::init();
+    r.write("a.rs", "one\n");
+    r.commit_all("init"); // a clean worktree — no changes
+    let mut app = app_on(&r);
+    assert_eq!(app.changed_count(), 0);
+    assert!(app.diff_path.is_none(), "Changes opens nothing with an empty changeset");
+
+    app.set_tab(Tab::AllFiles).unwrap();
+    let row = file_row_of(&app, "a.rs").unwrap();
+    app.select_file(row).unwrap();
+    assert_eq!(app.diff_path.as_deref(), Some("a.rs"), "viewing a.rs in All files");
+
+    // Back to Changes: nothing carries over, so its own (empty) state stands.
+    app.set_tab(Tab::Changes).unwrap();
+    assert!(app.diff_path.is_none(), "the All files selection does not carry into Changes");
+}
+
+#[test]
+fn a_file_view_comment_exports_as_path_line_with_a_context_snippet() {
+    use herdr_review::app::Tab;
+    let r = Repo::init();
+    r.write("a.rs", "alpha\nbeta\ngamma\n");
+    r.commit_all("init");
+    let mut app = app_on(&r);
+    app.set_tab(Tab::AllFiles).unwrap();
+    let row = file_row_of(&app, "a.rs").expect("a.rs listed");
+    app.select_file(row).unwrap();
+    app.focus = Focus::Diff;
+    app.diff_cursor = 1; // the second line, "beta"
+    app.start_comment();
+    for ch in "why".chars() {
+        app.input_push(ch);
+    }
+    app.submit_comment();
+
+    let target = FakeTarget::ok();
+    app.export(&target);
+    let out = target.last();
+    assert!(out.contains("a.rs:2"), "header is path:line:\n{out}");
+    assert!(!out.contains("(removed)"), "a content comment never carries (removed):\n{out}");
+    assert!(out.contains(" beta"), "the snippet is the space-prefixed content line:\n{out}");
+}
+
+#[test]
+fn an_oversize_file_in_all_files_degrades_to_a_notice() {
+    use herdr_review::app::Tab;
+    use herdr_review::diff::{FileState, View};
+    let r = Repo::init();
+    r.write("small.rs", "fn main() {}\n");
+    r.write("big.bin", &"x\n".repeat(1_100_000)); // ~2.2 MB, over the 2 MB budget
+    r.commit_all("init");
+    let mut app = app_on(&r);
+    app.set_tab(Tab::AllFiles).unwrap();
+    let row = file_row_of(&app, "big.bin").expect("big.bin listed");
+    app.select_file(row).unwrap();
+    assert_eq!(app.diff.state, FileState::TooLarge, "an over-budget file is not read whole");
+    assert_eq!(app.diff.view, View::File);
+    assert!(app.visible.is_empty());
+}
+
+#[test]
+fn switching_to_an_empty_file_view_focuses_the_tree() {
+    use herdr_review::app::Tab;
+    let r = Repo::init();
+    r.write("a.rs", "alpha\n");
+    r.commit_all("init");
+    r.remove("a.rs"); // deleted: still tracked (in ls-files) but empty on disk
+    let mut app = app_on(&r);
+    app.focus = Focus::Diff; // reader is in the diff pane on the deletion
+    app.set_tab(Tab::AllFiles).unwrap();
+    assert!(app.visible.is_empty(), "the deleted file's content view is empty");
+    assert_eq!(app.focus, Focus::Files, "an empty left pane focuses the tree, not traps the keys");
+}
+
+#[test]
+fn a_diff_comment_does_not_render_in_the_file_view() {
+    use herdr_review::app::Tab;
+    use herdr_review::diff::View;
+    let r = Repo::init();
+    r.write("a.rs", "alpha\nbeta\ngamma\n");
+    r.commit_all("init");
+    r.write("a.rs", "alpha\nBETA\ngamma\n"); // a.rs changed
+    let mut app = app_on(&r);
+    app.focus = Focus::Diff;
+    app.diff_cursor = row_with(&app, '+'); // the +BETA insertion
+    app.start_comment();
+    app.input_push('x');
+    app.submit_comment();
+    assert!(app.store.get(0).unwrap().diff_anchored, "made in the Changes diff");
+    assert!(!app.commented_lines().is_empty(), "renders in its own diff view");
+
+    // In All files, open a.rs as content: the diff-anchored comment must not bleed in.
+    app.set_tab(Tab::AllFiles).unwrap();
+    let row = file_row_of(&app, "a.rs").expect("a.rs listed");
+    app.select_file(row).unwrap();
+    assert_eq!(app.diff.view, View::File);
+    assert!(
+        app.commented_lines().is_empty(),
+        "a diff-anchored comment does not render in the File view"
+    );
+}
+
+#[test]
+fn editing_a_comment_on_all_files_opens_the_file_view() {
+    use herdr_review::app::Tab;
+    use herdr_review::diff::View;
+    let r = Repo::init();
+    r.write("a.rs", "alpha\nbeta\n");
+    r.write("b.rs", "one\ntwo\n");
+    r.commit_all("init");
+    let mut app = app_on(&r);
+    app.set_tab(Tab::AllFiles).unwrap();
+    // A content comment on a.rs.
+    let arow = file_row_of(&app, "a.rs").expect("a.rs listed");
+    app.select_file(arow).unwrap();
+    app.focus = Focus::Diff;
+    app.diff_cursor = 0;
+    app.start_comment();
+    app.input_push('x');
+    app.submit_comment();
+    // Open b.rs, so the comment's file is not the one shown.
+    let brow = file_row_of(&app, "b.rs").expect("b.rs listed");
+    app.select_file(brow).unwrap();
+    assert_eq!(app.diff_path.as_deref(), Some("b.rs"));
+
+    // Edit the comment from the list: it must bring a.rs back as a File view, not a diff.
+    app.open_list();
+    app.start_edit();
+    assert_eq!(app.diff_path.as_deref(), Some("a.rs"));
+    assert_eq!(app.diff.view, View::File, "editing on All files opens the File view, not a diff");
+    assert!(app.composing());
+}
+
+#[test]
+fn changing_scope_on_all_files_snaps_the_changes_diff_to_the_top() {
+    use std::fmt::Write as _;
+
+    use herdr_review::app::Tab;
+    let r = Repo::init();
+    let mut body = String::new();
+    for i in 0..40 {
+        writeln!(body, "line {i}").unwrap();
+    }
+    r.write("a.rs", &body);
+    r.commit_all("base");
+    r.git(&["checkout", "-b", "feature"]);
+    r.write("a.rs", &body.replace("line 5", "LINE 5"));
+    r.commit_all("feature edit"); // a.rs differs from base → changed in branch scope
+    r.write("a.rs", &body.replace("line 5", "LINE 5").replace("line 30", "LINE 30")); // uncommitted
+
+    let mut app = app_on(&r); // Uncommitted scope; a.rs open in Changes
+    app.focus = Focus::Diff;
+    app.diff_cursor = 2;
+    app.diff_scroll = 1;
+
+    // Change scope while on All files, then return to Changes.
+    app.set_tab(Tab::AllFiles).unwrap();
+    app.set_scope(Scope::Branch).unwrap();
+    app.set_tab(Tab::Changes).unwrap();
+
+    assert!(app.entries.iter().any(|e| e.path == "a.rs"), "a.rs is in the branch changeset");
+    assert_eq!(app.diff_scroll, 0, "an explicit scope switch snaps the Changes diff to the top");
+    assert_eq!(app.diff_cursor, 0);
 }

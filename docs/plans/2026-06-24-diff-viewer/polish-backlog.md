@@ -28,3 +28,17 @@ Tuning and polish within the current stack (ratatui + syntect/two-face + Catppuc
 ## Approach
 
 Color values are see-it-live decisions — wire a batch, push to the pane, tune by eye ("warmer / dimmer / more contrast") rather than guessing hex in the abstract.
+
+## All files — deferred from the UX-review pass (2026-06-26)
+
+The UX review of the All files tab fixed the high-value items (A–H); these were consciously deferred.
+
+- **Git-blob/diff-side read cap.** `set_file_view` now checks on-disk size before reading (`app.rs`), but the diff path (`git::file_content` → full `git show` stdout; `worktree_content` on the new side) still reads before `build`'s budget trips. Mirror the metadata guard with `git cat-file -s` on the blob side. Pre-existing, less acute than the one-keystroke File-view path.
+- **File-view per-frame height/wrap recompute.** `diff_row_heights` re-wraps every visible row each frame; the File view disables folding, so `visible` is the whole file (up to the 50k-line cap), making `j`-scroll on a big file laggy. Memoize heights by `(content-hash, width, wrap)`, or measure only the scroll window. Same class as the M5-deferred "single measure+paint pass".
+- **`set_scope` reveals the cursor.** A scope switch sets `reveal_files = true`, which can yank a wheel-scrolled All files viewport back to the cursor, against file-list.md's "scroll holds". Minor; only after a wheel scroll.
+- **Header count vs. visible markers.** The count is the changeset (e.g. `3 changed`) while a deletion in that set has no row in the worktree tree, so the number can exceed the marked rows. Spec-sanctioned; no change.
+- **Symlinks render target content.** `worktree_content`'s `fs::read` follows links. Acceptable; a broken symlink reads empty → "empty file".
+- **`is_stale` stats the disk per content comment per frame** while the `l` comments overlay is open (`app.rs`). Minor syscall churn (overlay-only, content-anchored comments only). Cache existence per reload rather than per frame if it ever matters. (Garfield review, 2026-06-26.)
+- **`TabStash` is a 13-field manual swap.** Adding a per-tab field to `App` without adding it to `swap_active_with_stash` silently leaks state across tabs. A `[TabState; 2]` indexed by `tab` removes the footgun but touches every field access — a refactor, not a local fix. A warning comment guards it for now. (Garfield review, 2026-06-26.)
+- **`All files` poll shells out to git twice.** Each ~2s poll computes the changeset (`changed_files`) and `all_files` (`ls-files` + `status`) — ~3 subprocesses, re-listing the whole worktree even when nothing changed. Refresh the cheap changeset each poll and cache the `all_files` listing, recomputing only on explicit refresh or a structural-change signal. (Code-review, 2026-06-26.)
+- **`set_file_view` re-reads the open file every poll.** A quiescent open `All files` file is read whole off disk and content-hashed each poll only to hit the cache and no-op (the cache avoids re-highlight, not re-read). Gate on the `metadata` (mtime/len) already stat'd and skip the read+hash when unchanged. (Code-review, 2026-06-26.)
