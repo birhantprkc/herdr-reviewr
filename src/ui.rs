@@ -18,11 +18,20 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::app::{App, Focus, Mode, Tab};
 use crate::diff::{FileDiff, FileState, Row};
 use crate::file_list::{Annotation, RowKind};
+use crate::forge;
 use crate::model::Comment;
 
 pub fn render(frame: &mut Frame, app: &App) {
     let area = frame.area();
     let p = panes(area, app.list_pct);
+
+    if app.tab == Tab::Pr {
+        render_pr_header(frame, app, p.tab);
+        render_pr_read(frame, app, p.diff);
+        render_pr_nav(frame, app, p.files);
+        render_pr_status(frame, app, p.status);
+        return;
+    }
 
     render_tab_bar(frame, app, p.tab);
     render_diff_view(frame, app, p.diff);
@@ -378,7 +387,8 @@ pub fn hit_header(area: Rect, app: &App, col: u16, row: u16) -> Option<HeaderHit
 
 /// The two tabs and their labels, left to right. All-ASCII labels keep the byte length equal
 /// to the display width, so the header column math stays simple.
-const TABS: [(Tab, &str); 2] = [(Tab::Changes, "1 Changes"), (Tab::AllFiles, "2 All files")];
+const TABS: [(Tab, &str); 3] =
+    [(Tab::Changes, "1 Changes"), (Tab::AllFiles, "2 All files"), (Tab::Pr, "3 PR")];
 const HEADER_LEAD: &str = " ";
 const TAB_GAP: &str = "  ";
 const HEADER_GAP: &str = "  ";
@@ -469,7 +479,7 @@ fn render_file_list(frame: &mut Frame, app: &App, area: Rect) {
         let msg = match app.tab {
             Tab::AllFiles => "no files",
             Tab::Changes if app.awaiting_turn() => "waiting for the agent's next turn",
-            Tab::Changes => "no changes",
+            _ => "no changes",
         };
         frame.render_widget(dim_paragraph(msg), inner);
         return;
@@ -673,7 +683,7 @@ fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
         (Some(new), None) => new.clone(),
         (None, _) => match app.tab {
             Tab::AllFiles => "File",
-            Tab::Changes => "Diff",
+            _ => "Diff",
         }
         .to_string(),
     };
@@ -692,7 +702,7 @@ fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
                 FileState::Normal => "select a file to read",
             },
             Tab::Changes if app.awaiting_turn() => "waiting for the agent's next turn",
-            Tab::Changes => match app.diff.state {
+            _ => match app.diff.state {
                 FileState::Binary => "binary — no line comments",
                 FileState::TooLarge => "file too large to diff",
                 FileState::Normal => "no diff",
@@ -1185,6 +1195,327 @@ fn selectable_row(
         }
     }
     ListItem::new(Line::from(spans))
+}
+
+// --- PR tab (specs/forge-host.md, specs/tui.md) --------------------------------
+
+/// The header for the read-only PR tab: the tab names, then a right-anchored, clickable
+/// `status #number ↗` chip (status colored by lifecycle, the `↗` sharing the number's colour),
+/// with the PR title right-aligned to its left. Merge/sync/checks live in the footer.
+fn render_pr_header(frame: &mut Frame, app: &App, area: Rect) {
+    let bar = Style::default().bg(cat::SURFACE0);
+    let mut spans = vec![Span::styled(HEADER_LEAD, bar)];
+    for (i, (tab, label)) in TABS.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(TAB_GAP, bar));
+        }
+        let style = if *tab == app.tab {
+            bar.fg(cat::LAVENDER).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+        } else {
+            bar.fg(cat::SUBTEXT0)
+        };
+        spans.push(Span::styled(*label, style));
+    }
+    spans.push(Span::styled(HEADER_GAP, bar));
+    let lead_tabs: usize = spans.iter().map(Span::width).sum();
+    let w = area.width as usize;
+
+    match &app.pr {
+        forge::PrView::Pr(s) => {
+            let number = format!("#{}", s.number);
+            let (status, color) = pr_status_chip(s);
+            let chip_w = pr_chip_width(s);
+            // The title fills the gap left of the chip, right-aligned against it (a leading pad).
+            let name = truncate_width(&s.title, w.saturating_sub(lead_tabs + chip_w + 2).max(4));
+            let pad = w.saturating_sub(lead_tabs + name.width() + 2 + chip_w);
+            spans.push(Span::styled(" ".repeat(pad), bar));
+            spans.push(Span::styled(name, bar.fg(cat::SUBTEXT0)));
+            spans.push(Span::styled("  ", bar));
+            spans.push(Span::styled(status, bar.fg(color).add_modifier(Modifier::BOLD)));
+            spans.push(Span::styled(" ", bar));
+            spans.push(Span::styled(number, bar.fg(cat::YELLOW).add_modifier(Modifier::BOLD)));
+            // The arrow shares the PR number's colour, reading as part of the clickable chip.
+            spans.push(Span::styled(" ↗", bar.fg(cat::YELLOW)));
+        }
+        forge::PrView::Ambiguous(n) => spans.push(Span::styled(
+            format!("{n} open PRs for this branch — open one on GitHub"),
+            bar.fg(cat::OVERLAY0),
+        )),
+        view => spans.push(Span::styled(pr_empty_msg(view), bar.fg(cat::OVERLAY0))),
+    }
+
+    // Fill the rest of the bar (the Pr arm already reaches the right edge).
+    let used: usize = spans.iter().map(Span::width).sum();
+    if used < w {
+        spans.push(Span::styled(" ".repeat(w - used), bar));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// The status chip word and its Catppuccin accent, by lifecycle.
+fn pr_status_chip(s: &forge::PrSnapshot) -> (&'static str, Color) {
+    match s.state {
+        forge::PrState::Merged => ("merged", cat::MAUVE),
+        forge::PrState::Closed => ("closed", cat::RED),
+        forge::PrState::Open if s.is_draft => ("draft", cat::YELLOW),
+        forge::PrState::Open => ("open", cat::GREEN),
+    }
+}
+
+/// The display width of the header's `status #number ↗` chip — shared by the painter and the
+/// click hit-test so they agree on its right-anchored column range.
+fn pr_chip_width(s: &forge::PrSnapshot) -> usize {
+    pr_status_chip(s).0.width() + " ".width() + format!("#{}", s.number).width() + " ↗".width()
+}
+
+/// The PR's merge, sync, and checks status for the footer, joined by `·`. Merge and sync show
+/// only for an open PR — they are meaningless once it is merged or closed.
+fn pr_state_line(s: &forge::PrSnapshot) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if s.state == forge::PrState::Open {
+        match s.merge {
+            forge::Merge::Conflicting => parts.push(format!("⚠ conflicts with {}", s.base_ref)),
+            forge::Merge::Behind => parts.push(format!("behind {}", s.base_ref)),
+            forge::Merge::Blocked => parts.push("blocked".into()),
+            forge::Merge::Unstable => parts.push("unstable".into()),
+            forge::Merge::Checking => parts.push("merge: checking…".into()),
+            forge::Merge::Clean => {}
+        }
+        match s.sync {
+            forge::Sync::Unpushed(n) => parts.push(format!("⇡ {n} unpushed")),
+            forge::Sync::Behind(n) => parts.push(format!("⇣ {n} behind")),
+            forge::Sync::InSync => {}
+        }
+    }
+    parts.push(checks_summary(s));
+    parts.push(format!("{} comments", s.comments.len()));
+    // A capped surface means the lists are a prefix; point at GitHub for the rest rather than
+    // showing the partial counts as if complete (specs/forge-host.md).
+    if s.truncated {
+        parts.push("+more on GitHub ↗".into());
+    }
+    parts.join(" · ")
+}
+
+/// A one-token checks summary for the footer (`✓ checks` / `✗ N failing` / `● running`).
+fn checks_summary(s: &forge::PrSnapshot) -> String {
+    match s.checks_rollup() {
+        None => "no checks".into(),
+        Some(forge::CheckStatus::Failure) => format!("✗ {} failing", s.failing_checks()),
+        Some(forge::CheckStatus::Running) => "● checks running".into(),
+        Some(_) => "✓ checks".into(),
+    }
+}
+
+/// The right navigator: the checks list above the newest-first comments list, with the cursor
+/// row filled and the view windowed to keep it on screen.
+fn render_pr_nav(frame: &mut Frame, app: &App, area: Rect) {
+    // Identity (number + title) lives in the header; this pane is just "PR".
+    let block = bordered("PR", true);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let Some(s) = app.pr_snapshot() else {
+        frame.render_widget(dim_paragraph(pr_empty_msg(&app.pr)), inner);
+        return;
+    };
+    let width = inner.width as usize;
+    let dim = Style::default().fg(cat::OVERLAY0);
+    let now = std::time::SystemTime::now();
+
+    // (row spans, is the navigator cursor on this row). Only comment rows are selectable; the
+    // checks section is a status display.
+    let mut rows: Vec<(Vec<Span<'static>>, bool)> = Vec::new();
+    rows.push((vec![Span::styled(pr_checks_header(s), dim)], false));
+    for c in &s.checks {
+        let (glyph, color) = check_glyph(c.status);
+        rows.push((
+            vec![
+                Span::styled(format!(" {glyph} "), Style::default().fg(color)),
+                Span::styled(c.name.clone(), text_style()),
+            ],
+            false,
+        ));
+    }
+    rows.push((Vec::new(), false));
+    rows.push((vec![Span::styled(format!("comments · {}", s.comments.len()), dim)], false));
+    for (j, cm) in s.comments.iter().enumerate() {
+        rows.push((pr_comment_row(cm, width, now), app.pr_cursor == j));
+    }
+
+    let viewport = inner.height as usize;
+    let selected = rows.iter().position(|(_, sel)| *sel).unwrap_or(0);
+    let scroll = selected.saturating_sub(viewport.saturating_sub(1));
+    let items: Vec<ListItem> = rows
+        .into_iter()
+        .skip(scroll)
+        .take(viewport)
+        .map(|(spans, sel)| selectable_row(spans, width, sel.then(|| cursor_bg(true))))
+        .collect();
+    frame.render_widget(List::new(items), inner);
+}
+
+/// The `checks` section header with its rollup (`✗ 1 failing` / `✓ N passed` / `running`).
+fn pr_checks_header(s: &forge::PrSnapshot) -> String {
+    match s.checks_rollup() {
+        None => "checks  none".into(),
+        Some(forge::CheckStatus::Failure) => format!("checks  ✗ {} failing", s.failing_checks()),
+        Some(forge::CheckStatus::Running) => "checks  running".into(),
+        Some(_) => format!("checks  ✓ {} passed", s.checks.len()),
+    }
+}
+
+/// One comment row: `@author anchor`, then a trailing `resolved`/`outdated` marker or the age.
+fn pr_comment_row(
+    cm: &forge::Comment,
+    width: usize,
+    now: std::time::SystemTime,
+) -> Vec<Span<'static>> {
+    let author_color = if cm.author_is_bot { cat::OVERLAY1 } else { cat::PEACH };
+    let trailing = if cm.is_resolved {
+        "resolved".to_string()
+    } else if cm.is_outdated {
+        "outdated".to_string()
+    } else {
+        forge::relative_age(&cm.created_at, now)
+    };
+    let author = format!("@{} ", cm.author);
+    let budget = width.saturating_sub(author.width() + trailing.width() + 3).max(1);
+    let anchor = elide_head(&cm.anchor, budget);
+    vec![
+        Span::styled(author, Style::default().fg(author_color)),
+        Span::styled(anchor, text_style()),
+        Span::styled(format!("  {trailing}"), Style::default().fg(cat::OVERLAY0)),
+    ]
+}
+
+/// The left read pane: the selected comment's hunk (for a finding) then its body, a check's
+/// open hint, or the loading/degraded message.
+fn render_pr_read(frame: &mut Frame, app: &App, area: Rect) {
+    let selected = app.pr_selected_comment();
+    let title = match selected {
+        Some(cm) => format!("@{} · {}", cm.author, cm.anchor),
+        None => "PR".to_string(),
+    };
+    let block = bordered(&title, false);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let width = inner.width as usize;
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    if let Some(cm) = selected {
+        if let Some(hunk) = &cm.snippet {
+            for raw in hunk.lines() {
+                let color = match raw.bytes().next() {
+                    Some(b'+') => cat::GREEN,
+                    Some(b'-') => cat::RED,
+                    _ => cat::OVERLAY0,
+                };
+                lines.push(Line::from(Span::styled(raw.to_string(), Style::default().fg(color))));
+            }
+            lines.push(Line::raw(""));
+        }
+        for logical in cm.body.split('\n') {
+            for piece in wrap_text(logical, width.max(1)) {
+                lines.push(Line::from(Span::styled(piece, text_style())));
+            }
+        }
+        if cm.reply_count > 0 {
+            let plural = if cm.reply_count == 1 { "reply" } else { "replies" };
+            lines.push(Line::raw(""));
+            lines.push(Line::from(Span::styled(
+                format!("↳ {} {plural} — open on GitHub to read", cm.reply_count),
+                Style::default().fg(cat::OVERLAY0),
+            )));
+        }
+    } else {
+        lines.push(Line::from(Span::styled(
+            pr_empty_msg(&app.pr),
+            Style::default().fg(cat::OVERLAY0),
+        )));
+    }
+
+    // Clamp in `usize` before the `u16` cast — `pr_read_scroll` grows unbounded via the wheel,
+    // so casting first could wrap a large value below the clamp.
+    let scroll = app.pr_read_scroll.min(lines.len().saturating_sub(1)) as u16;
+    frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), inner);
+}
+
+/// The PR tab's footer: counts and the read-only key hints.
+fn render_pr_status(frame: &mut Frame, app: &App, area: Rect) {
+    let line = if !app.status.is_empty() {
+        app.status.clone()
+    } else if let Some(s) = app.pr_snapshot() {
+        format!(" {}    j/k move · PgUp/PgDn scroll · o open ↗ · r refresh", pr_state_line(s))
+    } else {
+        " PR    r refresh · q quit".to_string()
+    };
+    frame.render_widget(Paragraph::new(line).style(Style::default().fg(cat::SUBTEXT0)), area);
+}
+
+/// The one-line message for a loading or degraded PR view, each naming what unblocks it.
+fn pr_empty_msg(view: &forge::PrView) -> &'static str {
+    match view {
+        forge::PrView::Loading => "loading…",
+        forge::PrView::Pr(_) => "",
+        forge::PrView::NoPr => "no PR for this branch yet — push and open one, then press r",
+        forge::PrView::Ambiguous(_) => "this branch backs several open PRs — open one on GitHub",
+        forge::PrView::NoGh => "gh not found — install gh, then press r",
+        forge::PrView::NotAuthed => "not signed in — run `gh auth login`, then press r",
+        forge::PrView::NotGitHub => "not a GitHub remote — the PR tab needs a github.com origin",
+        forge::PrView::Error(_) => "github unavailable — retrying; press r to retry now",
+    }
+}
+
+/// Whether a click at `(col, row)` lands on the header's right-anchored `status #number ↗`
+/// chip — the whole chip opens the PR.
+#[must_use]
+pub fn hit_pr_open(area: Rect, app: &App, col: u16, row: u16) -> bool {
+    let Some(s) = app.pr_snapshot() else {
+        return false;
+    };
+    if row != area.y {
+        return false;
+    }
+    let chip_w = pr_chip_width(s) as u16;
+    // The chip occupies the last `chip_w` columns; `saturating_sub` keeps the bound overflow-free.
+    col >= area.width.saturating_sub(chip_w) && col < area.width
+}
+
+/// The comment index a click at `(col, row)` lands on, or `None` (a check, header, or blank).
+/// Mirrors `render_pr_nav`'s row layout and cursor-windowed scroll; only comments are selectable.
+#[must_use]
+pub fn pr_nav_hit(area: Rect, app: &App, col: u16, row: u16) -> Option<usize> {
+    let inner = inner_rect(panes(area, app.list_pct).files);
+    if !contains(inner, col, row) {
+        return None;
+    }
+    let s = app.pr_snapshot()?;
+    // The first comment's display row, mirroring `render_pr_nav`'s layout; the view windows on
+    // the selected comment exactly as the painter does.
+    let first = pr_nav_comment_offset(s);
+    let sel_display = first + app.pr_cursor;
+    let viewport = inner.height as usize;
+    let scroll = sel_display.saturating_sub(viewport.saturating_sub(1));
+    let d = (row - inner.y) as usize + scroll;
+    (d >= first && d - first < s.comments.len()).then(|| d - first)
+}
+
+/// The display row of the first comment in `render_pr_nav`'s navigator — past the checks header,
+/// the checks themselves, a blank, and the comments header. The single home for that layout
+/// offset, shared with the click hit-test so the painted rows and the hit math can't drift.
+fn pr_nav_comment_offset(s: &forge::PrSnapshot) -> usize {
+    s.checks.len() + 3
+}
+
+/// The status glyph and Catppuccin accent for a check.
+fn check_glyph(status: forge::CheckStatus) -> (&'static str, Color) {
+    match status {
+        forge::CheckStatus::Success => ("✓", cat::GREEN),
+        forge::CheckStatus::Failure => ("✗", cat::RED),
+        forge::CheckStatus::Running => ("●", cat::YELLOW),
+        forge::CheckStatus::Pending => ("○", cat::OVERLAY0),
+        forge::CheckStatus::Skipped => ("⊘", cat::OVERLAY0),
+    }
 }
 
 // --- helpers -------------------------------------------------------------------

@@ -1,7 +1,7 @@
 ---
-Status: Current
+Status: Draft
 Created: 2026-06-23
-Last edited: 2026-06-26
+Last edited: 2026-06-27
 ---
 
 # TUI
@@ -33,7 +33,7 @@ The terminal interface: how the review is laid out, how you drive it by keyboard
 - The comment input opens **inline, directly under the last line of the selection**, pushing the diff below it down; it grows as you type more lines. It is not a footer band.
 - The footer is a key-hint and status line.
 
-The tab bar shows `Changes` and `All files`, with `Checks` roadmap. The active tab sets the right pane's tree and the left pane's content: a diff in `Changes`, file content in `All files`. The review loop — select, comment, send — is the same in both.
+The tab bar shows `Changes`, `All files`, and `PR`. The active tab sets the two panes' content: a diff and changed-files tree in `Changes`, file content and a whole-repo tree in `All files`, and the PR's checks and comments in `PR` (see **PR tab**). The review loop — select, comment, send — is the same in `Changes` and `All files`; `PR` is a read-only mirror of the pull request, with no authoring.
 
 ## Behavior
 
@@ -50,7 +50,7 @@ Every action has a keyboard binding. The mouse-relevant ones also work by click 
 | scroll a pane's viewport, leaving the selection put | — | wheel over the pane |
 | scroll the diff horizontally, when wrap is off and not on a fold | `←` / `→` | — |
 | switch scope | `u` uncommitted / `b` branch / `t` last-turn | click the scope in the header to cycle |
-| switch tab — `Changes` / `All files` | `1` / `2` (provisional) | click a tab name |
+| switch tab — `Changes` / `All files` / `PR` | `1` / `2` / `3` (provisional) | click a tab name |
 | expand the fold under the cursor | `→` | click the `⋯` fold row |
 | toggle line wrap | `w` | — |
 | resize the panes — widen / narrow the file list | `]` / `[` | drag the divider between the panes |
@@ -71,10 +71,43 @@ On save the input box closes and the comment stays visible: it renders as a **re
 
 ### Tabs
 
-- Each tab owns its state: its opened file, the diff/content scroll, the cursor, and which directories are expanded. Nothing carries between the tabs.
-- Switching away and back restores the tab exactly — the same file open at the same scroll — so the two tabs are independent workspaces.
-- A first visit to a tab opens its first file (or, on a collapsed tree with the cursor on a directory, nothing until you pick one).
+- Each tab owns its state: its opened file or card, the scroll, the cursor, and which directories are expanded or cards are sent. Nothing carries between the tabs.
+- Switching away and back restores the tab exactly — the same file open at the same scroll — so the tabs are independent workspaces.
+- A first visit to a tab opens its first file or card (or, on a collapsed tree with the cursor on a directory, nothing until you pick one).
 - A tab switch keeps the focused side — content or tree — so keyboard navigation continues; an empty left pane focuses the tree.
+
+### PR tab
+
+The `PR` tab is a read-only mirror of the pull request, in the same two-pane frame as Changes: the right pane navigates the PR's checks and comments, the left pane reads the selected comment, and the header carries the PR's identity and state. It reads GitHub through `forge-host.md` and writes nothing — its only outward action is opening a link in the browser.
+
+```
+ 1 Changes  2 All files  3 PR              Deep research: GPT-5.5/5.4-mini upgrade…  merged #226 ↗
+╭─ @codex · manager.py:115 ────────────────────────────╮╭─ PR ─────────────────────────╮
+│ -    if primary_result.status == PERM_FAILURE:        ││ checks  ✗ 1 failing          │
+│ -        return primary_result                        ││  ✓ build-main-image          │
+│                                                       ││  ✓ review                    │
+│ Avoid falling back after target permanent failures.   ││  ✗ tests                     │
+│ This now attempts a fallback for every non-success…   ││                              │
+│                                                       ││ comments · 5                 │
+│                                                       ││▍@you    comment          5m  │
+│                                                       ││ @codex  manager.py:115   2h  │
+│                                                       ││ @claude review           2h  │
+│                                                       ││ @claude manager.py:39    2h  │
+│                                                       ││ @claude parse.py:187  outdated│
+╰───────────────────────────────────────────────────────╯╰─────────────────────────────╯
+ ⚠ conflicts with main · ⇡ 2 unpushed · ✗ 1 failing · 5 comments    j/k move · PgUp/PgDn scroll · o open ↗ · r refresh
+```
+
+- The header right-anchors a clickable `status #226 ↗` chip — status colored by lifecycle (`open` green, `draft` yellow, `merged` mauve, `closed` red), the `↗` in the number's colour — with the PR title right-aligned to its left, truncated to fit. Clicking the chip (or `o`) opens the PR.
+- The footer carries the merge, sync, and checks state and the comment count (`⚠ conflicts with main · ⇡ 2 unpushed · ✗ 1 failing · 5 comments`); merge and sync show only while the PR is open. When a capped surface has more rows than fetched, a trailing `+more on GitHub ↗` marker is appended (`forge-host.md`).
+- The right pane is the navigator: a status-only `checks` section (each check as `icon name`) above the `comments` list, which is what the cursor walks.
+- The `comments` list is newest first, each row `@author anchor age`, with an `outdated` or `resolved` marker where GitHub has receded the thread.
+- The left pane reads the selected comment: a finding shows its `diff_hunk` as text then the body, a review or plain comment shows its prose.
+- A human author is emphasised over the bots, so a person's comment stands out in a bot-heavy list.
+- `j`/`k` or a click selects and reads a comment; `PageUp`/`PageDown` and the wheel scroll the read pane; `o` (and the header button) opens the PR in the browser.
+- The tab adds no authoring — `s`, `c`, `v`, `d`, `e` do nothing here.
+- A `merged` or `closed` PR shows the same mirror read-only under a `#226 merged` header.
+- No open PR, or no usable `gh`, shows the matching empty state from `forge-host.md`, each naming the command that unblocks it.
 
 ### Comment editor
 
@@ -110,6 +143,8 @@ The inline box is a plain-text field that behaves like an ordinary editor: the c
 - A poll reloads the changed-files list and the open diff, keeping the selected file and scroll position where the file still exists.
 - While you are composing a comment, the input and the diff you are commenting on are frozen; the file list still updates.
 - `r` forces an immediate reload.
+- The `PR` tab reads GitHub on its own cadence (`forge-host.md`), separate from the worktree poll: it fetches when the panel opens, refetches on entering the tab, on `r`, and on the agent's turn-end while the tab is active, and falls back to a slow timer.
+- A PR refetch keeps your place, like a worktree poll: the comment cursor follows the selected comment by identity and the read-pane scroll is kept; if that comment is gone (or none was selected) the cursor clamps to the new list and the read pane resets to the top.
 - Refresh cadence is timer-based and uses no herdr events; the same poll also samples the agent's status to track the `last-turn` baseline (`herdr-host.md`).
 - In `last-turn` scope, until a turn start has been observed the file list and diff show an empty state — `waiting for the agent's next turn` — rather than a stale or whole-worktree diff.
 
@@ -130,7 +165,7 @@ The inline box is a plain-text field that behaves like an ordinary editor: the c
 
 - Two-pane focus, not scope on `tab` — `j`/`k` drive whichever pane is focused, and `tab` switches focus. Anchoring comments and jumping between them needs a per-line diff cursor, so the diff is independently focusable rather than scroll-only; scope moves to `u`/`b` (and a clickable scope chip).
 - One scroll model for both panes — each pane has a cursor and an independent viewport offset. The keyboard moves the cursor (the view reveals it); the mouse wheel scrolls the pane-under-the-pointer's viewport and never moves the cursor. So wheeling to read context never moves the comment anchor, and both panes behave identically. Rejected: cursor-coupled scrolling, where the wheel drags the cursor — it mis-anchors comments and made the two panes inconsistent.
-- Poll on a timer, not on agent turns — turn transitions are too coarse and slow to drive the refresh cadence; polling is simple and predictable. The agent's turn signal moves only the `last-turn` baseline (`herdr-host.md`), never the refresh interval.
+- Poll the worktree on a timer, not on agent turns — turn transitions are too coarse to drive the changed-files refresh; polling is simple and predictable. The agent's turn signal moves the `last-turn` baseline (`herdr-host.md`); the separate `PR` tab also uses turn-end as one refetch trigger (`forge-host.md`), but neither changes the worktree poll interval.
 - Keyboard and mouse together — the asked-for flow includes a clickable `Send` button and click-to-open files.
 - Inline comment input — the box opens under the selected line (insert: the diff below shifts down) rather than in a detached footer, so the comment sits with the code it is about; it grows to fit multi-line text.
 - One `Send`, not send-one vs send-all — there is just a set of written comments; `s` / `S` / the button send them all. Removing the distinction drops a needless choice from the hot path.

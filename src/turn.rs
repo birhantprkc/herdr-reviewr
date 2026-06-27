@@ -75,6 +75,14 @@ impl TurnTracker {
         started
     }
 
+    /// Whether this next sample *ends* a turn — a `working`→resting edge. After it the agent
+    /// has gone idle, so any commit it pushed or `gh` PR action it ran (e.g. `gh pr merge`) is
+    /// now reflected on the forge and the `PR` tab is worth refetching. Pure: unlike
+    /// [`observe`](Self::observe) it does not advance `prev`, so call it before `observe`.
+    pub fn ends_turn(&self, next: Status) -> bool {
+        self.prev == Some(Status::Working) && next.is_resting()
+    }
+
     /// Store the worktree snapshot captured at a turn start as the pending candidate,
     /// replacing any earlier unpromoted candidate (a question-only turn's).
     pub fn set_candidate(&mut self, sha: String) {
@@ -129,6 +137,19 @@ mod tests {
         assert!(!t.observe(Status::Working), "blocked → working resumes the same turn");
         t.observe(Status::Unknown); // transient overlay
         assert!(!t.observe(Status::Working), "unknown → working resumes the same turn");
+    }
+
+    #[test]
+    fn a_turn_ends_only_on_a_working_to_resting_edge() {
+        let mut t = TurnTracker::default();
+        assert!(!t.ends_turn(Status::Idle), "no prior working sample, so no turn to end");
+        t.observe(Status::Idle);
+        t.observe(Status::Working); // mid-turn
+        assert!(!t.ends_turn(Status::Blocked), "working → blocked is a mid-turn pause, not an end");
+        assert!(t.ends_turn(Status::Idle), "working → idle ends the turn");
+        assert!(t.ends_turn(Status::Done), "working → done ends the turn");
+        t.observe(Status::Idle);
+        assert!(!t.ends_turn(Status::Working), "idle → working starts, never ends, a turn");
     }
 
     #[test]

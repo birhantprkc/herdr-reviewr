@@ -1768,3 +1768,173 @@ fn changing_scope_on_all_files_snaps_the_changes_diff_to_the_top() {
     assert_eq!(app.diff_scroll, 0, "an explicit scope switch snaps the Changes diff to the top");
     assert_eq!(app.diff_cursor, 0);
 }
+
+/// A PR-tab detour must not corrupt the two-tab diff stash: each file tab restores its own
+/// open file when returned to, even after passing through the read-only `PR` tab.
+#[test]
+fn the_pr_tab_detour_preserves_each_file_tab_state() {
+    use herdr_reviewr::app::Tab;
+    let r = Repo::init();
+    r.write("a.rs", "one\n");
+    r.write("b.rs", "two\n");
+    r.commit_all("init");
+    r.write("a.rs", "ONE\n"); // a.rs is the only changed file
+    let mut app = app_on(&r);
+
+    assert_eq!(app.tab, Tab::Changes);
+    assert_eq!(app.diff_path.as_deref(), Some("a.rs"));
+
+    // All files can open b.rs, which Changes can never show (b.rs is unchanged).
+    app.set_tab(Tab::AllFiles).unwrap();
+    app.select_file(file_row(&app, "b.rs")).unwrap();
+    assert_eq!(app.diff_path.as_deref(), Some("b.rs"));
+
+    // Detour through the PR tab; the file tabs stay frozen.
+    app.set_tab(Tab::Pr).unwrap();
+    assert_eq!(app.tab, Tab::Pr);
+
+    // Returning to All files restores b.rs (active file tab unchanged → no swap).
+    app.set_tab(Tab::AllFiles).unwrap();
+    assert_eq!(app.diff_path.as_deref(), Some("b.rs"), "All files restored after the PR detour");
+
+    // Returning to Changes swaps its state back — a.rs, never All files' b.rs.
+    app.set_tab(Tab::Changes).unwrap();
+    assert_eq!(app.tab, Tab::Changes);
+    assert_eq!(app.diff_path.as_deref(), Some("a.rs"), "Changes restored without bleeding b.rs");
+}
+
+/// The PR navigator cursor walks comments only (checks are a status display), the read pane
+/// tracks the selected comment, and `pr_move` clamps at both ends.
+#[test]
+fn pr_navigator_walks_comments_only_and_clamps() {
+    use herdr_reviewr::app::Tab;
+    use herdr_reviewr::forge::{
+        Check, CheckStatus, Comment, CommentKind, Merge, PrSnapshot, PrState, PrView, Sync,
+    };
+
+    let finding = |author: &str| Comment {
+        kind: CommentKind::Finding,
+        author: author.into(),
+        author_is_bot: true,
+        anchor: "a.rs:1".into(),
+        body: "b".into(),
+        snippet: None,
+        created_at: "2026-06-27T10:00:00Z".into(),
+        is_resolved: false,
+        is_outdated: false,
+        reply_count: 0,
+    };
+    let snap = PrSnapshot {
+        number: 1,
+        title: "t".into(),
+        url: "u".into(),
+        state: PrState::Open,
+        is_draft: false,
+        base_ref: "main".into(),
+        merge: Merge::Clean,
+        sync: Sync::InSync,
+        checks: vec![
+            Check { name: "build".into(), status: CheckStatus::Success },
+            Check { name: "test".into(), status: CheckStatus::Failure },
+        ],
+        comments: vec![finding("first"), finding("second")],
+        truncated: false,
+    };
+
+    let r = Repo::init();
+    r.write("x.rs", "y\n");
+    r.commit_all("init");
+    let mut app = app_on(&r);
+    app.set_tab(Tab::Pr).unwrap();
+    app.pr = PrView::Pr(Box::new(snap));
+
+    // The cursor starts on the first comment — checks are skipped entirely.
+    assert_eq!(app.pr_row_count(), 2, "two comments; the two checks are not cursor stops");
+    assert_eq!(app.pr_selected_comment().map(|c| c.author.as_str()), Some("first"));
+    app.pr_move(1);
+    assert_eq!(app.pr_selected_comment().map(|c| c.author.as_str()), Some("second"));
+    app.pr_move(5);
+    assert_eq!(
+        app.pr_selected_comment().map(|c| c.author.as_str()),
+        Some("second"),
+        "clamps at the last comment"
+    );
+    app.pr_move(-10);
+    assert_eq!(
+        app.pr_selected_comment().map(|c| c.author.as_str()),
+        Some("first"),
+        "clamps at the first comment"
+    );
+}
+
+#[test]
+fn apply_pr_follows_the_selected_comment_across_a_refresh() {
+    use herdr_reviewr::app::Tab;
+    use herdr_reviewr::forge::{Comment, CommentKind, Merge, PrSnapshot, PrState, PrView, Sync};
+
+    let comment = |author: &str, created: &str| Comment {
+        kind: CommentKind::Comment,
+        author: author.into(),
+        author_is_bot: false,
+        anchor: "comment".into(),
+        body: "b".into(),
+        snippet: None,
+        created_at: created.into(),
+        is_resolved: false,
+        is_outdated: false,
+        reply_count: 0,
+    };
+    let snap = |comments: Vec<Comment>| {
+        PrView::Pr(Box::new(PrSnapshot {
+            number: 1,
+            title: "t".into(),
+            url: "u".into(),
+            state: PrState::Open,
+            is_draft: false,
+            base_ref: "main".into(),
+            merge: Merge::Clean,
+            sync: Sync::InSync,
+            checks: Vec::new(),
+            comments,
+            truncated: false,
+        }))
+    };
+
+    let r = Repo::init();
+    r.write("x.rs", "y\n");
+    r.commit_all("init");
+    let mut app = app_on(&r);
+    app.set_tab(Tab::Pr).unwrap();
+
+    // Newest-first [ann@10:00, bob@09:00]; the cursor lands on the newest, then move to bob.
+    app.apply_pr(snap(vec![
+        comment("ann", "2026-06-27T10:00:00Z"),
+        comment("bob", "2026-06-27T09:00:00Z"),
+    ]));
+    assert_eq!(app.pr_selected_comment().map(|c| c.author.as_str()), Some("ann"));
+    app.pr_move(1);
+    assert_eq!(app.pr_selected_comment().map(|c| c.author.as_str()), Some("bob"));
+
+    // A refresh prepends a newer comment: the cursor follows bob to its new index, not index 1.
+    app.apply_pr(snap(vec![
+        comment("cara", "2026-06-27T11:00:00Z"),
+        comment("ann", "2026-06-27T10:00:00Z"),
+        comment("bob", "2026-06-27T09:00:00Z"),
+    ]));
+    assert_eq!(
+        app.pr_selected_comment().map(|c| c.author.as_str()),
+        Some("bob"),
+        "the cursor follows the same comment by identity, not its old index"
+    );
+
+    // A refresh where bob is gone clamps the now-dangling cursor back into range.
+    app.apply_pr(snap(vec![
+        comment("cara", "2026-06-27T11:00:00Z"),
+        comment("ann", "2026-06-27T10:00:00Z"),
+    ]));
+    assert_eq!(
+        app.pr_selected_comment().map(|c| c.author.as_str()),
+        Some("ann"),
+        "a vanished selection clamps to the last row"
+    );
+}

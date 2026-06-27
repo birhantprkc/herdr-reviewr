@@ -61,7 +61,7 @@ impl ExportTarget for Clipboard {
     }
 
     fn export(&self, text: &str) -> Result<()> {
-        let (cmd, args) = select_tool(CLIPBOARD_TOOLS, tool_on_path).context(
+        let (cmd, args) = select_tool(CLIPBOARD_TOOLS, crate::proc::on_path).context(
             "no clipboard tool found (install wl-clipboard, xclip, or xsel) — \
              use \"Add all to chat\" instead",
         )?;
@@ -89,15 +89,6 @@ fn select_tool(
     present: impl Fn(&str) -> bool,
 ) -> Option<(&'static str, &'static [&'static str])> {
     tools.iter().copied().find(|(cmd, _)| present(cmd))
-}
-
-/// Whether `name` resolves to a file on `PATH` — a dependency-free `which` for the clipboard
-/// probe (both shipped platforms are unix, so a file in a `PATH` dir is the executable).
-fn tool_on_path(name: &str) -> bool {
-    let Some(path) = std::env::var_os("PATH") else {
-        return false;
-    };
-    std::env::split_paths(&path).any(|dir| dir.join(name).is_file())
 }
 
 /// The agent pane: fill its input via `herdr agent send`, then focus it.

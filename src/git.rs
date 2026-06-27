@@ -64,6 +64,61 @@ pub fn toplevel(path: &Path) -> Option<PathBuf> {
     git_line(path, &["rev-parse", "--show-toplevel"]).map(PathBuf::from)
 }
 
+/// The current branch name, or `None` on a detached HEAD or non-repo. Used to resolve the PR
+/// for the worktree's branch (`specs/forge-host.md`).
+pub fn current_branch(repo: &Path) -> Option<String> {
+    git_line(repo, &["rev-parse", "--abbrev-ref", "HEAD"]).filter(|b| b != "HEAD")
+}
+
+/// The `(owner, name)` of the worktree's `origin` if it is a GitHub remote, else `None`. Read
+/// locally so the PR fetch needs no `gh repo view` round-trip (`specs/forge-host.md`).
+pub fn github_slug(repo: &Path) -> Option<(String, String)> {
+    parse_github_slug(&git_line(repo, &["remote", "get-url", "origin"])?)
+}
+
+/// `(owner, name)` from a remote URL pointing at github.com, else `None`. Splits the URL into
+/// host and path so an SSH host alias or a trailing slash can't bleed into the parsed name.
+/// Accepts the `github.com-<alias>` host form that multi-account `~/.ssh/config` setups use.
+fn parse_github_slug(url: &str) -> Option<(String, String)> {
+    let (host, path) = split_remote(url)?;
+    if host != "github.com" && !host.starts_with("github.com-") {
+        return None;
+    }
+    let path = path.trim_matches('/');
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    let (owner, name) = path.split_once('/')?;
+    // A GitHub repo path is exactly `owner/name`; drop anything past it defensively.
+    let name = name.split('/').next().unwrap_or(name);
+    (!owner.is_empty() && !name.is_empty()).then(|| (owner.to_string(), name.to_string()))
+}
+
+/// Split a git remote URL into `(host, path)` for the two forms git emits: a scheme URL
+/// (`https://`, `ssh://`, `git://`, with optional `user@` and `:port`) and the scp-like
+/// `user@host:path`.
+fn split_remote(url: &str) -> Option<(&str, &str)> {
+    if let Some((_, rest)) = url.split_once("://") {
+        let rest = rest.split_once('@').map_or(rest, |(_, r)| r); // drop `user@`
+        let (hostport, path) = rest.split_once('/')?;
+        let host = hostport.split(':').next().unwrap_or(hostport); // drop `:port`
+        Some((host, path))
+    } else {
+        // scp-like `[user@]host:path` — the first `:` splits host from path.
+        let (hostpart, path) = url.split_once(':')?;
+        let host = hostpart.split_once('@').map_or(hostpart, |(_, h)| h);
+        Some((host, path))
+    }
+}
+
+/// Commits local `HEAD` is ahead and behind `other` (a commit-ish), or `None` if `other` is
+/// not present locally. Backs the PR `sync` indicator (`specs/forge-host.md`).
+pub fn ahead_behind(repo: &Path, other: &str) -> Option<(u32, u32)> {
+    let out = git_line(repo, &["rev-list", "--left-right", "--count", &format!("HEAD...{other}")])?;
+    let mut it = out.split_whitespace();
+    let ahead = it.next()?.parse().ok()?;
+    let behind = it.next()?.parse().ok()?;
+    Some((ahead, behind))
+}
+
 /// Whether `git_ref` resolves in `repo`.
 fn ref_exists(repo: &Path, git_ref: &str) -> bool {
     git_ok(repo, &["rev-parse", "--verify", "--quiet", git_ref])
@@ -473,7 +528,30 @@ fn parse_name_status(out: &str) -> Vec<(ChangeKind, String, Option<String>)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ChangeKind, parse_name_status, parse_numstat};
+    use super::{ChangeKind, parse_github_slug, parse_name_status, parse_numstat};
+
+    #[test]
+    fn github_slug_parses_every_remote_form_and_rejects_non_github() {
+        let g = parse_github_slug;
+        let owned = |o: &str, n: &str| Some((o.to_string(), n.to_string()));
+        // HTTPS, with and without `.git` and a trailing slash.
+        assert_eq!(g("https://github.com/owner/repo.git"), owned("owner", "repo"));
+        assert_eq!(g("https://github.com/owner/repo"), owned("owner", "repo"));
+        assert_eq!(g("https://github.com/owner/repo/"), owned("owner", "repo"));
+        // scp-like SSH, and the `ssh://` scheme form with a port.
+        assert_eq!(g("git@github.com:owner/repo.git"), owned("owner", "repo"));
+        assert_eq!(g("ssh://git@github.com/owner/repo.git"), owned("owner", "repo"));
+        assert_eq!(g("ssh://git@github.com:22/owner/repo.git"), owned("owner", "repo"));
+        assert_eq!(g("git://github.com/owner/repo"), owned("owner", "repo"));
+        // Multi-account SSH host alias (`~/.ssh/config` `Host github.com-work`).
+        assert_eq!(g("git@github.com-work:owner/repo.git"), owned("owner", "repo"));
+        // Non-GitHub and GitHub Enterprise hosts are not github.com.
+        assert_eq!(g("git@gitlab.com:owner/repo.git"), None);
+        assert_eq!(g("git@github.company.com:owner/repo.git"), None);
+        assert_eq!(g("https://github.company.com/owner/repo.git"), None);
+        // A host with no repo segment has no slug.
+        assert_eq!(g("https://github.com/owner"), None);
+    }
 
     #[test]
     fn numstat_parses_counts_and_ignores_binary() {

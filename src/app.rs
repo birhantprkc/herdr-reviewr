@@ -13,6 +13,7 @@ use anyhow::Result;
 use crate::diff::{DiffCache, FileDiff, Row, View};
 use crate::export::{ExportTarget, format_all};
 use crate::file_list::{self, Annotation, Entry, RowKind};
+use crate::forge;
 use crate::git;
 use crate::highlight::Highlighter;
 use crate::logln;
@@ -39,11 +40,21 @@ enum Anchor {
     Dir(String),
 }
 
-/// Which top-level tab is active: the changes reviewer or the whole-repo browser.
+/// Which top-level tab is active: the changes reviewer, the whole-repo browser, or the
+/// read-only PR mirror.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Tab {
     Changes,
     AllFiles,
+    Pr,
+}
+
+impl Tab {
+    /// Whether this tab uses the file-tree / diff machinery (and so the per-tab stash). The
+    /// `PR` tab does not — it holds its own state and never swaps into the diff fields.
+    fn is_file_tab(self) -> bool {
+        matches!(self, Tab::Changes | Tab::AllFiles)
+    }
 }
 
 /// The inactive tab's saved navigation and left-pane state, swapped in on a tab switch so
@@ -88,6 +99,10 @@ pub struct App {
     pub scope: Scope,
     /// The active tab; it drives both panes and selects the per-tab state in play.
     pub tab: Tab,
+    /// Which file tab (`Changes`/`AllFiles`) currently occupies the diff/file fields. Tracked
+    /// apart from `tab` so the `PR` tab can be active while a file tab's state stays frozen in
+    /// place, with the other file tab in the stash.
+    active_file_tab: Tab,
     pub focus: Focus,
     /// The navigator's source for the active tab: changed files in `Changes`, the whole
     /// worktree in `All files`.
@@ -150,6 +165,15 @@ pub struct App {
     pub caret: usize,
     pub status: String,
     pub should_quit: bool,
+    /// The read-only `PR` tab's view of the pull request (`specs/forge-host.md`).
+    pub pr: forge::PrView,
+    /// The PR navigator's cursor over its rows (checks then comments).
+    pub(crate) pr_cursor: usize,
+    /// Top visible line of the PR read pane, reset when the selected comment changes.
+    pub(crate) pr_read_scroll: usize,
+    /// Set when the PR view needs a (re)fetch; the event loop services it after drawing, so a
+    /// `loading` frame shows before the blocking `gh` calls run.
+    pub pr_pending: bool,
     highlighter: Highlighter,
     cache: DiffCache,
     /// The `last-turn` baseline lifecycle, driven by polling the agent's status.
@@ -169,6 +193,7 @@ impl App {
             base,
             scope,
             tab: Tab::Changes,
+            active_file_tab: Tab::Changes,
             focus: Focus::Files,
             entries: Vec::new(),
             file_rows: Vec::new(),
@@ -198,6 +223,10 @@ impl App {
             caret: 0,
             status: String::new(),
             should_quit: false,
+            pr: forge::PrView::Loading,
+            pr_cursor: 0,
+            pr_read_scroll: 0,
+            pr_pending: false,
             highlighter: Highlighter::new(None),
             cache: DiffCache::new(),
             turn,
@@ -313,6 +342,11 @@ impl App {
     /// Never touches the comment store or the in-progress input — that is the
     /// "a comment is never lost to a refresh" invariant (`specs/overview.md`).
     pub fn reload(&mut self) -> Result<()> {
+        // The PR tab holds its own state and renders nothing from the file tree, so a poll on
+        // it skips the rebuild; switching back to a file tab reloads it then (specs/tui.md).
+        if !self.tab.is_file_tab() {
+            return Ok(());
+        }
         // Outside a git repo, show an empty state rather than failing (herdr-host.md).
         if !git::is_repo(&self.repo) {
             self.entries.clear();
@@ -347,7 +381,8 @@ impl App {
         self.entries = match self.tab {
             // The whole worktree (ignored included), with expanded ignored dirs loaded lazily.
             Tab::AllFiles => self.all_files_entries()?,
-            Tab::Changes => changed.iter().map(Entry::from_changed).collect(),
+            // `Changes` (the `PR` tab returned early above).
+            _ => changed.iter().map(Entry::from_changed).collect(),
         };
         self.rebuild_file_rows();
         self.file_cursor = anchor
@@ -390,8 +425,9 @@ impl App {
     /// so opening a file from the tree and from a comment edit can't drift apart.
     fn open_path_in_tab(&mut self, path: String, previous_path: Option<String>) {
         match self.tab {
-            Tab::Changes => self.set_diff(path, previous_path),
             Tab::AllFiles => self.set_file_view(path),
+            // `Changes` (the `PR` tab never opens a file in the left pane).
+            _ => self.set_diff(path, previous_path),
         }
     }
 
@@ -532,20 +568,25 @@ impl App {
 
     /// Sample the agent's status and advance the `last-turn` baseline. Reads the resolved
     /// agent's status over the herdr CLI; absence or ambiguity pauses tracking. Never
-    /// propagates — a missing herdr is normal, so failures only log.
-    pub fn track_turn(&mut self) {
+    /// propagates — a missing herdr is normal, so failures only log. Returns whether this
+    /// sample ended a turn (the agent went idle after acting), the `PR` tab's refetch signal.
+    pub fn track_turn(&mut self) -> bool {
         let status = crate::herdr::resolved_agent_status().ok().flatten();
-        self.apply_agent_status(status.as_deref());
+        self.apply_agent_status(status.as_deref())
     }
 
     /// Advance the baseline from one status sample — the core [`track_turn`](Self::track_turn)
     /// wraps, and the seam tests drive without herdr. On a turn start (a resting→`working`
     /// edge) it snapshots the worktree as the candidate; while a candidate is pending it
     /// promotes once the worktree diverges from it, persisting the new baseline. Git errors
-    /// only log, so a transient git failure never crashes the poll.
-    pub fn apply_agent_status(&mut self, status: Option<&str>) {
-        let Some(status) = status else { return };
-        if self.turn.observe(Status::parse(status)) {
+    /// only log, so a transient git failure never crashes the poll. Returns whether this
+    /// sample ended a turn (a `working`→resting edge), the `PR` tab's refetch signal.
+    pub fn apply_agent_status(&mut self, status: Option<&str>) -> bool {
+        let Some(status) = status else { return false };
+        let parsed = Status::parse(status);
+        // Read the turn-end edge before `observe` advances `prev`.
+        let ended = self.turn.ends_turn(parsed);
+        if self.turn.observe(parsed) {
             match git::snapshot_worktree(&self.repo) {
                 Ok(sha) => self.turn.set_candidate(sha),
                 Err(e) => logln!("turn snapshot failed: {e}"),
@@ -553,7 +594,7 @@ impl App {
         }
         // Promote the pending candidate once the turn has changed a file. Compare full
         // snapshots so a new untracked file counts as a change (specs/herdr-host.md).
-        let Some(candidate) = self.turn.candidate().map(str::to_string) else { return };
+        let Some(candidate) = self.turn.candidate().map(str::to_string) else { return ended };
         match git::snapshot_worktree(&self.repo) {
             Ok(now) if now != candidate => {
                 self.turn.promote();
@@ -564,6 +605,7 @@ impl App {
             Ok(_) => {}
             Err(e) => logln!("turn divergence check failed: {e}"),
         }
+        ended
     }
 
     /// Snap the diff view back to the top, clearing any pending selection.
@@ -703,8 +745,20 @@ impl App {
         if self.tab == tab || self.composing() {
             return Ok(());
         }
-        self.swap_active_with_stash();
         self.tab = tab;
+        // Entering the PR tab leaves the file tabs frozen in place and fetches the PR. A
+        // `loading` frame draws before the blocking fetch the event loop services, and a
+        // re-entry keeps the last snapshot on screen while it refetches.
+        if tab == Tab::Pr {
+            self.pr_pending = true;
+            return Ok(());
+        }
+        // Entering a file tab: bring its state into the diff fields if the other file tab holds
+        // them (a Changes↔AllFiles switch, or a return from PR onto the stashed tab).
+        if self.active_file_tab != tab {
+            self.swap_active_with_stash();
+            self.active_file_tab = tab;
+        }
         self.reload()?;
         // An empty left pane — a first visit landing on a collapsed tree, or an open file gone
         // empty — focuses the tree, so the cursor keys aren't trapped on a pane with nothing to
@@ -714,6 +768,95 @@ impl App {
         }
         self.reveal_files = true; // pull the restored cursor back into view
         Ok(())
+    }
+
+    // ---- PR tab (specs/forge-host.md, specs/tui.md) -------------------------------------
+
+    /// Apply a snapshot fetched off-thread (`forge::fetch` runs on a worker so the UI never
+    /// blocks — `lib.rs`). A transient `Error` keeps the last good snapshot frozen with a status
+    /// note, so a failed poll never blanks a populated tab; the cursor clamps to the new rows.
+    pub fn apply_pr(&mut self, view: forge::PrView) {
+        if let (forge::PrView::Error(msg), forge::PrView::Pr(_)) = (&view, &self.pr) {
+            self.status = format!("PR refresh failed: {msg}");
+            return;
+        }
+        // Follow the selected comment by identity, not index, so a refresh that inserts a newer
+        // comment (the list is newest-first) keeps the cursor on the same one and leaves the read
+        // scroll intact — only a vanished or absent selection resets it (mirrors the file tabs'
+        // poll-preservation, specs/tui.md).
+        let selected = self
+            .pr_selected_comment()
+            .map(|c| (c.author.clone(), c.created_at.clone(), c.anchor.clone()));
+        self.pr = view;
+        let restored = selected.as_ref().and_then(|(author, created, anchor)| {
+            self.pr_snapshot()?.comments.iter().position(|c| {
+                c.author == *author && c.created_at == *created && c.anchor == *anchor
+            })
+        });
+        if let Some(i) = restored {
+            self.pr_cursor = i;
+        } else if self.pr_cursor >= self.pr_row_count() {
+            // The selection vanished (or there was none) and the cursor now points past the end:
+            // clamp it back into range and reset the read pane.
+            self.pr_cursor = self.pr_row_count().saturating_sub(1);
+            self.pr_read_scroll = 0;
+        }
+    }
+
+    /// The resolved snapshot, or `None` in a loading/degraded view.
+    #[must_use]
+    pub fn pr_snapshot(&self) -> Option<&forge::PrSnapshot> {
+        match &self.pr {
+            forge::PrView::Pr(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// The navigator's cursor count: comments only. Checks are a status display, not a cursor
+    /// stop — landing on one shows nothing the row itself doesn't.
+    #[must_use]
+    pub fn pr_row_count(&self) -> usize {
+        self.pr_snapshot().map_or(0, |s| s.comments.len())
+    }
+
+    /// The comment under the navigator cursor, for the read pane.
+    #[must_use]
+    pub fn pr_selected_comment(&self) -> Option<&forge::Comment> {
+        self.pr_snapshot()?.comments.get(self.pr_cursor)
+    }
+
+    /// Move the navigator cursor by `delta`, resetting the read pane to the top.
+    pub fn pr_move(&mut self, delta: isize) {
+        let n = self.pr_row_count();
+        if n == 0 {
+            return;
+        }
+        self.pr_select(step(self.pr_cursor, delta, n));
+    }
+
+    /// Select navigator row `i`, resetting the read pane to the top — the one place the
+    /// cursor-move and the read-scroll reset stay paired (a click and `j`/`k` share it).
+    pub(crate) fn pr_select(&mut self, i: usize) {
+        self.pr_cursor = i;
+        self.pr_read_scroll = 0;
+    }
+
+    /// Scroll the read pane by `delta` lines (the wheel and `PageUp`/`PageDown`); the renderer
+    /// clamps to the body height.
+    pub(crate) fn pr_scroll_read(&mut self, delta: isize) {
+        self.pr_read_scroll = self.pr_read_scroll.saturating_add_signed(delta);
+    }
+
+    /// Open the pull request in the browser (`specs/tui.md`). A resolved PR always carries a
+    /// `url`, so there is nothing to guard against.
+    pub fn pr_open(&mut self) {
+        let Some(url) = self.pr_snapshot().map(|s| s.url.clone()) else {
+            return;
+        };
+        match crate::browser::open(&url) {
+            Ok(()) => self.status = "opened PR in browser".to_string(),
+            Err(e) => self.status = e.to_string(),
+        }
     }
 
     /// Exchange the active per-tab fields with the inactive tab's saved snapshot. Every per-tab

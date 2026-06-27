@@ -9,20 +9,25 @@
 //! [`app::App`] methods and renders with [`ui`].
 
 pub mod app;
+pub mod browser;
 pub mod config;
 pub mod diff;
 pub mod export;
 pub mod file_list;
+pub mod forge;
 pub mod git;
 pub mod herdr;
 pub mod highlight;
 #[macro_use]
 pub mod log;
 pub mod model;
+pub mod proc;
 pub mod turn;
 pub mod ui;
 
 use std::io;
+use std::sync::mpsc;
+use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -82,11 +87,24 @@ pub fn run() -> Result<()> {
 /// A transient status message (e.g. "sent 3 comments") fades after this long idle.
 const STATUS_TTL: Duration = Duration::from_secs(4);
 
+/// While the `PR` tab is active, refetch GitHub at least this often — a fallback for forge-side
+/// changes with no local signal (a reviewer's comment). Local pushes and `gh` PR actions refresh
+/// sooner, on the agent's turn-end, so this cadence is the slow safety net (specs/forge-host.md).
+const PR_POLL: Duration = Duration::from_secs(60);
+
 /// Draw, then wait up to the poll deadline for input; refresh on each tick.
 fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, poll: Duration) -> Result<()> {
     let mut last_poll = Instant::now();
+    let mut last_pr_poll = Instant::now();
+    // The PR snapshot is fetched on a worker thread and delivered over this channel, so the slow
+    // `gh` calls never block the draw loop (specs/forge-host.md).
+    let (pr_tx, pr_rx) = mpsc::channel::<crate::forge::PrView>();
+    let mut pr_inflight = false;
     let mut status_at = Instant::now();
     let mut last_status = String::new();
+    // Fetch the PR snapshot as soon as the panel opens, not on first switching to the tab, so the
+    // tab is already populated when the user gets there (specs/forge-host.md).
+    app.pr_pending = true;
     while !app.should_quit {
         // Expire a stale status line: restart the timer when the message changes, and clear
         // it once it has lingered past the TTL, so a notification doesn't stay up forever.
@@ -123,13 +141,36 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, poll: Duration) -> 
         }
         app.bound_file_scroll(file_vp);
         terminal.draw(|f| ui::render(f, app))?;
+        // Deliver a completed background fetch, then trigger a new one when `pr_pending` is set
+        // (panel open, tab entry, `r`, or the agent's turn-end) or the slow fallback poll elapses
+        // — never more than one in flight, and never on the draw thread.
+        if let Ok(view) = pr_rx.try_recv() {
+            app.apply_pr(view);
+            pr_inflight = false;
+        }
+        if !pr_inflight
+            && (app.pr_pending
+                || (app.tab == crate::app::Tab::Pr && last_pr_poll.elapsed() >= PR_POLL))
+        {
+            app.pr_pending = false;
+            last_pr_poll = Instant::now();
+            pr_inflight = true;
+            let (tx, repo) = (pr_tx.clone(), app.repo.clone());
+            thread::spawn(move || {
+                let _ = tx.send(crate::forge::fetch(&repo));
+            });
+        }
         // Wake at the status-expiry boundary too, so it clears on time when idle.
         let poll_left = poll.saturating_sub(last_poll.elapsed());
-        let timeout = if app.status.is_empty() {
+        let mut timeout = if app.status.is_empty() {
             poll_left
         } else {
             poll_left.min(STATUS_TTL.saturating_sub(status_at.elapsed()))
         };
+        // While a fetch is in flight, wake often so its result paints promptly when it lands.
+        if pr_inflight {
+            timeout = timeout.min(Duration::from_millis(100));
+        }
         if event::poll(timeout)? {
             match event::read()? {
                 Event::Key(k) if k.kind == KeyEventKind::Press => {
@@ -182,8 +223,12 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, poll: Duration) -> 
         }
         if last_poll.elapsed() >= poll {
             // Advance the last-turn baseline before reloading, so a turn promoted this poll
-            // is visible to this poll's changed-files build.
-            app.track_turn();
+            // is visible to this poll's changed-files build. When the agent just went idle, its
+            // turn may have pushed or run `gh pr merge`; refetch the PR if the tab is showing it
+            // (entering the tab refetches on its own otherwise) (specs/forge-host.md).
+            if app.track_turn() && app.tab == crate::app::Tab::Pr {
+                app.pr_pending = true;
+            }
             // A failed refresh must never crash the UI or drop a comment.
             if let Err(e) = app.reload() {
                 app.status = format!("refresh failed: {e}");
@@ -254,6 +299,24 @@ fn handle_key(app: &mut App, key: KeyEvent, area: Rect) -> Result<()> {
         return Ok(());
     }
 
+    // The read-only PR tab: navigate the snapshot and open links; authoring keys are inert.
+    if app.tab == crate::app::Tab::Pr {
+        match key.code {
+            Char('q') => app.should_quit = true,
+            Char('r') => app.pr_pending = true,
+            Char('1') => app.set_tab(crate::app::Tab::Changes)?,
+            Char('2') => app.set_tab(crate::app::Tab::AllFiles)?,
+            Char('o') => app.pr_open(),
+            Char('j') | Down => app.pr_move(1),
+            Char('k') | Up => app.pr_move(-1),
+            // The navigator is short; the read pane is what overflows, so the page keys scroll it.
+            PageDown => app.pr_scroll_read(PAGE),
+            PageUp => app.pr_scroll_read(-PAGE),
+            _ => {}
+        }
+        return Ok(());
+    }
+
     if app.mode == Mode::List {
         match key.code {
             Esc | Char('l' | 'q') => app.close_list(),
@@ -275,9 +338,10 @@ fn handle_key(app: &mut App, key: KeyEvent, area: Rect) -> Result<()> {
         (Char('d'), true) => app.move_cursor(HALF_PAGE)?,
         (Char('q'), _) => app.should_quit = true,
         (Char('r'), _) => app.reload()?,
-        // `1` / `2` switch tabs (provisional; the keymap is an Open Decision in tui.md).
+        // `1` / `2` / `3` switch tabs (provisional; the keymap is an Open Decision in tui.md).
         (Char('1'), _) => app.set_tab(crate::app::Tab::Changes)?,
         (Char('2'), _) => app.set_tab(crate::app::Tab::AllFiles)?,
+        (Char('3'), _) => app.set_tab(crate::app::Tab::Pr)?,
         (Tab, _) => app.toggle_focus(),
         (Char('j') | Down, _) => app.move_cursor(1)?,
         (Char('k') | Up, _) => app.move_cursor(-1)?,
@@ -324,6 +388,33 @@ fn handle_mouse(app: &mut App, m: MouseEvent, area: Rect, heights: &[usize]) -> 
     // keyboard-driven, so the mouse is inert while one is open — otherwise clicks and the
     // wheel would drive the panes drawn underneath it.
     if app.composing() || app.mode == Mode::List {
+        return Ok(());
+    }
+    // The read-only PR tab: click a tab or the open button, click a row to read it, wheel the
+    // navigator (right) to move, wheel the read pane (left) to scroll.
+    if app.tab == crate::app::Tab::Pr {
+        match m.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(ui::HeaderHit::Tab(tab)) = ui::hit_header(area, app, m.column, m.row) {
+                    app.set_tab(tab)?;
+                } else if ui::hit_pr_open(area, app, m.column, m.row) {
+                    app.pr_open();
+                } else if let Some(i) = ui::pr_nav_hit(area, app, m.column, m.row) {
+                    app.pr_select(i);
+                }
+            }
+            MouseEventKind::ScrollDown
+                if ui::in_files_pane(area, app.list_pct, m.column, m.row) =>
+            {
+                app.pr_move(3);
+            }
+            MouseEventKind::ScrollUp if ui::in_files_pane(area, app.list_pct, m.column, m.row) => {
+                app.pr_move(-3);
+            }
+            MouseEventKind::ScrollDown => app.pr_scroll_read(3),
+            MouseEventKind::ScrollUp => app.pr_scroll_read(-3),
+            _ => {}
+        }
         return Ok(());
     }
     match m.kind {

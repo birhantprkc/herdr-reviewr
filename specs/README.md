@@ -29,6 +29,7 @@ Each concern lives in the one doc that owns it. A change is woven into that doc,
 - `file-list.md` — owns the right-pane file navigator: the changed-files tree, selection, and presentation.
 - `tui.md` — owns the terminal UI: layout, interaction, and refresh.
 - `herdr-host.md` — owns running as a herdr pane, the export target, and roadmap integration.
+- `forge-host.md` — owns reading the pull request from GitHub via `gh`: resolution, state, checks, comments, and failure states.
 
 ## The bar
 

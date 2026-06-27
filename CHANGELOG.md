@@ -6,6 +6,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-06-27
+
+### Added
+- **`PR` tab** — a read-only mirror of the branch's open pull request, read from GitHub via
+  `gh`: its identity and state (draft/open/merged/closed, mergeability, unpushed-commit sync),
+  its checks with a pass/fail rollup, and its comments (reviews, inline findings, and plain
+  comments merged newest-first, with `resolved`/`outdated` markers). Select a comment to read it;
+  `o` or a click on the header chip opens the PR in the browser. It fetches when the panel opens
+  and refetches on entering the tab, on `r`, on the agent's turn-end, and on a 60s fallback poll;
+  a capped list shows a `+more on GitHub` marker. It never writes to GitHub.
+
 ## [0.2.1] — 2026-06-27
 
 ### Removed
