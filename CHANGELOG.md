@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-06-28
+
 ### Changed
 - **Context-aware footer** — the footer is now a live action bar: it shows the actions available
   for what the cursor is on (comment a line, edit/delete the comment under the cursor, expand a
