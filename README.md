@@ -16,16 +16,23 @@ A persistent split pane beside your agent, pointed at one git worktree:
   renders any file's current content. Git-ignored paths show too, dimmed — a wholly-ignored
   directory (`target/`, `node_modules/`) is one collapsed row that loads its contents only when
   you expand it.
-- **Comments** — select a line range in a diff, write a comment, repeat. The comment list is a
-  surface of its own.
+- **PR tab** — a read-only mirror of the branch's open pull request, read from GitHub via `gh`:
+  its state (draft/open/merged/closed, mergeability, unpushed-commit sync), its checks with a
+  pass/fail rollup, and its comments (reviews, inline findings, and plain comments, newest-first,
+  with `resolved`/`outdated` markers). `o` opens it in the browser. It only reads GitHub — never
+  posts, resolves, re-runs, or merges.
+- **Comments** — select a line range in a diff, write a comment, repeat. Saved comments stay on
+  screen as cards spliced under their line, and the footer is a live action bar that surfaces what
+  you can do where the cursor is.
 
 …and the core loop:
 
-> select a line range → write a comment → repeat → **Add all to chat** → each comment lands in
+> select a line range → write a comment → repeat → **Send** → each comment lands in
 > the agent's input as `path:start-end — comment`, ready for you to add context and send.
 
 It **never edits your worktree** and sends nothing on its own. Its only git write is a private
-`last-turn` baseline ref under `refs/reviewr/`.
+`last-turn` baseline ref under `refs/reviewr/`; it reads GitHub for the **PR** tab but never
+writes there either.
 
 ### Diff scopes
 
@@ -40,6 +47,8 @@ It **never edits your worktree** and sends nothing on its own. Its only git writ
 
 - **herdr ≥ 0.7.0** (the plugin system).
 - **git** on `PATH`.
+- **`gh`** (the GitHub CLI), authenticated — *optional*, only for the **PR** tab; everything else
+  works without it.
 - A **truecolor (24-bit), dark** terminal with Unicode box-drawing support.
 - macOS or Linux.
 
@@ -97,7 +106,7 @@ CLI flags on the pane command:
 | `--poll <ms>` | `2000` | worktree poll interval (min `200`) |
 | `--base <ref>` | auto | base branch for `branch` scope |
 | `--theme <name>` | Catppuccin Mocha | **syntax** theme (structural UI colors are fixed) |
-| `--wrap` | off | soft-wrap long diff lines |
+| `--wrap <on\|off>` | `on` | soft-wrap long diff lines (`w` toggles at runtime) |
 
 Every scope respects `.gitignore`, so build output never clutters **Changes**. To review a
 file, track it in git — an ignored-but-intentional file (a plan, a sample env) belongs in the
@@ -106,7 +115,7 @@ ignored path (dimmed), even untracked ones.
 
 ## Limitations
 
-This is a focused v0.1. Known constraints, honestly:
+This is a focused, young tool. Known constraints, honestly:
 
 **Terminal & theme**
 - **Truecolor required** — colors are 24-bit RGB with no 256/8-color fallback; basic terminals
@@ -120,14 +129,21 @@ This is a focused v0.1. Known constraints, honestly:
 **Platform**
 - **macOS and Linux only** (no Windows).
 - **Clipboard export** uses `pbcopy` (macOS) or `wl-copy`/`xclip`/`xsel` (Linux); if none is
-  installed it errors clearly — use **Add all to chat** instead. (OSC 52 and Windows are roadmap.)
+  installed it errors clearly — use **Send** instead. (OSC 52 and Windows are roadmap.)
 
 **herdr coupling**
-- **Add all to chat** needs a resolvable agent pane (the agent in your tab, or the sole agent in
-  the workspace); otherwise it no-ops and keeps your comments. Browsing and diffing need no herdr.
+- **Send** needs a resolvable agent pane (the agent in your tab, or the sole agent in the
+  workspace); otherwise it no-ops and keeps your comments. Browsing and diffing need no herdr.
 - **last turn is poll-based** (2 s default): a turn that starts and finishes inside one poll is
   never snapshotted on its own, so the scope shows everything since the last *observed* turn start
   — never lines the agent didn't write, but possibly more than one turn.
+
+**PR tab (GitHub)**
+- **GitHub-only and read-only** — needs an authenticated `gh` and a GitHub remote; without either
+  it shows a remediation line and the rest of the app (Changes, All files) is unaffected.
+- **Mirrors only the branch's *open* PR** — a merged or closed PR shows as history; comment
+  surfaces are capped at one page (100 rows each), with a `+more on GitHub ↗` marker when there's
+  more.
 
 **Review model**
 - **Comments are in-memory and single-session** — closing the pane loses any not yet exported.
@@ -143,9 +159,8 @@ This is a focused v0.1. Known constraints, honestly:
 
 ## Roadmap
 
-A Checks/CI tab (`gh` PR + CI status), a config file, customizable keybindings, structured
-(JSON) export, in-diff search, a side-by-side split view, mark-file-reviewed, a selectable/light
-UI theme, and OSC 52 clipboard.
+A config file, customizable keybindings, structured (JSON) export, in-diff search, a side-by-side
+split view, mark-file-reviewed, a selectable/light UI theme, and OSC 52 clipboard.
 
 ## Design
 
