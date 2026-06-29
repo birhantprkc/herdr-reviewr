@@ -18,6 +18,7 @@ use crate::git;
 use crate::highlight::Highlighter;
 use crate::logln;
 use crate::model::{Comment, CommentStore, Scope, Side};
+use crate::theme::{self, Palette};
 use crate::turn::{Status, TurnTracker};
 
 /// The file-list pane's default width and resize bounds, as a percent of the body. The
@@ -213,6 +214,14 @@ pub struct App {
     /// `loading` frame shows before the blocking `gh` calls run.
     pub pr_pending: bool,
     highlighter: Highlighter,
+    /// The active palette every renderer paints from (`specs/theme.md`).
+    palette: Palette,
+    /// The active theme's name, so re-resolving to the same theme is a no-op.
+    theme_name: &'static str,
+    /// The `--theme` override name (highest precedence); `None` lets the config file decide.
+    cli_theme_name: Option<String>,
+    /// The last theme name requested, so re-resolving the same name skips work and logging.
+    requested_theme_name: Option<String>,
     cache: DiffCache,
     /// The `last-turn` baseline lifecycle, driven by polling the agent's status.
     turn: TurnTracker,
@@ -226,6 +235,7 @@ impl App {
         // anchor across a sidebar restart (specs/herdr-host.md).
         let turn_key = git::worktree_key(&repo);
         let turn = TurnTracker::with_baseline(git::read_baseline_ref(&repo, &turn_key));
+        let theme = theme::resolve(None);
         Self {
             repo,
             base,
@@ -265,20 +275,52 @@ impl App {
             pr_cursor: 0,
             pr_read_scroll: 0,
             pr_pending: false,
-            highlighter: Highlighter::new(None),
+            highlighter: Highlighter::new(theme.syntax),
+            palette: theme.palette,
+            theme_name: theme.name,
+            cli_theme_name: None,
+            requested_theme_name: None,
             cache: DiffCache::new(),
             turn,
             turn_key,
         }
     }
 
-    /// Rebuild the highlighter for the named theme and drop cached diffs so they
-    /// re-render in it. Unknown or unset names fall back to Catppuccin Mocha.
-    pub fn set_theme(&mut self, name: Option<&str>) {
-        if name.is_some() {
-            self.highlighter = Highlighter::new(name);
+    /// Resolve `name` (a CLI or config value; `None` = default) and apply it when it changes:
+    /// rebuild the highlighter and drop cached diffs so they re-render. Unknown or
+    /// not-yet-supported names fall back to the default (`specs/theme.md`).
+    fn set_theme(&mut self, name: Option<&str>) {
+        // Re-resolving the same name every poll would redo derivation and re-log an unknown
+        // name, so skip when the request is unchanged.
+        if self.requested_theme_name.as_deref() == name {
+            return;
+        }
+        self.requested_theme_name = name.map(str::to_owned);
+        let theme = theme::resolve(name);
+        if theme.name != self.theme_name {
+            self.theme_name = theme.name;
+            self.palette = theme.palette;
+            self.highlighter = Highlighter::new(theme.syntax);
             self.cache = DiffCache::new();
         }
+    }
+
+    /// Record the `--theme` override name (highest precedence) and apply the resolved theme now.
+    pub fn set_cli_theme(&mut self, name: Option<String>) {
+        self.cli_theme_name = name;
+        self.refresh_theme();
+    }
+
+    /// Re-resolve the active theme: the `--theme` override, else the config file's `theme`,
+    /// else the default. Idempotent — `set_theme` no-ops when the name is unchanged.
+    pub fn refresh_theme(&mut self) {
+        let name = self.cli_theme_name.clone().or_else(crate::config::config_file_theme);
+        self.set_theme(name.as_deref());
+    }
+
+    /// The active palette every renderer paints from (`specs/theme.md`).
+    pub fn palette(&self) -> &Palette {
+        &self.palette
     }
 
     pub fn composing(&self) -> bool {
@@ -380,6 +422,9 @@ impl App {
     /// Never touches the comment store or the in-progress input — that is the
     /// "a comment is never lost to a refresh" invariant (`specs/overview.md`).
     pub fn reload(&mut self) -> Result<()> {
+        // The active theme can change between polls (a config edit), independent of the tab, so
+        // re-resolve cheaply first — it no-ops unless the name actually changed (specs/theme.md).
+        self.refresh_theme();
         // The PR tab holds its own state and renders nothing from the file tree, so a poll on
         // it skips the rebuild; switching back to a file tab reloads it then (specs/tui.md).
         if !self.tab.is_file_tab() {

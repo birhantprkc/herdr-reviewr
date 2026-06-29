@@ -22,6 +22,7 @@ pub mod highlight;
 pub mod log;
 pub mod model;
 pub mod proc;
+pub mod theme;
 pub mod turn;
 pub mod ui;
 
@@ -55,7 +56,7 @@ pub fn run() -> Result<()> {
     let repo = git::toplevel(&cfg.repo).unwrap_or_else(|| cfg.repo.clone());
     logln!("start repo={} poll={:?} base={:?}", repo.display(), cfg.poll, cfg.base);
     let mut app = App::new(repo, Scope::Uncommitted, cfg.base.clone());
-    app.set_theme(cfg.theme.as_deref());
+    app.set_cli_theme(cfg.theme.clone());
     if let Some(wrap) = cfg.wrap {
         app.wrap = wrap;
     }

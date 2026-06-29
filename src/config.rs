@@ -54,6 +54,22 @@ impl Config {
     }
 }
 
+/// The `theme` value from reviewr's config file (`$HERDR_PLUGIN_CONFIG_DIR/config.toml`),
+/// read on each refresh. `None` when the dir is unset (standalone), the file is absent or
+/// unparseable, or it has no `theme` key — the caller then falls back to the default
+/// (`specs/theme.md`).
+pub fn config_file_theme() -> Option<String> {
+    config_theme_in(std::env::var_os("HERDR_PLUGIN_CONFIG_DIR")?)
+}
+
+/// The `theme` key from `<dir>/config.toml`, or `None` if the file is absent, unparseable,
+/// or has no `theme` key. Split from the env lookup so it is testable.
+fn config_theme_in(dir: impl AsRef<std::path::Path>) -> Option<String> {
+    let text = std::fs::read_to_string(dir.as_ref().join("config.toml")).ok()?;
+    let table: toml::Table = text.parse().ok()?;
+    table.get("theme").and_then(toml::Value::as_str).map(str::to_owned)
+}
+
 #[cfg(test)]
 mod tests {
     use super::Config;
@@ -82,5 +98,20 @@ mod tests {
     fn poll_has_a_floor() {
         assert_eq!(parse(&["--poll", "10"]).poll, Duration::from_millis(200));
         assert_eq!(parse(&["--poll", "garbage"]).poll, Duration::from_secs(2));
+    }
+
+    #[test]
+    fn reads_theme_from_config_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.toml"), "theme = \"gruvbox\"\n").unwrap();
+        assert_eq!(super::config_theme_in(dir.path()), Some("gruvbox".to_string()));
+    }
+
+    #[test]
+    fn missing_file_or_absent_key_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(super::config_theme_in(dir.path()), None);
+        std::fs::write(dir.path().join("config.toml"), "poll = 500\n").unwrap();
+        assert_eq!(super::config_theme_in(dir.path()), None);
     }
 }

@@ -16,6 +16,8 @@ What you get, in one persistent pane pointed at a git worktree:
   `path:start-end — comment`, ready for you to add context and hit enter.
 - **More when you need it** — browse the whole worktree, not just the diff, and read the branch's
   open pull request without switching windows.
+- **Themed to match your terminal** — 18 named palettes (Catppuccin, Dracula, Nord, Gruvbox,
+  Tokyo Night, Rosé Pine, Solarized, and more, in dark and light), one config line away.
 
 It **never edits your worktree** and sends nothing on its own. Its only write to git is a private
 `last-turn` baseline ref under `refs/reviewr/`. The **PR** tab reads GitHub but never posts there.
@@ -24,7 +26,8 @@ It **never edits your worktree** and sends nothing on its own. Its only write to
 
 - **herdr ≥ 0.7.0** (the plugin system).
 - **git** on `PATH`.
-- A **truecolor (24-bit), dark** terminal with Unicode box-drawing support.
+- A **truecolor (24-bit)** terminal with Unicode box-drawing support; a light or dark theme to
+  match it (see [Theme](#theme)).
 - **macOS or Linux.**
 - **`gh`** (the GitHub CLI), authenticated — *optional*, only for the **PR** tab. Everything else
   works without it.
@@ -155,8 +158,29 @@ CLI flags on the pane command:
 | --- | --- | --- |
 | `--poll <ms>` | `2000` | worktree poll interval (min `200`) |
 | `--base <ref>` | auto | base branch for `branch` scope |
-| `--theme <name>` | Catppuccin Mocha | **syntax** theme (structural UI colors are fixed) |
+| `--theme <name>` | `catppuccin` | UI + syntax theme (see below) |
 | `--wrap <on\|off>` | `on` | soft-wrap long diff lines (`w` toggles at runtime) |
+
+### Theme
+
+One theme colors the whole UI — chrome and syntax together. Set it in reviewr's config file
+(re-read on refresh, so editing it and refreshing re-themes without relaunch):
+
+```toml
+# $HERDR_PLUGIN_CONFIG_DIR/config.toml
+theme = "tokyo-night"
+```
+
+`--theme` overrides the config file (handy for a dev run). Use a name your terminal's light/dark
+matches — a light theme on a dark terminal (or the reverse) reads poorly, since the pane keeps
+the terminal's background. Available:
+
+- **Dark:** `catppuccin`, `catppuccin-frappe`, `catppuccin-macchiato`, `dracula`, `nord`,
+  `gruvbox`, `one-dark`, `solarized`, `monokai`, `tokyo-night`, `rose-pine`.
+- **Light:** `catppuccin-latte`, `gruvbox-light`, `one-light`, `solarized-light`, `github-light`,
+  `tokyo-night-day`, `rose-pine-dawn`.
+
+Names match herdr's where both ship a palette. An unknown name falls back to `catppuccin`.
 
 ## Limitations
 
@@ -165,9 +189,9 @@ This is a focused, young tool. The known constraints, honestly:
 **Terminal & theme**
 - **Truecolor required** — colors are 24-bit RGB with no 256/8-color fallback; basic terminals
   render wrong.
-- **Dark terminal assumed** — the structural UI colors are **hardcoded to Catppuccin Mocha**.
-  `--theme` swaps only the *syntax* theme (and falls back silently on an unknown name); there is no
-  light theme and no configurable UI palette.
+- **Theme must match the terminal** — the pane keeps the terminal's background, so a light theme
+  on a dark terminal (or the reverse) reads poorly. There's no auto light/dark detection yet, so
+  you set the theme to match by hand.
 - **Add / remove are red / green** — no secondary cue for colorblind users yet.
 - Unicode box-drawing glyphs are required (no Nerd Font needed).
 
@@ -239,8 +263,9 @@ herdr plugin link .
 
 ## Roadmap
 
-A config file, customizable keybindings, structured (JSON) export, in-diff search, a side-by-side
-split view, mark-file-reviewed, a selectable / light UI theme, and OSC 52 clipboard.
+Customizable keybindings, structured (JSON) export, in-diff search, a side-by-side split view,
+mark-file-reviewed, OSC light/dark theme autodetect, more themes (`kanagawa`, `vesper`,
+`everforest`, `ayu`, a dark `github`), a `terminal`-following palette, and OSC 52 clipboard.
 
 ## Design
 
@@ -248,6 +273,12 @@ The living design lives in [`specs/`](specs/) — one concept per doc, always cu
 
 ## License
 
-[MIT](LICENSE). Bundled syntax theme: [Catppuccin Mocha](https://github.com/catppuccin/bat)
-(`assets/Catppuccin Mocha.tmTheme`, MIT). Syntax highlighting via
-[syntect](https://github.com/trishume/syntect) and [two-face](https://github.com/CosmicHorrorDev/two-face).
+[MIT](LICENSE). Syntax highlighting via [syntect](https://github.com/trishume/syntect) and
+[two-face](https://github.com/CosmicHorrorDev/two-face); most themes' syntax colors come from
+two-face's bundled set.
+
+Bundled `.tmTheme` syntax files in `assets/`, each under its own license:
+
+- [Catppuccin Mocha](https://github.com/catppuccin/bat) — MIT.
+- [Tokyo Night](https://github.com/folke/tokyonight.nvim) (`tokyo-night`, `tokyo-night-day`) — Apache-2.0.
+- [Rosé Pine](https://github.com/rose-pine/tm-theme) (`rose-pine`, `rose-pine-dawn`) — MIT.

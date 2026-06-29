@@ -68,6 +68,7 @@ Named so the architecture stays open to them. None is part of this design.
 
 - `./review-model.md`
 - `./diff-view.md`
+- `./theme.md`
 - `./file-list.md`
 - `./tui.md`
 - `./herdr-host.md`

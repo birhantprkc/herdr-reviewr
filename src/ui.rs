@@ -20,6 +20,7 @@ use crate::diff::{FileDiff, FileState, Row};
 use crate::file_list::{Annotation, RowKind};
 use crate::forge;
 use crate::model::Comment;
+use crate::theme::Palette;
 
 pub fn render(frame: &mut Frame, app: &App) {
     let area = frame.area();
@@ -156,6 +157,7 @@ pub fn diff_viewport_height(area: Rect, list_pct: u16) -> usize {
 pub fn diff_row_heights(app: &App, area: Rect) -> Vec<usize> {
     let width = inner_rect(panes(area, app.list_pct).diff).width as usize;
     let gutter_w = gutter_for(&app.diff);
+    let p = app.palette();
     // A row's display height is its wrapped code lines plus any inline comment cards under
     // it (excluding a card whose comment is being edited), so scroll-clamping and hit-testing
     // match what the renderer paints.
@@ -170,7 +172,7 @@ pub fn diff_row_heights(app: &App, area: Rect) -> Vec<usize> {
                 .iter()
                 .filter(|&&ci| Some(ci) != editing)
                 .filter_map(|&ci| app.store.get(ci))
-                .map(|c| comment_card_lines(c, width).len())
+                .map(|c| comment_card_lines(c, width, p).len())
                 .sum();
             base + card
         })
@@ -209,10 +211,11 @@ pub fn diff_inner_width(area: Rect, list_pct: u16) -> usize {
 /// The comment box's display lines at `content_w`: each input line word-wrapped, with the
 /// caret drawn as a block at its mapped (row, column). An empty box shows a placeholder.
 fn composer_lines(app: &App, content_w: usize) -> Vec<Line<'static>> {
+    let p = app.palette();
     if app.input.is_empty() {
         return vec![Line::from(vec![
-            Span::styled(" ", caret_style()),
-            Span::styled("Leave a comment…", Style::default().fg(cat::OVERLAY0)),
+            Span::styled(" ", caret_style(p)),
+            Span::styled("Leave a comment…", Style::default().fg(p.overlay0)),
         ])];
     }
     let rows = box_rows(&app.input, content_w);
@@ -220,27 +223,31 @@ fn composer_lines(app: &App, content_w: usize) -> Vec<Line<'static>> {
     rows.iter()
         .enumerate()
         .map(|(i, (_, text))| {
-            if i == caret_row { row_with_caret(text, caret_col) } else { Line::from(text.clone()) }
+            if i == caret_row {
+                row_with_caret(text, caret_col, p)
+            } else {
+                Line::from(text.clone())
+            }
         })
         .collect()
 }
 
 /// The block-cursor style: the character under the caret shown dark-on-peach.
-fn caret_style() -> Style {
-    Style::default().fg(cat::SURFACE0).bg(cat::PEACH)
+fn caret_style(p: &Palette) -> Style {
+    Style::default().fg(p.surface0).bg(p.peach)
 }
 
 /// One box row with the caret block over the character at `col` (a trailing block at the end).
-fn row_with_caret(text: &str, col: usize) -> Line<'static> {
+fn row_with_caret(text: &str, col: usize, p: &Palette) -> Line<'static> {
     let chars: Vec<char> = text.chars().collect();
     let col = col.min(chars.len());
     let left: String = chars[..col].iter().collect();
     let mut spans = vec![Span::raw(left)];
     if col < chars.len() {
-        spans.push(Span::styled(chars[col].to_string(), caret_style()));
+        spans.push(Span::styled(chars[col].to_string(), caret_style(p)));
         spans.push(Span::raw(chars[col + 1..].iter().collect::<String>()));
     } else {
-        spans.push(Span::styled(" ".to_string(), caret_style()));
+        spans.push(Span::styled(" ".to_string(), caret_style(p)));
     }
     Line::from(spans)
 }
@@ -335,7 +342,7 @@ fn wrap_text(s: &str, width: usize) -> Vec<String> {
         .map(|ch| Cell {
             ch,
             w: UnicodeWidthChar::width(ch).unwrap_or(0),
-            fg: cat::TEXT,
+            fg: Color::Reset,
             emph: false,
         })
         .collect();
@@ -431,16 +438,17 @@ fn send_button_col(app: &App, width: usize) -> usize {
 /// (the active one bright + underlined, the inactive ones at `SUBTEXT0`), and the trailing gap
 /// before each header's own suffix. One source so the two headers can't drift.
 fn tab_bar_spans(app: &App) -> Vec<Span<'static>> {
-    let bar = Style::default().bg(cat::SURFACE0);
+    let p = app.palette();
+    let bar = Style::default().bg(p.surface0);
     let mut spans = vec![Span::styled(HEADER_LEAD, bar)];
     for (i, (tab, label)) in TABS.iter().enumerate() {
         if i > 0 {
             spans.push(Span::styled(TAB_GAP, bar));
         }
         let style = if *tab == app.tab {
-            bar.fg(cat::LAVENDER).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+            bar.fg(p.lavender).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
         } else {
-            bar.fg(cat::SUBTEXT0)
+            bar.fg(p.subtext0)
         };
         spans.push(Span::styled(*label, style));
     }
@@ -457,19 +465,21 @@ fn render_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
 
     // A quiet surface bar: the active tab in bright lavender, the inactive one dimmed, the
     // clickable scope and Send controls accented so they read as buttons.
-    let bar = Style::default().bg(cat::SURFACE0);
+    let p = app.palette();
+    let bar = Style::default().bg(p.surface0);
     let mut spans = tab_bar_spans(app);
-    spans.push(Span::styled(chip, bar.fg(cat::YELLOW).add_modifier(Modifier::BOLD)));
-    spans.push(Span::styled(suffix, bar.fg(cat::OVERLAY0)));
+    spans.push(Span::styled(chip, bar.fg(p.yellow).add_modifier(Modifier::BOLD)));
+    spans.push(Span::styled(suffix, bar.fg(p.overlay0)));
 
-    let send_fg = if app.store.is_empty() { cat::OVERLAY0 } else { cat::GREEN };
+    let send_fg = if app.store.is_empty() { p.overlay0 } else { p.green };
     spans.push(Span::styled(" ".repeat(pad), bar));
     spans.push(Span::styled(button, bar.fg(send_fg).add_modifier(Modifier::BOLD)));
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn render_file_list(frame: &mut Frame, app: &App, area: Rect) {
-    let block = bordered("Files", app.focus == Focus::Files);
+    let p = app.palette();
+    let block = bordered("Files", app.focus == Focus::Files, p);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -479,7 +489,7 @@ fn render_file_list(frame: &mut Frame, app: &App, area: Rect) {
             Tab::Changes if app.awaiting_turn() => "waiting for the agent's next turn",
             _ => "no changes",
         };
-        frame.render_widget(dim_paragraph(msg), inner);
+        frame.render_widget(dim_paragraph(msg, p), inner);
         return;
     }
 
@@ -493,29 +503,32 @@ fn render_file_list(frame: &mut Frame, app: &App, area: Rect) {
         .take(inner.height as usize)
         .map(|(i, row)| {
             // The selected row fills with the cursor color, dimmed when the list is unfocused.
-            let fill = (i == app.file_cursor).then(|| cursor_bg(app.focus == Focus::Files));
+            let fill = (i == app.file_cursor).then(|| p.cursor_bg(app.focus == Focus::Files));
             let indent = "  ".repeat(row.depth);
             match &row.kind {
                 RowKind::Dir { expanded, .. } => {
                     let arrow = if *expanded { "▾ " } else { "▸ " };
                     // A git-ignored directory recedes into a dim, unbolded row (file-list.md).
                     let name_style = if row.ignored {
-                        Style::default().fg(cat::OVERLAY0)
+                        Style::default().fg(p.overlay0)
                     } else {
-                        Style::default().fg(cat::SUBTEXT0).add_modifier(Modifier::BOLD)
+                        Style::default().fg(p.subtext0).add_modifier(Modifier::BOLD)
                     };
                     let spans = vec![
-                        Span::styled(
-                            format!("{indent}{arrow}"),
-                            Style::default().fg(cat::OVERLAY0),
-                        ),
+                        Span::styled(format!("{indent}{arrow}"), Style::default().fg(p.overlay0)),
                         Span::styled(format!("{}/", row.name), name_style),
                     ];
                     selectable_row(spans, width, fill)
                 }
-                RowKind::File { annotation, .. } => {
-                    file_row_item(&indent, annotation.as_ref(), &row.name, width, fill, row.ignored)
-                }
+                RowKind::File { annotation, .. } => file_row_item(
+                    &indent,
+                    annotation.as_ref(),
+                    &row.name,
+                    width,
+                    fill,
+                    row.ignored,
+                    p,
+                ),
             }
         })
         .collect();
@@ -533,6 +546,7 @@ fn file_row_item(
     width: usize,
     fill: Option<Color>,
     ignored: bool,
+    p: &Palette,
 ) -> ListItem<'static> {
     let marker = annotation.map_or(String::new(), |a| format!("{} ", a.change.marker()));
     let (additions, deletions) = annotation.map_or((0, 0), |a| (a.additions, a.deletions));
@@ -542,26 +556,26 @@ fn file_row_item(
     let shown = elide_head(name, width.saturating_sub(fixed).max(1));
     // Dim the parent directories of a collapsed-chain name; keep the basename bright.
     let (dim, base) = match shown.rfind('/') {
-        Some(p) => (&shown[..=p], &shown[p + 1..]),
+        Some(s) => (&shown[..=s], &shown[s + 1..]),
         None => ("", shown.as_str()),
     };
 
-    let mut spans = vec![Span::styled(indent.to_string(), text_style())];
+    let mut spans = vec![Span::styled(indent.to_string(), text_style(p))];
     if let Some(a) = annotation {
-        spans.push(Span::styled(marker, Style::default().fg(kind_color(a.change.marker()))));
+        spans.push(Span::styled(marker, Style::default().fg(kind_color(p, a.change.marker()))));
     }
     if !dim.is_empty() {
-        spans.push(Span::styled(dim.to_string(), Style::default().fg(cat::OVERLAY0)));
+        spans.push(Span::styled(dim.to_string(), Style::default().fg(p.overlay0)));
     }
     // A git-ignored file recedes into a dim basename; its change marker and stats keep their
     // color so a kept ignored file still reads as a change (file-list.md).
-    let base_style = if ignored { Style::default().fg(cat::OVERLAY0) } else { text_style() };
+    let base_style = if ignored { Style::default().fg(p.overlay0) } else { text_style(p) };
     spans.push(Span::styled(base.to_string(), base_style));
     if !stats.is_empty() {
         let used: usize = spans.iter().map(Span::width).sum();
         let pad = width.saturating_sub(used + stats.width());
         spans.push(Span::raw(" ".repeat(pad)));
-        spans.extend(stats_spans(additions, deletions));
+        spans.extend(stats_spans(additions, deletions, p));
     }
     selectable_row(spans, width, fill)
 }
@@ -579,16 +593,16 @@ fn stats_str(additions: u32, deletions: u32) -> String {
 
 /// The `+a −d` stats as colored spans: additions in green, deletions in red, matching the
 /// diff's add/remove hues. Same glyphs (and width) as [`stats_str`].
-fn stats_spans(additions: u32, deletions: u32) -> Vec<Span<'static>> {
+fn stats_spans(additions: u32, deletions: u32, p: &Palette) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     if additions > 0 {
-        spans.push(Span::styled(format!("+{additions}"), Style::default().fg(cat::GREEN)));
+        spans.push(Span::styled(format!("+{additions}"), Style::default().fg(p.green)));
     }
     if additions > 0 && deletions > 0 {
         spans.push(Span::raw(" "));
     }
     if deletions > 0 {
-        spans.push(Span::styled(format!("−{deletions}"), Style::default().fg(cat::RED)));
+        spans.push(Span::styled(format!("−{deletions}"), Style::default().fg(p.red)));
     }
     spans
 }
@@ -619,13 +633,13 @@ fn elide_head(name: &str, max: usize) -> String {
 /// A saved comment as inline display lines: a quiet box titled with the comment's location
 /// (in the comment-yellow accent) holding its wrapped text. Spliced read-only under the
 /// commented line so a submitted comment stays visible while reviewing.
-fn comment_card_lines(c: &Comment, width: usize) -> Vec<Line<'static>> {
+fn comment_card_lines(c: &Comment, width: usize, p: &Palette) -> Vec<Line<'static>> {
     const INDENT: usize = 2;
     let box_w = width.saturating_sub(INDENT).max(10);
     let text_w = box_w.saturating_sub(4).max(1); // inside "│ " … " │"
-    let border = Style::default().fg(cat::OVERLAY0);
-    let title = Style::default().fg(cat::PEACH).add_modifier(Modifier::BOLD);
-    let body_style = Style::default().fg(cat::TEXT);
+    let border = Style::default().fg(p.overlay0);
+    let title = Style::default().fg(p.peach).add_modifier(Modifier::BOLD);
+    let body_style = Style::default().fg(p.text);
     let pad = || Span::raw(" ".repeat(INDENT));
 
     let label = truncate_width(&format!(" comment · {} ", c.location()), box_w.saturating_sub(3));
@@ -676,6 +690,7 @@ fn truncate_width(s: &str, max: usize) -> String {
 }
 
 fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
+    let p = app.palette();
     let title = match (&app.diff_path, &app.diff.previous_path) {
         (Some(new), Some(old)) => format!("{old} → {new}"),
         (Some(new), None) => new.clone(),
@@ -685,7 +700,7 @@ fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
         }
         .to_string(),
     };
-    let block = bordered(&title, app.focus == Focus::Diff);
+    let block = bordered(&title, app.focus == Focus::Diff, p);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -706,7 +721,7 @@ fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
                 FileState::Normal => "no diff",
             },
         };
-        frame.render_widget(dim_paragraph(msg), inner);
+        frame.render_widget(dim_paragraph(msg, p), inner);
         return;
     }
 
@@ -722,6 +737,7 @@ fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
         h_scroll: app.h_scroll,
         wrap: app.wrap,
         focused: app.focus == Focus::Diff,
+        pal: p,
     };
     let commented = app.commented_lines();
     let cards = app.comment_cards();
@@ -743,7 +759,7 @@ fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
             if Some(ci) != editing
                 && let Some(c) = app.store.get(ci)
             {
-                lines.extend(comment_card_lines(c, width));
+                lines.extend(comment_card_lines(c, width, p));
             }
         }
         lines
@@ -790,47 +806,6 @@ fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
     }
 }
 
-// --- Catppuccin Mocha palette (one source for every color the chrome and diff use,
-// so the frame and the syntect-highlighted body share a single theme) ----------------
-
-mod cat {
-    use ratatui::style::Color::{self, Rgb};
-    // Surfaces, dark to light.
-    pub(super) const SURFACE0: Color = Rgb(0x31, 0x32, 0x44);
-    pub(super) const SURFACE1: Color = Rgb(0x45, 0x47, 0x5a);
-    pub(super) const SURFACE2: Color = Rgb(0x58, 0x5b, 0x70);
-    pub(super) const OVERLAY0: Color = Rgb(0x6c, 0x70, 0x86);
-    pub(super) const OVERLAY1: Color = Rgb(0x7f, 0x84, 0x9c);
-    // Text.
-    pub(super) const SUBTEXT0: Color = Rgb(0xa6, 0xad, 0xc8);
-    pub(super) const TEXT: Color = Rgb(0xcd, 0xd6, 0xf4);
-    // Accents.
-    pub(super) const RED: Color = Rgb(0xf3, 0x8b, 0xa8);
-    pub(super) const GREEN: Color = Rgb(0xa6, 0xe3, 0xa1);
-    pub(super) const YELLOW: Color = Rgb(0xf9, 0xe2, 0xaf);
-    pub(super) const PEACH: Color = Rgb(0xfa, 0xb3, 0x87);
-    pub(super) const MAUVE: Color = Rgb(0xcb, 0xa6, 0xf7);
-    pub(super) const LAVENDER: Color = Rgb(0xb4, 0xbe, 0xfe);
-}
-
-// Structural diff fills tuned for the dark base; syntax token colors come from the theme.
-const DEL_BG: Color = Color::Rgb(0x45, 0x23, 0x2f);
-const INS_BG: Color = Color::Rgb(0x1f, 0x3a, 0x2a);
-// Word-emphasis fills — a brighter shade of the row tint over the changed words.
-const EMPH_DEL_BG: Color = Color::Rgb(0x6e, 0x34, 0x46);
-const EMPH_INS_BG: Color = Color::Rgb(0x30, 0x55, 0x3f);
-// A passive < selection < cursor brightness ramp: the cursor is the focal point, an active
-// selection outranks a passive fold separator.
-const CURSOR_BG: Color = cat::SURFACE2;
-const SEL_BG: Color = cat::SURFACE1;
-const FOLD_BG: Color = cat::SURFACE0;
-
-/// The cursor-row fill: full brightness in the focused pane, a step dimmer when the pane is
-/// not focused, so which pane has the cursor reads at a glance.
-fn cursor_bg(focused: bool) -> Color {
-    if focused { CURSOR_BG } else { cat::SURFACE1 }
-}
-
 /// The line-number column width for a diff of `rows` lines.
 fn gutter_width(rows: usize) -> usize {
     rows.to_string().len().max(3)
@@ -864,13 +839,15 @@ fn row_height(row: &Row, gutter_w: usize, width: usize, wrap: bool) -> usize {
 
 /// The diff-pane layout: constant for a frame.
 #[derive(Clone, Copy)]
-struct RowLayout {
+struct RowLayout<'a> {
     gutter_w: usize,
     width: usize,
     h_scroll: usize,
     wrap: bool,
     /// Whether the diff pane is focused — dims the cursor row when it is not.
     focused: bool,
+    /// The active palette for the change bars, row tints, and fills.
+    pal: &'a Palette,
 }
 
 /// A row's per-row highlight state.
@@ -885,8 +862,8 @@ struct RowState {
 /// number, then syntax-colored code tinted red/green. With wrap on, a long line breaks
 /// into `code_width`-wide rows; a continuation row carries a blank gutter so numbers
 /// stay aligned. With wrap off, the line is one row scrolled by `h_scroll`.
-fn render_row(row: &Row, layout: RowLayout, state: RowState) -> Vec<Line<'static>> {
-    let RowLayout { gutter_w, width, h_scroll, wrap, focused } = layout;
+fn render_row(row: &Row, layout: RowLayout<'_>, state: RowState) -> Vec<Line<'static>> {
+    let RowLayout { gutter_w, width, h_scroll, wrap, focused, pal } = layout;
     let RowState { commented, cursor, selected } = state;
     if let Row::Fold { .. } = row {
         let label = if cursor {
@@ -894,30 +871,30 @@ fn render_row(row: &Row, layout: RowLayout, state: RowState) -> Vec<Line<'static
         } else {
             format!("  ⋯  {} unmodified lines", row.hidden())
         };
-        let mut line = Line::from(Span::styled(label, Style::default().fg(cat::SUBTEXT0)));
+        let mut line = Line::from(Span::styled(label, Style::default().fg(pal.subtext0)));
         if let Some(pad) = width.checked_sub(line.width()).filter(|p| *p > 0) {
             line.push_span(Span::raw(" ".repeat(pad)));
         }
-        let bg = if cursor { cursor_bg(focused) } else { FOLD_BG };
+        let bg = if cursor { pal.cursor_bg(focused) } else { pal.surface0 };
         return vec![line.style(Style::default().bg(bg).add_modifier(Modifier::BOLD))];
     }
     let num = row.new_no().or_else(|| row.old_no()).map_or(String::new(), |n| n.to_string());
     // A commented line's number takes the peach comment accent; others sit a step brighter
     // than the dim chrome so they stay legible while read.
-    let num_color = if commented { cat::PEACH } else { cat::OVERLAY1 };
+    let num_color = if commented { pal.peach } else { pal.overlay1 };
     let (bar, bar_color) = match row.marker() {
-        '-' => ("▌", cat::RED),
-        '+' => ("▌", cat::GREEN),
-        _ => (" ", cat::OVERLAY0),
+        '-' => ("▌", pal.red),
+        '+' => ("▌", pal.green),
+        _ => (" ", pal.overlay0),
     };
     let row_bg = if cursor {
-        Some(cursor_bg(focused))
+        Some(pal.cursor_bg(focused))
     } else if selected {
-        Some(SEL_BG)
+        Some(pal.surface1)
     } else {
         match row.marker() {
-            '-' => Some(DEL_BG),
-            '+' => Some(INS_BG),
+            '-' => Some(pal.del_bg),
+            '+' => Some(pal.ins_bg),
             _ => None,
         }
     };
@@ -926,9 +903,9 @@ fn render_row(row: &Row, layout: RowLayout, state: RowState) -> Vec<Line<'static
     // selection bg, which wins for readability.
     let emph_on = !cursor && !selected;
     let emph_bg = match row.marker() {
-        '-' => EMPH_DEL_BG,
-        '+' => EMPH_INS_BG,
-        _ => INS_BG,
+        '-' => pal.emph_del_bg,
+        '+' => pal.emph_ins_bg,
+        _ => pal.ins_bg,
     };
     let cells = code_cells(row, emph_on);
 
@@ -1102,12 +1079,13 @@ fn cell_span(text: String, fg: Color, emph: bool, emph_bg: Color) -> Span<'stati
 
 /// The inline comment input box, drawn at `area` (under the selection in the diff).
 fn render_composer(frame: &mut Frame, app: &App, area: Rect) {
+    let p = app.palette();
     let loc = app.pending_location().unwrap_or_else(|| "comment".to_string());
     let editing = matches!(app.mode, Mode::Composing { editing: Some(_) });
     let title = if editing { format!("edit · {loc}") } else { format!("comment · {loc}") };
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(cat::PEACH))
+        .border_style(Style::default().fg(p.peach))
         .title(title);
     let content_w = composer_content_width(area.width as usize);
     let body = Paragraph::new(composer_lines(app, content_w)).block(block);
@@ -1149,27 +1127,24 @@ fn action_key_label(app: &App, action: FooterAction) -> (String, String) {
 
 /// A tier's `(key, label)` styles: the primary bright and bold, normal actions readable, the
 /// orientation cluster dim so the eye lands on what to do, not on the always-there anchors.
-fn tier_styles(tier: Tier) -> (Style, Style) {
+fn tier_styles(tier: Tier, p: &Palette) -> (Style, Style) {
     match tier {
-        Tier::Primary => {
-            (Style::default().fg(cat::PEACH).add_modifier(Modifier::BOLD), text_style())
-        }
-        Tier::Normal => (Style::default().fg(cat::LAVENDER), Style::default().fg(cat::SUBTEXT0)),
-        Tier::Orientation => {
-            (Style::default().fg(cat::OVERLAY0), Style::default().fg(cat::OVERLAY0))
-        }
+        Tier::Primary => (Style::default().fg(p.peach).add_modifier(Modifier::BOLD), text_style(p)),
+        Tier::Normal => (Style::default().fg(p.lavender), Style::default().fg(p.subtext0)),
+        Tier::Orientation => (Style::default().fg(p.overlay0), Style::default().fg(p.overlay0)),
     }
 }
 
 /// Render a run of actions as ` · `-separated `key label` spans, styled per tier.
 fn action_spans(app: &App, acts: &[(FooterAction, Tier)]) -> Vec<Span<'static>> {
+    let p = app.palette();
     let mut spans = Vec::new();
     for (i, &(action, tier)) in acts.iter().enumerate() {
         if i > 0 {
-            spans.push(Span::styled(" · ", Style::default().fg(cat::OVERLAY0)));
+            spans.push(Span::styled(" · ", Style::default().fg(p.overlay0)));
         }
         let (key, label) = action_key_label(app, action);
-        let (key_style, label_style) = tier_styles(tier);
+        let (key_style, label_style) = tier_styles(tier, p);
         spans.push(Span::styled(key, key_style));
         if !label.is_empty() {
             spans.push(Span::styled(format!(" {label}"), label_style));
@@ -1182,6 +1157,7 @@ fn action_spans(app: &App, acts: &[(FooterAction, Tier)]) -> Vec<Span<'static>> 
 /// orientation cluster packed right, fitting one line — orientation dropped first, then trailing
 /// `Normal` actions, with a trailing `…` marking anything clipped (`specs/tui.md`).
 fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
+    let p = app.palette();
     let w = area.width as usize;
     let all = app.footer_actions();
     let (mut left_acts, orient_acts): (Vec<_>, Vec<_>) =
@@ -1194,10 +1170,10 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
     let pr_info = (app.tab == Tab::Pr).then(|| app.pr_snapshot()).flatten().map(|s| {
         let budget = w.saturating_sub(actions_w + 4).max(8);
         let text = truncate_width(&format!("{}   ", pr_state_line(s)), budget);
-        Span::styled(text, Style::default().fg(cat::SUBTEXT0))
+        Span::styled(text, Style::default().fg(p.subtext0))
     });
     let status = (!app.status.is_empty())
-        .then(|| Span::styled(format!("  · {} ", app.status), Style::default().fg(cat::PEACH)));
+        .then(|| Span::styled(format!("  · {} ", app.status), Style::default().fg(p.peach)));
 
     let build_left = |acts: &[(FooterAction, Tier)]| -> Vec<Span<'static>> {
         let mut spans = vec![Span::raw(" ")];
@@ -1213,7 +1189,7 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
     let orient: Vec<Span> = if orient_acts.is_empty() {
         Vec::new()
     } else {
-        let mut spans = vec![Span::styled("│ ", Style::default().fg(cat::OVERLAY0))];
+        let mut spans = vec![Span::styled("│ ", Style::default().fg(p.overlay0))];
         spans.extend(action_spans(app, &orient_acts));
         spans
     };
@@ -1245,23 +1221,24 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
         // `…` whenever anything was clipped: the orientation cluster, a trimmed action, or a
         // primary still too wide to fit.
         if dropped_orient || popped || line_width(&left) + 2 > w {
-            left.push(Span::styled(" …", Style::default().fg(cat::OVERLAY0)));
+            left.push(Span::styled(" …", Style::default().fg(p.overlay0)));
         }
         left
     };
 
     frame.render_widget(
-        Paragraph::new(Line::from(spans)).style(Style::default().bg(cat::SURFACE0)),
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(p.surface0)),
         area,
     );
 }
 
 fn render_comments_list(frame: &mut Frame, app: &App, area: Rect) {
+    let p = app.palette();
     let popup = centered(area, 80, 60);
     frame.render_widget(Clear, popup);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(cat::MAUVE))
+        .border_style(Style::default().fg(p.mauve))
         .title(format!("Comments ({})", app.store.len()));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
@@ -1274,24 +1251,24 @@ fn render_comments_list(frame: &mut Frame, app: &App, area: Rect) {
         .map(|(i, c)| {
             let loc = Span::styled(
                 c.location(),
-                Style::default().fg(cat::MAUVE).add_modifier(Modifier::BOLD),
+                Style::default().fg(p.mauve).add_modifier(Modifier::BOLD),
             );
-            let mut spans = vec![loc, Span::styled(format!("  {}", c.text), text_style())];
+            let mut spans = vec![loc, Span::styled(format!("  {}", c.text), text_style(p))];
             // A comment whose anchor may have moved (file left the changeset, or a content
             // comment's file was deleted) is flagged but kept.
             if app.is_stale(c) {
-                spans.push(Span::styled("  (stale)", Style::default().fg(cat::RED)));
+                spans.push(Span::styled("  (stale)", Style::default().fg(p.red)));
             }
             // The list overlay is the active modal, so its row reads at full brightness.
-            selectable_row(spans, width, (i == app.list_cursor).then_some(CURSOR_BG))
+            selectable_row(spans, width, (i == app.list_cursor).then_some(p.surface2))
         })
         .collect();
     frame.render_widget(List::new(items), inner);
 }
 
 /// The default body text color.
-fn text_style() -> Style {
-    Style::default().fg(cat::TEXT)
+fn text_style(p: &Palette) -> Style {
+    Style::default().fg(p.text)
 }
 
 /// A list row, highlighted with the shared selection fill (`surface2` + bold, full
@@ -1321,7 +1298,8 @@ fn selectable_row(
 /// `status #number ↗` chip (status colored by lifecycle, the `↗` sharing the number's colour),
 /// with the PR title right-aligned to its left. Merge/sync/checks live in the footer.
 fn render_pr_header(frame: &mut Frame, app: &App, area: Rect) {
-    let bar = Style::default().bg(cat::SURFACE0);
+    let p = app.palette();
+    let bar = Style::default().bg(p.surface0);
     let mut spans = tab_bar_spans(app);
     let lead_tabs: usize = spans.iter().map(Span::width).sum();
     let w = area.width as usize;
@@ -1330,19 +1308,19 @@ fn render_pr_header(frame: &mut Frame, app: &App, area: Rect) {
     // pane is the single home for the empty/degraded message, not repeated across all regions.
     if let forge::PrView::Pr(s) = &app.pr {
         let number = format!("#{}", s.number);
-        let (status, color) = pr_status_chip(s);
+        let (status, color) = pr_status_chip(p, s);
         let chip_w = pr_chip_width(s);
         // The title fills the gap left of the chip, right-aligned against it (a leading pad).
         let name = truncate_width(&s.title, w.saturating_sub(lead_tabs + chip_w + 2).max(4));
         let pad = w.saturating_sub(lead_tabs + name.width() + 2 + chip_w);
         spans.push(Span::styled(" ".repeat(pad), bar));
-        spans.push(Span::styled(name, bar.fg(cat::SUBTEXT0)));
+        spans.push(Span::styled(name, bar.fg(p.subtext0)));
         spans.push(Span::styled("  ", bar));
         spans.push(Span::styled(status, bar.fg(color).add_modifier(Modifier::BOLD)));
         spans.push(Span::styled(" ", bar));
-        spans.push(Span::styled(number, bar.fg(cat::YELLOW).add_modifier(Modifier::BOLD)));
+        spans.push(Span::styled(number, bar.fg(p.yellow).add_modifier(Modifier::BOLD)));
         // The arrow shares the PR number's colour, reading as part of the clickable chip.
-        spans.push(Span::styled(" ↗", bar.fg(cat::YELLOW)));
+        spans.push(Span::styled(" ↗", bar.fg(p.yellow)));
     }
 
     // Fill the rest of the bar (the Pr arm already reaches the right edge).
@@ -1353,20 +1331,31 @@ fn render_pr_header(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-/// The status chip word and its Catppuccin accent, by lifecycle.
-fn pr_status_chip(s: &forge::PrSnapshot) -> (&'static str, Color) {
+/// The status chip word for a PR's lifecycle; its accent comes from [`pr_status_chip`].
+fn pr_status_word(s: &forge::PrSnapshot) -> &'static str {
     match s.state {
-        forge::PrState::Merged => ("merged", cat::MAUVE),
-        forge::PrState::Closed => ("closed", cat::RED),
-        forge::PrState::Open if s.is_draft => ("draft", cat::YELLOW),
-        forge::PrState::Open => ("open", cat::GREEN),
+        forge::PrState::Merged => "merged",
+        forge::PrState::Closed => "closed",
+        forge::PrState::Open if s.is_draft => "draft",
+        forge::PrState::Open => "open",
     }
+}
+
+/// The status chip word and its theme accent, by lifecycle.
+fn pr_status_chip(p: &Palette, s: &forge::PrSnapshot) -> (&'static str, Color) {
+    let color = match s.state {
+        forge::PrState::Merged => p.mauve,
+        forge::PrState::Closed => p.red,
+        forge::PrState::Open if s.is_draft => p.yellow,
+        forge::PrState::Open => p.green,
+    };
+    (pr_status_word(s), color)
 }
 
 /// The display width of the header's `status #number ↗` chip — shared by the painter and the
 /// click hit-test so they agree on its right-anchored column range.
 fn pr_chip_width(s: &forge::PrSnapshot) -> usize {
-    pr_status_chip(s).0.width() + " ".width() + format!("#{}", s.number).width() + " ↗".width()
+    pr_status_word(s).width() + " ".width() + format!("#{}", s.number).width() + " ↗".width()
 }
 
 /// The PR's merge, sync, and checks status for the footer, joined by `·`. Merge and sync show
@@ -1410,7 +1399,8 @@ fn checks_summary(s: &forge::PrSnapshot) -> String {
 fn render_pr_nav(frame: &mut Frame, app: &App, area: Rect) {
     // The navigator over the PR's checks and comments. Identity lives in the header; the left
     // pane reads the selected comment — so this pane names its contents, not "PR" again.
-    let block = bordered("Checks & comments", true);
+    let p = app.palette();
+    let block = bordered("Checks & comments", true, p);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let Some(s) = app.pr_snapshot() else {
@@ -1418,7 +1408,7 @@ fn render_pr_nav(frame: &mut Frame, app: &App, area: Rect) {
         return;
     };
     let width = inner.width as usize;
-    let dim = Style::default().fg(cat::OVERLAY0);
+    let dim = Style::default().fg(p.overlay0);
     let now = std::time::SystemTime::now();
 
     // (row spans, is the navigator cursor on this row). Only comment rows are selectable; the
@@ -1426,11 +1416,11 @@ fn render_pr_nav(frame: &mut Frame, app: &App, area: Rect) {
     let mut rows: Vec<(Vec<Span<'static>>, bool)> = Vec::new();
     rows.push((vec![Span::styled(pr_checks_header(s), dim)], false));
     for c in &s.checks {
-        let (glyph, color) = check_glyph(c.status);
+        let (glyph, color) = check_glyph(p, c.status);
         rows.push((
             vec![
                 Span::styled(format!(" {glyph} "), Style::default().fg(color)),
-                Span::styled(c.name.clone(), text_style()),
+                Span::styled(c.name.clone(), text_style(p)),
             ],
             false,
         ));
@@ -1438,7 +1428,7 @@ fn render_pr_nav(frame: &mut Frame, app: &App, area: Rect) {
     rows.push((Vec::new(), false));
     rows.push((vec![Span::styled(format!("comments · {}", s.comments.len()), dim)], false));
     for (j, cm) in s.comments.iter().enumerate() {
-        rows.push((pr_comment_row(cm, width, now), app.pr_cursor == j));
+        rows.push((pr_comment_row(cm, width, now, p), app.pr_cursor == j));
     }
 
     let viewport = inner.height as usize;
@@ -1448,7 +1438,7 @@ fn render_pr_nav(frame: &mut Frame, app: &App, area: Rect) {
         .into_iter()
         .skip(scroll)
         .take(viewport)
-        .map(|(spans, sel)| selectable_row(spans, width, sel.then(|| cursor_bg(true))))
+        .map(|(spans, sel)| selectable_row(spans, width, sel.then(|| p.cursor_bg(true))))
         .collect();
     frame.render_widget(List::new(items), inner);
 }
@@ -1468,8 +1458,9 @@ fn pr_comment_row(
     cm: &forge::Comment,
     width: usize,
     now: std::time::SystemTime,
+    p: &Palette,
 ) -> Vec<Span<'static>> {
-    let author_color = if cm.author_is_bot { cat::OVERLAY1 } else { cat::PEACH };
+    let author_color = if cm.author_is_bot { p.overlay1 } else { p.peach };
     let trailing = if cm.is_resolved {
         "resolved".to_string()
     } else if cm.is_outdated {
@@ -1482,20 +1473,21 @@ fn pr_comment_row(
     let anchor = elide_head(&cm.anchor, budget);
     vec![
         Span::styled(author, Style::default().fg(author_color)),
-        Span::styled(anchor, text_style()),
-        Span::styled(format!("  {trailing}"), Style::default().fg(cat::OVERLAY0)),
+        Span::styled(anchor, text_style(p)),
+        Span::styled(format!("  {trailing}"), Style::default().fg(p.overlay0)),
     ]
 }
 
 /// The left read pane: the selected comment's hunk (for a finding) then its body, a check's
 /// open hint, or the loading/degraded message.
 fn render_pr_read(frame: &mut Frame, app: &App, area: Rect) {
+    let p = app.palette();
     let selected = app.pr_selected_comment();
     let title = match selected {
         Some(cm) => format!("@{} · {}", cm.author, cm.anchor),
         None => "PR".to_string(),
     };
-    let block = bordered(&title, false);
+    let block = bordered(&title, false, p);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let width = inner.width as usize;
@@ -1505,9 +1497,9 @@ fn render_pr_read(frame: &mut Frame, app: &App, area: Rect) {
         if let Some(hunk) = &cm.snippet {
             for raw in hunk.lines() {
                 let color = match raw.bytes().next() {
-                    Some(b'+') => cat::GREEN,
-                    Some(b'-') => cat::RED,
-                    _ => cat::OVERLAY0,
+                    Some(b'+') => p.green,
+                    Some(b'-') => p.red,
+                    _ => p.overlay0,
                 };
                 lines.push(Line::from(Span::styled(raw.to_string(), Style::default().fg(color))));
             }
@@ -1515,7 +1507,7 @@ fn render_pr_read(frame: &mut Frame, app: &App, area: Rect) {
         }
         for logical in cm.body.split('\n') {
             for piece in wrap_text(logical, width.max(1)) {
-                lines.push(Line::from(Span::styled(piece, text_style())));
+                lines.push(Line::from(Span::styled(piece, text_style(p))));
             }
         }
         if cm.reply_count > 0 {
@@ -1523,14 +1515,12 @@ fn render_pr_read(frame: &mut Frame, app: &App, area: Rect) {
             lines.push(Line::raw(""));
             lines.push(Line::from(Span::styled(
                 format!("↳ {} {plural} — open on GitHub to read", cm.reply_count),
-                Style::default().fg(cat::OVERLAY0),
+                Style::default().fg(p.overlay0),
             )));
         }
     } else {
-        lines.push(Line::from(Span::styled(
-            pr_empty_msg(&app.pr),
-            Style::default().fg(cat::OVERLAY0),
-        )));
+        lines
+            .push(Line::from(Span::styled(pr_empty_msg(&app.pr), Style::default().fg(p.overlay0))));
     }
 
     // Clamp in `usize` before the `u16` cast — `pr_read_scroll` grows unbounded via the wheel,
@@ -1595,38 +1585,38 @@ fn pr_nav_comment_offset(s: &forge::PrSnapshot) -> usize {
 }
 
 /// The status glyph and Catppuccin accent for a check.
-fn check_glyph(status: forge::CheckStatus) -> (&'static str, Color) {
+fn check_glyph(p: &Palette, status: forge::CheckStatus) -> (&'static str, Color) {
     match status {
-        forge::CheckStatus::Success => ("✓", cat::GREEN),
-        forge::CheckStatus::Failure => ("✗", cat::RED),
-        forge::CheckStatus::Running => ("●", cat::YELLOW),
-        forge::CheckStatus::Pending => ("○", cat::OVERLAY0),
-        forge::CheckStatus::Skipped => ("⊘", cat::OVERLAY0),
+        forge::CheckStatus::Success => ("✓", p.green),
+        forge::CheckStatus::Failure => ("✗", p.red),
+        forge::CheckStatus::Running => ("●", p.yellow),
+        forge::CheckStatus::Pending => ("○", p.overlay0),
+        forge::CheckStatus::Skipped => ("⊘", p.overlay0),
     }
 }
 
 // --- helpers -------------------------------------------------------------------
 
-fn bordered(title: &str, focused: bool) -> Block<'_> {
+fn bordered(title: &str, focused: bool, p: &Palette) -> Block<'static> {
     // A focused pane gets a lavender border; an unfocused one recedes to a surface tone.
-    let color = if focused { cat::LAVENDER } else { cat::SURFACE2 };
+    let color = if focused { p.lavender } else { p.surface2 };
     Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(color))
         .title(title.to_string())
 }
 
-fn dim_paragraph(text: &str) -> Paragraph<'_> {
-    Paragraph::new(text).style(Style::default().fg(cat::OVERLAY0))
+fn dim_paragraph<'a>(text: &'a str, p: &Palette) -> Paragraph<'a> {
+    Paragraph::new(text).style(Style::default().fg(p.overlay0))
 }
 
-/// The Catppuccin accent for a change marker, matched to the diff's add/remove hues.
-fn kind_color(marker: char) -> Color {
+/// The theme accent for a change marker, matched to the diff's add/remove hues.
+fn kind_color(p: &Palette, marker: char) -> Color {
     match marker {
-        'A' | '?' => cat::GREEN,
-        'D' => cat::RED,
-        'R' => cat::MAUVE,
-        _ => cat::YELLOW,
+        'A' | '?' => p.green,
+        'D' => p.red,
+        'R' => p.mauve,
+        _ => p.yellow,
     }
 }
 

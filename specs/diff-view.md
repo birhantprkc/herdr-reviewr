@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-06-24
-Last edited: 2026-06-26
+Last edited: 2026-06-29
 ---
 
 # Diff view
@@ -73,9 +73,9 @@ A row is one of four kinds. Content rows (`context`, `deletion`, `insertion`) ar
 
 ### Color
 
-- The pane targets a dark terminal; the default theme is Catppuccin Mocha, with `--theme` to override. Catppuccin is a common terminal palette, so the diff and the shell share one set of colors.
-- Syntax `spans` take only foreground token colors from the theme; the pane background stays transparent, so the diff sits on the terminal's own background.
-- The structural fills draw from the same Catppuccin palette: a deletion row tints with its red, an insertion its green, `emphasis` a brighter shade, and the cursor and selection their own fills — so highlight and syntax never clash.
+- The active theme (`theme.md`) supplies every color: the syntax token foregrounds and the structural fills.
+- Syntax `spans` take only foreground token colors; the pane background stays transparent, so the diff sits on the terminal's own background.
+- The structural fills come from the theme: a deletion row tints with its `red`, an insertion its `green`, `emphasis` a stronger blend, and the cursor, selection, and fold their own surface fills — so highlight and syntax never clash.
 
 ### Folding
 
@@ -101,7 +101,7 @@ A row is one of four kinds. Content rows (`context`, `deletion`, `insertion`) ar
 
 Presentation flags, each with a default:
 
-- `--theme <name>` — the syntect theme for syntax colors.
+- `--theme <name>` — the theme, chrome and syntax together (`theme.md`).
 - `--wrap on|off` — whether long lines wrap on open.
 
 ## Failure semantics
@@ -126,9 +126,8 @@ The viewer is read-only and recomputed on every refresh, so it never persists or
 - Model from file content, not parsed `git diff` text — text carries no syntax context and no lines to expand; the old/new content carries both. Rejected: keep parsing unified-diff text.
 - `similar` for the diff and the inline word emphasis — one pure-Rust crate does line grouping and word-level emphasis. Rejected: `git2`/libgit2, which adds a C dependency for convenience the crate already provides.
 - `syntect` over tree-sitter — one mature crate, ~200 bundled languages, line spans that map straight to ratatui. Rejected: tree-sitter, which needs a grammar crate and highlight query per language.
-- Truecolor syntax theme, current structural colors kept — the add/remove tint, change bars, and selection stay as they are; only syntax token colors come from the theme. Rejected: mapping syntax onto the terminal's 16 ANSI colors, which is less rich.
+- Truecolor RGB throughout, from one theme — the structural fills (add/remove tint, change bars, emphasis, selection) and the syntax token colors both come from the active theme (`theme.md`), so they can never clash. Rejected: mapping syntax onto the terminal's 16 ANSI colors, less rich; keeping structural colors independent of the theme, which desyncs the chrome from syntax.
 - Change bar and tint, not `+`/`−` glyphs — the colored bar plus row tint already mark add versus remove, so the glyphs are redundant on screen. The export snippet keeps `+`/`−`/space markers for the agent. Rejected: showing both.
-- Catppuccin Mocha as the default theme — a cohesive dark palette that matches a Catppuccin terminal, so the diff blends with the shell instead of importing foreign colors. Rejected: a generic bundled theme that clashes with the terminal.
 - File view is an all-`context` `FileDiff`, not a separate pager — the whole-file browser reuses the diff model, gutter, highlighting, selection, and comment machinery by modeling the file as `context` rows with folding off. Rejected: a second viewer component.
 - Folding off in File view — an unchanged file would collapse to a single fold; `All files` exists to read the file, so it shows every line. Rejected: reusing the context-margin folding.
 
@@ -140,3 +139,4 @@ The viewer is read-only and recomputed on every refresh, so it never persists or
 
 - `./review-model.md`
 - `./tui.md`
+- `./theme.md`

@@ -673,3 +673,17 @@ fn all_files_empty_pane_reads_select_a_file() {
     assert!(out.contains("select a file to read"), "the empty All files left pane copy:\n{out}");
     assert!(!out.contains("no diff"), "no diff vocabulary in the content browser:\n{out}");
 }
+
+#[test]
+fn renders_a_light_theme_without_panic() {
+    let mut app = edited_app();
+    app.set_cli_theme(Some("catppuccin-latte".to_string()));
+    // Driving the full render path with a derived light palette must not panic, and a Latte
+    // color (the focused pane's lavender border) reaches the painted buffer.
+    let buf = render_buffer(&app);
+    let latte_lavender = herdr_reviewr::theme::resolve(Some("catppuccin-latte")).palette.lavender;
+    let painted = (0..40)
+        .flat_map(|y| (0..140).map(move |x| (x, y)))
+        .any(|(x, y)| buf.cell((x, y)).is_some_and(|c| c.fg == latte_lavender));
+    assert!(painted, "the Latte palette reaches the painted buffer");
+}

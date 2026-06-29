@@ -2037,3 +2037,21 @@ fn apply_pr_follows_the_selected_comment_across_a_refresh() {
         "a vanished selection clamps to the last row"
     );
 }
+
+#[test]
+fn theme_selection_swaps_the_palette_and_falls_back() {
+    use herdr_reviewr::theme;
+    let repo = Repo::init();
+    let mut app = App::new(repo.path_buf(), Scope::Uncommitted, None);
+
+    // The default theme is catppuccin (Mocha).
+    assert_eq!(*app.palette(), theme::resolve(Some("catppuccin")).palette);
+
+    // A --theme override (highest precedence) swaps the whole palette.
+    app.set_cli_theme(Some("catppuccin-latte".to_string()));
+    assert_eq!(*app.palette(), theme::resolve(Some("catppuccin-latte")).palette);
+
+    // An unknown name falls back to the default — never a half-applied palette.
+    app.set_cli_theme(Some("nope".to_string()));
+    assert_eq!(*app.palette(), theme::resolve(Some("catppuccin")).palette);
+}

@@ -6,6 +6,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-06-29
+
+### Added
+- **Selectable themes** — 18 named palettes (Catppuccin Mocha/Latte/Frappé/Macchiato, Dracula,
+  Nord, Gruvbox dark/light, One dark/light, Solarized dark/light, GitHub light, Monokai,
+  Tokyo Night day/night, Rosé Pine / Dawn), set via `theme = "<name>"` in reviewr's
+  `config.toml` (re-read on refresh) or `--theme` for a dev run; default `catppuccin`. One theme
+  colors the whole UI — chrome and syntax together — replacing the hardcoded Catppuccin Mocha.
+  An unknown name falls back to the default. See `specs/theme.md`.
+
+### Changed
+- **`--theme` now selects the whole theme** (chrome + syntax), not just the syntect syntax theme.
+
 ## [0.4.0] — 2026-06-28
 
 ### Changed

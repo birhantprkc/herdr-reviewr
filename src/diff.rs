@@ -551,11 +551,17 @@ fn content_hash(previous_path: Option<&str>, old: &str, new: &str) -> u64 {
 mod tests {
     use super::{DiffCache, FileDiff, FileState, Row, View, language_of};
     use crate::highlight::Highlighter;
+    use crate::theme;
+
+    /// The default theme's syntax pairing (bundled Catppuccin Mocha), for highlighter setup.
+    fn mocha() -> crate::theme::SyntaxChoice {
+        theme::resolve(Some("catppuccin")).syntax
+    }
 
     #[test]
     fn file_view_is_all_context_with_no_folds() {
         use std::fmt::Write as _;
-        let hl = Highlighter::new(None);
+        let hl = Highlighter::new(mocha());
         let mut content = String::new();
         for i in 0..40 {
             writeln!(content, "line {i}").unwrap();
@@ -573,7 +579,7 @@ mod tests {
 
     #[test]
     fn file_view_degrades_on_binary() {
-        let hl = Highlighter::new(None);
+        let hl = Highlighter::new(mocha());
         let d = FileDiff::build_file("blob.bin".into(), "a\0b", &hl);
         assert_eq!(d.state, FileState::Binary);
         assert_eq!(d.view, View::File);
@@ -581,13 +587,13 @@ mod tests {
     }
 
     fn build(old: &str, new: &str) -> FileDiff {
-        let hl = Highlighter::new(None);
+        let hl = Highlighter::new(mocha());
         FileDiff::build("a.rs".into(), None, old, new, &hl)
     }
 
     #[test]
     fn cache_keys_on_previous_path_so_a_rename_and_a_plain_edit_differ() {
-        let hl = Highlighter::new(None);
+        let hl = Highlighter::new(mocha());
         let mut cache = DiffCache::new();
         // Same path + same content, but one is a rename (carries a previous_path) and one is
         // not. The cache must not return the rename's build for the plain edit.
@@ -761,7 +767,7 @@ mod tests {
 
     #[test]
     fn cache_reuses_an_unchanged_build() {
-        let hl = Highlighter::new(None);
+        let hl = Highlighter::new(mocha());
         let mut cache = DiffCache::new();
         let d1 = cache.get("a.rs".into(), None, "x\n", "y\n", &hl);
         let d2 = cache.get("a.rs".into(), None, "x\n", "y\n", &hl);

@@ -26,6 +26,7 @@ Each concern lives in the one doc that owns it. A change is woven into that doc,
 - `overview.md` — owns the product shape, scope vs roadmap, and top invariants.
 - `review-model.md` — owns scopes, changed files, comments, lifecycle, and export.
 - `diff-view.md` — owns the structured diff viewer: model, syntax highlighting, word emphasis, folds, and views.
+- `theme.md` — owns the color model: the named palettes, how a palette is filled from anchors, and theme selection.
 - `file-list.md` — owns the right-pane file navigator: the changed-files tree, selection, and presentation.
 - `tui.md` — owns the terminal UI: layout, interaction, and refresh.
 - `herdr-host.md` — owns running as a herdr pane, the export target, and roadmap integration.
