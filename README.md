@@ -182,6 +182,29 @@ the terminal's background. Available:
 
 Names match herdr's where both ship a palette. An unknown name falls back to `catppuccin`.
 
+### Sidebar placement
+
+By default the toggle opens reviewr as a split to the right of your agent. You can change how it
+opens by setting `toggle_placement` in the same config file. reviewr re-reads the file on every
+toggle, so a change takes effect the next time you press the key.
+
+```toml
+# $HERDR_PLUGIN_CONFIG_DIR/config.toml
+toggle_placement = "overlay"   # split | overlay | zoomed | tab   (default: split)
+toggle_direction = "down"      # right | down — split only        (default: right)
+```
+
+- **`split`** sits next to your agent and leaves the keyboard with it. Set `toggle_direction` to
+  put reviewr on the right (the default) or below.
+- **`overlay`** covers the whole tab with reviewr and hands it the keyboard. Toggle again to drop
+  back to your agent.
+- **`zoomed`** fills the tab the same way as overlay and hands reviewr the keyboard.
+- **`tab`** opens reviewr in its own tab and hands it the keyboard.
+
+When you create a new worktree, reviewr auto-opens only for `split` and `tab`. With `overlay` or
+`zoomed` it stays out of the way until you press the toggle yourself. Any value it does not
+recognize falls back to the default.
+
 ## Limitations
 
 This is a focused, young tool. The known constraints, honestly:

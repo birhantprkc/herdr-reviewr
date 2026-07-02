@@ -1,6 +1,6 @@
 id = "persiyanov.reviewr"
 name = "reviewr"
-version = "0.5.0"
+version = "0.6.0"
 min_herdr_version = "0.7.0"
 platforms = ["macos", "linux"]
 description = "Native terminal code-review sidebar for herdr."
@@ -13,7 +13,7 @@ command = ["bash", "herdr/install.sh"]
 
 # The sidebar pane runs the downloaded binary by absolute path under the plugin root, since the
 # pane's cwd is the repo under review (not the plugin root) and the binary isn't on PATH. The
-# toggle action places it as a right split.
+# toggle action's placement is configurable (default: right split); see herdr/sidebar.sh.
 [[panes]]
 id = "sidebar"
 title = "reviewr"

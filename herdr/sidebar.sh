@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Open / toggle the reviewr sidebar as a right split. Invoked by herdr with the plugin
+# Open / toggle the reviewr sidebar with the configured placement (default: right split, see
+# specs/herdr-host.md#sidebar-placement). Invoked by herdr with the plugin
 # runtime env set (HERDR_BIN_PATH, HERDR_PANE_ID, HERDR_WORKSPACE_ID, HERDR_PLUGIN_*,
 # HERDR_PLUGIN_CONTEXT_JSON, and HERDR_PLUGIN_EVENT_JSON for events).
 #
@@ -63,14 +64,53 @@ fi
 # Only open inside a git repo.
 [ -n "$cwd" ] && git -C "$cwd" rev-parse --show-toplevel >/dev/null 2>&1 || exit 0
 
-# A split plugin pane must target an existing pane; for an event (no focused pane), use the
-# target workspace's first pane.
-if [ -z "$pane" ]; then
-  pane=$("$H" pane list --workspace "$ws" 2>/dev/null | jq -r '.result.panes[0].pane_id // empty' 2>/dev/null)
+# Placement/direction come from reviewr's config (default: right split); an unknown value falls
+# back to its default (specs/herdr-host.md#sidebar-placement). The file is re-read every run.
+placement="split"
+direction="right"
+conf="${HERDR_PLUGIN_CONFIG_DIR:-}/config.toml"
+if [ -n "${HERDR_PLUGIN_CONFIG_DIR:-}" ] && [ -f "$conf" ]; then
+  p=$(sed -n "s/^[[:space:]]*toggle_placement[[:space:]]*=[[:space:]]*[\"']\([^\"']*\)[\"'].*/\1/p" "$conf" 2>/dev/null | tail -n1)
+  d=$(sed -n "s/^[[:space:]]*toggle_direction[[:space:]]*=[[:space:]]*[\"']\([^\"']*\)[\"'].*/\1/p" "$conf" 2>/dev/null | tail -n1)
+  case "$p" in split | overlay | zoomed | tab) placement="$p" ;; esac
+  case "$d" in right | down) direction="$d" ;; esac
 fi
-[ -n "$pane" ] || exit 0
+
+# The worktree.created event (mode=open) auto-opens only the non-covering placements: a covering
+# pane over a fresh worktree hides the agent, and overlay has no pane to attach to on an event.
+if [ "$mode" = "open" ] && [ "$placement" != "split" ] && [ "$placement" != "tab" ]; then
+  exit 0
+fi
+
+# Focus stays on the agent for an event or a split (ambient sidebar); a manual toggle into a
+# covering or tab placement focuses reviewr so it can be driven.
+focus=--no-focus
+[ "$mode" = "toggle" ] && [ "$placement" != "split" ] && focus=--focus
+
+# Placement decides the target: split/zoomed attach to a pane, tab to the workspace, overlay to
+# the active pane (no selector). For a split/zoomed event with no focused pane, use the target
+# workspace's first pane.
+case "$placement" in
+split | zoomed)
+  if [ -z "$pane" ]; then
+    pane=$("$H" pane list --workspace "$ws" 2>/dev/null | jq -r '.result.panes[0].pane_id // empty' 2>/dev/null)
+  fi
+  [ -n "$pane" ] || exit 0
+  set -- --placement "$placement" --target-pane "$pane"
+  [ "$placement" = "split" ] && set -- "$@" --direction "$direction"
+  ;;
+tab)
+  set -- --placement tab --workspace "$ws"
+  ;;
+overlay)
+  set -- --placement overlay
+  ;;
+*)
+  exit 0 # unreachable: placement is validated above; guard against a future value leaking $@
+  ;;
+esac
 
 new=$("$H" plugin pane open --plugin "${HERDR_PLUGIN_ID:-persiyanov.reviewr}" --entrypoint sidebar \
-  --placement split --direction right --target-pane "$pane" --cwd "$cwd" --no-focus 2>/dev/null \
+  "$@" --cwd "$cwd" "$focus" 2>/dev/null \
   | jq -r '.result.plugin_pane.pane.pane_id // empty' 2>/dev/null)
 [ -n "$new" ] && printf '%s' "$new" > "$state"

@@ -6,6 +6,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-07-02
+
+### Added
+- **Configurable toggle placement** — `toggle_placement` (`split` | `overlay` | `zoomed` | `tab`,
+  default `split`) and `toggle_direction` (`right` | `down`, split only, default `right`) in
+  reviewr's `config.toml` set how the toggle opens the sidebar. The `worktree.created` auto-open
+  stays a `split`/`tab` (the covering placements open only on a manual toggle). An unknown value
+  falls back to its default. See `specs/herdr-host.md`. (#2)
+
 ## [0.5.0] — 2026-06-29
 
 ### Added
