@@ -6,6 +6,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.1] — 2026-07-08
+
+### Fixed
+- **`Send` no longer fails with "no unambiguous agent" when a plugin sidebar or a plain shell
+  shares the tab or workspace (#6).** `herdr agent list` returns every pane, but only entries
+  carrying an `agent` field are real agents — the resolver now counts those alone, so one agent
+  plus any number of non-agent panes resolves cleanly. Turn tracking uses the same resolver, so
+  `last-turn` no longer pauses in these layouts. A refused send now also says why — no agent
+  here, or several — and points at `y` to copy to the clipboard instead. Thanks @worldnine for
+  the diagnosis and reproduction. See `specs/herdr-host.md`.
+
 ## [0.8.0] — 2026-07-08
 
 ### Added

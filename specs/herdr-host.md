@@ -92,11 +92,19 @@ The binary reviews one worktree: the pane's working directory, normalized to its
 
 The `split`, `overlay`, and `zoomed` placements all open in the agent's tab, so reviewr shares it; the `tab` placement gives reviewr its own tab, so the shared-tab signal is absent and `Send` resolves through the workspace fallback below. `Send` always hands over every written comment at once. To send, the binary:
 
-- resolves the target from `herdr agent list`: the agent in the sidebar's `$HERDR_TAB_ID`, else the sole agent in its `$HERDR_WORKSPACE_ID`;
+- resolves the target from `herdr agent list`: the sole agent in the sidebar's `$HERDR_TAB_ID`, else the sole agent in its `$HERDR_WORKSPACE_ID`;
 - writes all comment blocks into that pane with `herdr agent send <agent_pane> "<text>"`, without submitting;
 - focuses that pane with `herdr agent focus <agent_pane>`, so you add context and press enter.
 
-If no agent resolves, or there are two and none shares the tab, the send fails and the status says so; the comments stay in the list. Clipboard copy (also the whole set) still works.
+`herdr agent list` returns every pane, not only agents: a real agent carries an `agent` field (plus `agent_session` on herdr 0.7.1), while a plugin sidebar or a plain shell carries `agent_status: unknown` and no `agent` field. Resolution counts only real agents:
+
+| # | Always true | A consumer observes it as |
+| --- | --- | --- |
+| S1 | Only entries carrying an `agent` field are resolution candidates. | A tab holding one agent plus any number of plugin sidebars or shells sends to that agent. |
+| S2 | The sidebar's own pane is never a candidate, however herdr lists it. | A send never types the comments into reviewr itself. |
+| S3 | A sole tab agent wins before the workspace fallback runs. | With one agent in the tab and more elsewhere in the workspace, the tab agent receives the send. |
+| S4 | Zero or several candidates refuse the send; nothing is sent partially. | The comments stay in the list, and the clipboard export still works. |
+| S5 | A refusal says why and names the fallback. | The status line distinguishes "no agent" from "several agents" and points at the clipboard copy (`y`). |
 
 ### Clipboard
 
@@ -116,8 +124,9 @@ The snapshot is non-disruptive. reviewr writes a tree from the worktree through 
 
 - The send path needs the herdr CLI; browsing diffs and the clipboard export do not, so the core works from a plain shell minus the agent send.
 - If the clipboard utility or `herdr agent send` fails, the export reports an error and the comment stays in the list (see `review-model.md`).
-- With `tab` placement, `Send` cannot use the shared-tab signal, so it resolves the sole agent in the workspace; when the workspace holds more than one agent it fails and the status says so, while `split`/`overlay`/`zoomed` still disambiguate by the shared tab.
-- Turn tracking needs the agent status from the herdr CLI; without it the `last-turn` scope stays empty, while `uncommitted` and `branch` are unaffected.
+- A refused send states its reason — no agent, or several agents — and points at the `y` clipboard copy; the comments stay in the list (→ S4, S5).
+- With `tab` placement, `Send` cannot use the shared-tab signal, so it resolves the sole agent in the workspace; when the workspace holds more than one agent it refuses, while `split`/`overlay`/`zoomed` still disambiguate by the shared tab. Non-agent panes never make a layout ambiguous in either mode (→ S1).
+- Turn tracking needs the agent status from the herdr CLI; without it the `last-turn` scope stays empty, while `uncommitted` and `branch` are unaffected. It resolves the agent under the same S1–S3 rules, so a plugin sidebar or shell in the tab never pauses tracking.
 - A turn that starts and ends within one poll interval — or whose start is masked by a transient `unknown` status — is never seen entering `working`, so its start is not snapshotted; `last-turn` then shows the changes accumulated since the last observed turn start, more than one turn, never lines the agent did not write.
 - A crash between the snapshot and the ref update leaves an orphaned tree object, which git garbage-collects; `git update-ref` is atomic, so the baseline ref is never half-written.
 - The sidebar assumes one instance per worktree; two instances on the same worktree write the same per-worktree ref under last-writer-wins, which is harmless since both compute the same baseline.
@@ -145,10 +154,13 @@ These are not built here; the architecture only stays open to them.
 - `toggle_direction` offers `right|down` only — mirrors herdr's `split` direction set; herdr does not split a pane left or up.
 - `auto_open` is an explicit opt-out, not a yield-to-populated-workspace heuristic — two plugins on one `worktree.created` event race (herdr guarantees no handler order, and herdr-plus skips its layout when the workspace already has a second pane, #5), and a delay-then-sniff-the-pane-count auto-open is just a second racer with a magic timeout. Rejected: sleeping in the event handler and skipping when the workspace has grown. Reversal: herdr gains event-handler ordering or a workspace-settled signal.
 - `auto_open` defaults to `true` — the ambient sidebar on a fresh worktree is the flagship flow, and layout-plugin users are the minority with a one-line opt-out. Rejected: defaulting to `false`, which silently turns off the headline feature for everyone else.
+- An entry is an agent iff it carries an `agent` field — `agent_status` cannot discriminate, since a real agent transiently reports `unknown` (the overlay case above) and a status filter would drop it mid-blip, while non-agent panes always lack `agent` (observed live, herdr 0.7.1, #6). Rejected: filtering on `agent_status != unknown`. Reversal: a herdr version that lists agent panes without the `agent` field.
+- The own-pane exclusion stays alongside the agent-field filter — it keeps "never send to self" true even if a herdr version again lists the sidebar with an `agent` field, as earlier notes recorded. Rejected: relying on the field filter alone.
+- Several real agents refuse rather than guess, with a reasoned message — a `focused` tie-break cannot work (the sidebar itself holds focus at the moment of send, so no agent is focused right then), and a picker is a new UI surface disproportionate to today's need; the refusal names the reason and the `y` fallback instead. Rejected: preferring the focused agent; an in-TUI agent picker. Reversal: herdr exposes a last-focused-agent signal, or multi-agent tabs become a common reviewr layout.
 
 ## Open decisions
 
-- None. The `herdr agent list` envelope is confirmed as `result.agents[]` with snake_case `pane_id`/`tab_id`/`workspace_id`, and `agent_status` is one of `idle`, `working`, `blocked`, `done`, or `unknown` (herdr socket API; `idle`/`working`/`done`/`unknown` also seen live, herdr 0.7.1). The resolver keeps a small shape hedge defensively and excludes its own pane, since herdr lists the reviewr sidebar as an agent — a non-agent pane carries `agent_status: unknown` and no `agent` field.
+- None. The `herdr agent list` envelope is confirmed as `result.agents[]` with snake_case `pane_id`/`tab_id`/`workspace_id`, and `agent_status` is one of `idle`, `working`, `blocked`, `done`, or `unknown` (herdr socket API; `idle`/`working`/`done`/`unknown` also seen live, herdr 0.7.1). The list covers every pane: a real agent carries `agent` (and `agent_session`), while a non-agent pane — including the reviewr sidebar itself, on 0.7.1 — carries `agent_status: unknown` and no `agent` field. The resolver keeps a small shape hedge defensively.
 
 ## Related specs
 
