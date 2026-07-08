@@ -70,6 +70,36 @@ fn config_theme_in(dir: impl AsRef<std::path::Path>) -> Option<String> {
     table.get("theme").and_then(toml::Value::as_str).map(str::to_owned)
 }
 
+/// The built-in base-branch candidates for the `branch` scope, used when `config.toml`
+/// sets no `base_branches` (`specs/review-model.md`).
+pub const DEFAULT_BASE_BRANCHES: [&str; 4] = ["origin/main", "origin/master", "main", "master"];
+
+/// The ordered base-branch candidates, read on each refresh from reviewr's config file
+/// (`$HERDR_PLUGIN_CONFIG_DIR/config.toml`). Falls back to [`DEFAULT_BASE_BRANCHES`] when the
+/// dir is unset (standalone), the file is absent or unparseable, or it has no `base_branches`
+/// array (`specs/review-model.md`).
+pub fn base_branches() -> Vec<String> {
+    std::env::var_os("HERDR_PLUGIN_CONFIG_DIR")
+        .and_then(base_branches_in)
+        .unwrap_or_else(|| DEFAULT_BASE_BRANCHES.iter().map(|s| (*s).to_owned()).collect())
+}
+
+/// The `base_branches` array from `<dir>/config.toml`, or `None` if the file is absent,
+/// unparseable, or has no non-empty `base_branches` array of strings. Non-string entries are
+/// dropped; an all-non-string or empty array falls back like an absent key. Split from the env
+/// lookup so it is testable.
+fn base_branches_in(dir: impl AsRef<std::path::Path>) -> Option<Vec<String>> {
+    let text = std::fs::read_to_string(dir.as_ref().join("config.toml")).ok()?;
+    let table: toml::Table = text.parse().ok()?;
+    let list: Vec<String> = table
+        .get("base_branches")?
+        .as_array()?
+        .iter()
+        .filter_map(|v| v.as_str().map(str::to_owned))
+        .collect();
+    (!list.is_empty()).then_some(list)
+}
+
 #[cfg(test)]
 mod tests {
     use super::Config;
@@ -113,5 +143,34 @@ mod tests {
         assert_eq!(super::config_theme_in(dir.path()), None);
         std::fs::write(dir.path().join("config.toml"), "poll = 500\n").unwrap();
         assert_eq!(super::config_theme_in(dir.path()), None);
+    }
+
+    #[test]
+    fn reads_base_branches_from_config_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "base_branches = [\"origin/dev\", \"main\"]\n",
+        )
+        .unwrap();
+        assert_eq!(
+            super::base_branches_in(dir.path()),
+            Some(vec!["origin/dev".to_string(), "main".to_string()])
+        );
+    }
+
+    #[test]
+    fn base_branches_missing_or_malformed_falls_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        assert_eq!(super::base_branches_in(dir.path()), None, "no file");
+        std::fs::write(&path, "theme = \"x\"\n").unwrap();
+        assert_eq!(super::base_branches_in(dir.path()), None, "absent key");
+        std::fs::write(&path, "base_branches = []\n").unwrap();
+        assert_eq!(super::base_branches_in(dir.path()), None, "empty array");
+        std::fs::write(&path, "base_branches = [1, 2]\n").unwrap();
+        assert_eq!(super::base_branches_in(dir.path()), None, "non-string entries");
+        std::fs::write(&path, "base_branches = :::\n").unwrap();
+        assert_eq!(super::base_branches_in(dir.path()), None, "unparseable");
     }
 }

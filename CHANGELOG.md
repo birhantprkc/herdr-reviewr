@@ -6,6 +6,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-07-08
+
+### Added
+- **Configurable base branch** — `base_branches` in reviewr's `config.toml` sets the ordered
+  candidate list for the `branch` scope, re-read on refresh. reviewr uses the first entry that
+  exists in the repo (default `origin/main` → `origin/master` → `main` → `master`), so one setting
+  works across repos with different trunks and the base is reachable inside herdr, where no CLI
+  flag is. `--base` still overrides. See `specs/review-model.md`. (#3)
+
 ## [0.6.0] — 2026-07-02
 
 ### Added

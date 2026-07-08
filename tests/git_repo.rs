@@ -78,6 +78,34 @@ fn merge_base_is_the_branch_point() {
 }
 
 #[test]
+fn base_resolves_via_the_default_list_without_a_flag() {
+    let r = Repo::init();
+    r.write("base.rs", "1\n");
+    r.commit_all("base");
+    let branch_point = r.git(&["rev-parse", "HEAD"]).trim().to_string();
+    r.git(&["checkout", "-q", "-b", "feature"]);
+    r.write("base.rs", "2\n");
+    r.commit_all("diverge");
+
+    // No flag: the default `base_branches` list skips the absent `origin/*` and finds `main`.
+    assert_eq!(merge_base(r.path(), None), Some(branch_point));
+}
+
+#[test]
+fn a_nonexistent_flag_falls_through_to_the_list() {
+    let r = Repo::init();
+    r.write("base.rs", "1\n");
+    r.commit_all("base");
+    let branch_point = r.git(&["rev-parse", "HEAD"]).trim().to_string();
+    r.git(&["checkout", "-q", "-b", "feature"]);
+    r.write("base.rs", "2\n");
+    r.commit_all("diverge");
+
+    // A `--base` naming no existing ref is skipped, not an error; resolution uses the list.
+    assert_eq!(merge_base(r.path(), Some("no-such-ref")), Some(branch_point));
+}
+
+#[test]
 fn branch_scope_is_a_superset_of_uncommitted() {
     let r = Repo::init();
     r.write("base.rs", "1\n");

@@ -124,19 +124,17 @@ fn ref_exists(repo: &Path, git_ref: &str) -> bool {
     git_ok(repo, &["rev-parse", "--verify", "--quiet", git_ref])
 }
 
-/// The base ref for branch scope: `base` if it resolves, otherwise the first of
-/// `origin/main`, `origin/master`, `main`, `master`.
-fn base_ref(repo: &Path, base: Option<&str>) -> Option<String> {
+/// The base ref for branch scope: the `--base` flag if it resolves, otherwise the first
+/// `candidates` entry that resolves (`specs/review-model.md`). A flag that names no existing
+/// ref is skipped, falling through to the candidates.
+fn base_ref(repo: &Path, base: Option<&str>, candidates: &[String]) -> Option<String> {
     if let Some(b) = base
         && !b.is_empty()
         && ref_exists(repo, b)
     {
         return Some(b.to_string());
     }
-    ["origin/main", "origin/master", "main", "master"]
-        .into_iter()
-        .find(|cand| ref_exists(repo, cand))
-        .map(String::from)
+    candidates.iter().find(|cand| ref_exists(repo, cand)).cloned()
 }
 
 /// The old side of a scope's diff against the worktree. `None` means `HEAD` (the
@@ -154,7 +152,7 @@ fn range(repo: &Path, scope: Scope, base: Option<&str>) -> Option<String> {
 
 /// The merge-base commit of `base` and `HEAD`, the old side of a branch-scope diff.
 pub fn merge_base(repo: &Path, base: Option<&str>) -> Option<String> {
-    let base = base_ref(repo, base)?;
+    let base = base_ref(repo, base, &crate::config::base_branches())?;
     git_line(repo, &["merge-base", &base, "HEAD"])
 }
 

@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-06-23
-Last edited: 2026-06-26
+Last edited: 2026-07-08
 ---
 
 # Review model
@@ -44,9 +44,32 @@ A scope selects which changes the `Changes` view shows and which files `All file
 | `branch` | the worktree vs the merge-base with the base branch — every change this branch carries over its base, committed and uncommitted | `git diff $(git merge-base <base> HEAD)` plus `git status --porcelain` for untracked files |
 | `last-turn` | the worktree vs the turn baseline — what the agent changed in its most recent change-producing turn, including untracked files | `git diff <turn-baseline> <worktree snapshot>` |
 
-The base branch is `origin/main`, falling back to `origin/master`, then `main`, then `master`. It is overridable by config or flag.
-
 Because the base is an ancestor of `HEAD`, `branch` is a superset of `uncommitted`: it shows the same working-tree changes plus the branch's committed work, with the merge-base as the old side of every diff. So when nothing is committed past the base, `branch` and `uncommitted` coincide rather than `branch` going empty. `last-turn` is not nested in either — it is anchored to a point in time (the turn snapshot), so it can show work the agent has since committed, which `uncommitted` does not.
+
+### Base branch
+
+The `branch` scope diffs against the merge-base of the base branch and `HEAD`. The base is the first ref that exists in the repo from an ordered candidate list, so one configuration resolves correctly across repos with different trunks — a repo missing a listed name simply falls through to the next.
+
+```toml
+# $HERDR_PLUGIN_CONFIG_DIR/config.toml
+base_branches = ["origin/main", "origin/master", "main", "master"]   # the default value
+# a gitflow repo: put your trunk first
+base_branches = ["origin/develop", "origin/main", "main", "master"]
+```
+
+Resolution picks the base by this precedence; the first source that yields a ref existing in the repo wins:
+
+| # | Source | Base is |
+| --- | --- | --- |
+| 1 | `--base <ref>` flag | `<ref>`, when it exists in the repo; otherwise skipped |
+| 2 | `base_branches` in `config.toml` (defaults to the list above) | the first listed ref that exists in the repo |
+
+- The list is re-read on refresh, so editing `base_branches` and refreshing re-bases the `branch` scope without relaunching the pane.
+- A listed ref absent from the repo is skipped, never an error — resolution falls through to the next candidate.
+- A missing or unparseable `config.toml`, or a `base_branches` that is absent, empty, or has no string entries, uses the default list — non-string entries in an otherwise-valid list are dropped.
+- When no candidate exists (no remote, none of the names present), `branch` has no base and shows nothing; `uncommitted` and `last-turn` are unaffected.
+- The installed pane passes no arguments, so inside herdr `base_branches` is the only channel; `--base` serves standalone and dev runs, where it overrides the list.
+- Standalone (no `HERDR_PLUGIN_CONFIG_DIR`), reviewr reads no config file and relies on `--base` and the default list.
 
 ### Ignored paths
 
@@ -166,6 +189,9 @@ Export is the only side effect, and comments are in-memory.
 - `branch` spans the worktree, not only commits — it diffs the merge-base against the working tree (untracked included), so it shows every change the branch carries over its base and is a superset of `uncommitted`. A committed-only range goes empty whenever the agent's work is uncommitted — the common case in live review, and the state the scope most needs to show. Rejected: `merge-base...HEAD`, committed-only.
 - `last-turn` anchors to the most recent change-producing turn, not every turn — re-baselining on every turn start would blank the view after any text-only turn (a question, a plan); holding the baseline until a turn actually edits a file keeps the last real diff on screen. Rejected: re-baseline on every idle→working edge.
 - A comment can anchor to file content, not only a diff — the `All files` tab comments on code the agent did not touch (a missed call site), so an anchor may be plain content with `side` always `new`. Rejected: restricting comments to changed lines.
+- Base set by an ordered `base_branches` list in `config.toml`, not a single value — the list resolves per-repo (first existing candidate wins), so one config is correct across worktrees with different trunks, where a single global value would mis-base any repo in which that name exists but is not the trunk. Rejected: a single `base` string (cross-repo footgun); a per-repo `git config reviewr.base` (scatters config outside the one `config.toml` reviewr owns); reading `origin/HEAD` (written only at clone, routinely stale or unset — lazygit and `gh` both refuse to trust it). Reversed if users need genuinely different candidate sets per repo, which a single shared list cannot express.
+- First-existing resolution, not merge-base-closest — an ordered list already lets a user put their trunk first, and choosing the nearest ancestor among several existing candidates is machinery no reported case needs. Reversed if a repo with several live trunk candidates picks the wrong base under first-existing.
+- The `config.toml` list defaults to the built-in candidates rather than layering config on top of a separate hardcoded fallback — one concept (an editable candidate list) instead of two (an override plus a fallback), mirroring how `theme` defaults to `catppuccin`. Rejected: a config `base` that prepends to a fixed internal list.
 
 ## Open decisions
 

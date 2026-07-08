@@ -140,8 +140,8 @@ button, and the scroll wheel all work too.
 
 - **uncommitted** — the working tree vs `HEAD` (staged, unstaged, and untracked).
 - **branch** — the working tree vs the merge-base with the base branch (`origin/main` →
-  `origin/master` → `main` → `master`, or `--base`); a superset of **uncommitted** that adds the
-  branch's committed work.
+  `origin/master` → `main` → `master` by default, set via `base_branches` or `--base`). A superset
+  of **uncommitted** that adds the branch's committed work.
 - **last turn** — only what the agent changed since its most recent turn started (see
   [Limitations](#limitations)).
 
@@ -157,7 +157,7 @@ CLI flags on the pane command:
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--poll <ms>` | `2000` | worktree poll interval (min `200`) |
-| `--base <ref>` | auto | base branch for `branch` scope |
+| `--base <ref>` | auto | base branch for `branch` scope, overrides `base_branches` |
 | `--theme <name>` | `catppuccin` | UI + syntax theme (see below) |
 | `--wrap <on\|off>` | `on` | soft-wrap long diff lines (`w` toggles at runtime) |
 
@@ -181,6 +181,23 @@ the terminal's background. Available:
   `tokyo-night-day`, `rose-pine-dawn`.
 
 Names match herdr's where both ship a palette. An unknown name falls back to `catppuccin`.
+
+### Base branch
+
+The **branch** scope diffs against the merge-base with a base branch. reviewr tries an ordered
+list of candidates and uses the first that exists in your repo, so one setting works across repos
+with different trunks. The default is `origin/main`, then `origin/master`, `main`, `master`.
+
+To review against a different base — a `develop` trunk, say — set `base_branches` in the same
+config file (re-read on refresh, so editing it and pressing `r` re-bases without relaunch):
+
+```toml
+# $HERDR_PLUGIN_CONFIG_DIR/config.toml
+base_branches = ["origin/develop", "origin/main", "main", "master"]
+```
+
+reviewr picks the first entry that exists in the repo. A `--base <ref>` flag still wins when it
+names an existing ref. A missing or malformed config falls back to the default list.
 
 ### Sidebar placement
 
