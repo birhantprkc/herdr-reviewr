@@ -2045,6 +2045,23 @@ fn apply_pr_follows_the_selected_comment_across_a_refresh() {
 }
 
 #[test]
+fn same_input_failure_preserves_any_visible_pr_snapshot_and_remedy() {
+    use herdr_reviewr::forge::PrView;
+
+    let repo = Repo::init();
+    let mut app = app_on(&repo);
+    app.apply_pr(PrView::NoPr(vec!["feature".to_string()]));
+
+    app.apply_pr(PrView::NotAuthed("github.example.com".to_string()));
+
+    assert_eq!(app.pr, PrView::NoPr(vec!["feature".to_string()]));
+    assert_eq!(
+        app.pr_notice(),
+        Some("not signed in — run `gh auth login --hostname github.example.com`, then press r")
+    );
+}
+
+#[test]
 fn theme_selection_swaps_the_palette_and_falls_back() {
     use herdr_reviewr::theme;
     let repo = Repo::init();

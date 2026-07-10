@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-06-29
-Last edited: 2026-07-09
+Last edited: 2026-07-10
 ---
 
 # Theme
@@ -48,7 +48,7 @@ The theme set:
 - Dark: `dracula`, `nord`, `gruvbox`, `one-dark`, `solarized`, `monokai`, `tokyo-night`, `rose-pine`.
 - Light: `gruvbox-light`, `one-light`, `solarized-light`, `github-light`, `tokyo-night-day`, `rose-pine-dawn`.
 
-A herdr name outside this set (`kanagawa`, `kanagawa-lotus`, `vesper`, `terminal`, dark `github`) resolves to the default until added (Non-goals).
+A herdr name outside this set (`kanagawa`, `kanagawa-lotus`, `vesper`, `terminal`, dark `github`) is not a valid config value until added (Non-goals).
 
 ## Behavior
 
@@ -82,8 +82,8 @@ A herdr name outside this set (`kanagawa`, `kanagawa-lotus`, `vesper`, `terminal
 
 reviewr only reads the config file, never writes it, so concurrent sidebars and refresh re-reads need no coordination.
 
-- An unknown theme name resolves to the default and is logged. The UI shows no error and never half-applies a palette.
-- A missing or unparseable config resolves to the default. A later refresh that finds it valid applies it.
+- A missing config or omitted `theme` resolves to the default. Invalid plugin config follows `config.md`.
+- An unknown `--theme` override resolves to the default and logs the unsupported name.
 - A theme whose syntax theme fails to load still renders its chrome. Syntax falls back to plain spans (`diff-view.md`).
 - Re-reading on refresh is idempotent. An unchanged `theme` reuses the built palette. A changed value rebuilds it.
 
@@ -101,6 +101,7 @@ reviewr only reads the config file, never writes it, so concurrent sidebars and 
 
 ## Related specs
 
+- [configuration](./config.md)
 - [diff-view](./diff-view.md)
 - [tui](./tui.md)
 - [herdr-host](./herdr-host.md)

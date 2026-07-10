@@ -64,36 +64,97 @@ pub fn toplevel(path: &Path) -> Option<PathBuf> {
     git_line(path, &["rev-parse", "--show-toplevel"]).map(PathBuf::from)
 }
 
-/// `(owner, name)` from a remote URL pointing at github.com, else `None`. Splits the URL into
-/// host and path so an SSH host alias or a trailing slash can't bleed into the parsed name.
-/// Accepts the `github.com-<alias>` host form that multi-account `~/.ssh/config` setups use.
-fn parse_github_slug(url: &str) -> Option<(String, String)> {
-    let (host, path) = split_remote(url)?;
-    if host != "github.com" && !host.starts_with("github.com-") {
-        return None;
-    }
-    let path = path.trim_matches('/');
-    let path = path.strip_suffix(".git").unwrap_or(path);
-    let (owner, name) = path.split_once('/')?;
-    // A GitHub repo path is exactly `owner/name`; drop anything past it defensively.
-    let name = name.split('/').next().unwrap_or(name);
-    (!owner.is_empty() && !name.is_empty()).then(|| (owner.to_string(), name.to_string()))
+/// A canonical GitHub API and repository target.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RepoTarget {
+    pub host: String,
+    pub owner: String,
+    pub name: String,
 }
 
-/// Split a git remote URL into `(host, path)` for the two forms git emits: a scheme URL
-/// (`https://`, `ssh://`, `git://`, with optional `user@` and `:port`) and the scp-like
-/// `user@host:path`.
-fn split_remote(url: &str) -> Option<(&str, &str)> {
-    if let Some((_, rest)) = url.split_once("://") {
+/// Host classification for origin's rewritten primary fetch URL.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OriginIdentity {
+    Repository(RepoTarget),
+    Missing,
+    Hostless,
+    Unsupported(String),
+    Malformed(String),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RemoteTransport {
+    Ssh,
+    Hosted,
+    Unsupported,
+}
+
+/// Classify one remote URL against GitHub.com and the optional configured Enterprise host.
+fn classify_remote(url: &str, enterprise: Option<&str>) -> OriginIdentity {
+    let Some((transport, host, path, has_port)) = split_remote(url) else {
+        return OriginIdentity::Hostless;
+    };
+    if host.is_empty() {
+        return OriginIdentity::Hostless;
+    }
+    let host_lower = host.to_ascii_lowercase();
+    if transport == RemoteTransport::Unsupported
+        || (transport == RemoteTransport::Hosted && has_port)
+    {
+        return OriginIdentity::Unsupported(host_lower);
+    }
+    let canonical = if host_lower == "github.com"
+        || (transport == RemoteTransport::Ssh && is_alias(&host_lower, "github.com"))
+    {
+        Some("github.com")
+    } else if let Some(enterprise) = enterprise
+        && (host_lower == enterprise
+            || (transport == RemoteTransport::Ssh && is_alias(&host_lower, enterprise)))
+    {
+        Some(enterprise)
+    } else {
+        None
+    };
+    let Some(canonical) = canonical else {
+        return OriginIdentity::Unsupported(host_lower);
+    };
+    let path = path.trim_matches('/');
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    let mut parts = path.split('/');
+    let (Some(owner), Some(name), None) = (parts.next(), parts.next(), parts.next()) else {
+        return OriginIdentity::Malformed(canonical.to_owned());
+    };
+    if owner.is_empty() || name.is_empty() {
+        return OriginIdentity::Malformed(canonical.to_owned());
+    }
+    OriginIdentity::Repository(RepoTarget {
+        host: canonical.to_owned(),
+        owner: owner.to_owned(),
+        name: name.to_owned(),
+    })
+}
+
+fn is_alias(host: &str, canonical: &str) -> bool {
+    host.strip_prefix(canonical).is_some_and(|suffix| suffix.starts_with('-') && suffix.len() > 1)
+}
+
+/// Split a Git remote URL into transport, host, and path for scheme and scp-style forms.
+fn split_remote(url: &str) -> Option<(RemoteTransport, &str, &str, bool)> {
+    if let Some((scheme, rest)) = url.split_once("://") {
         let rest = rest.split_once('@').map_or(rest, |(_, r)| r); // drop `user@`
-        let (hostport, path) = rest.split_once('/')?;
-        let host = hostport.split(':').next().unwrap_or(hostport); // drop `:port`
-        Some((host, path))
+        let (hostport, path) = rest.split_once('/').unwrap_or((rest, ""));
+        let (host, port) = hostport.split_once(':').map_or((hostport, None), |(h, p)| (h, Some(p)));
+        let transport = match scheme.to_ascii_lowercase().as_str() {
+            "ssh" => RemoteTransport::Ssh,
+            "http" | "https" | "git" => RemoteTransport::Hosted,
+            _ => RemoteTransport::Unsupported,
+        };
+        Some((transport, host, path, port.is_some()))
     } else {
         // scp-like `[user@]host:path` — the first `:` splits host from path.
         let (hostpart, path) = url.split_once(':')?;
         let host = hostpart.split_once('@').map_or(hostpart, |(_, h)| h);
-        Some((host, path))
+        Some((RemoteTransport::Ssh, host, path, false))
     }
 }
 
@@ -109,8 +170,8 @@ fn split_remote(url: &str) -> Option<(&str, &str)> {
 #[derive(Debug)]
 pub struct GitFail(pub String);
 
-/// Spawn one PR-fetch git read. `LC_ALL=C` pins git's messages to English — `origin_slug`
-/// classifies a failure by its stderr text, which git otherwise localizes.
+/// Spawn one PR-fetch git read. `LC_ALL=C` pins Git's messages to English — origin discovery
+/// classifies a missing remote by stderr text, which Git otherwise localizes.
 fn run_git(repo: &Path, args: &[&str]) -> Result<std::process::Output, GitFail> {
     Command::new("git")
         .arg("-C")
@@ -147,11 +208,13 @@ fn git_strict(repo: &Path, args: &[&str]) -> Result<String, GitFail> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// Everything the PR fetch reads from local git, in one failure-aware pass. `None`/empty
-/// fields are clean absences: no GitHub `origin`, a detached `HEAD`, an unborn branch.
+/// Everything the PR fetch reads from local Git in one failure-aware pass. [`OriginIdentity`]
+/// preserves repository, missing, hostless, unsupported, and malformed origin states; optional
+/// branch/HEAD fields preserve detached and unborn states.
 #[derive(Debug)]
 pub struct PrLocal {
-    pub slug: Option<(String, String)>,
+    pub origin: OriginIdentity,
+    pub branch: Option<String>,
     /// `HEAD` pinned to an OID at the start of the pass; every ancestry test, distance,
     /// and the `sync` count use this pin, so one fetch reads one consistent local state.
     pub head_oid: Option<String>,
@@ -160,47 +223,48 @@ pub struct PrLocal {
     pub candidates: Vec<String>,
 }
 
-/// Derive the PR fetch's local state: the origin slug, the branch, the pinned `HEAD`,
+/// Derive the PR fetch's local state: the origin identity, branch, pinned `HEAD`,
 /// and the candidate branches the work could be published under (`specs/forge-host.md`).
-pub fn pr_local(repo: &Path, base_flag: Option<&str>) -> Result<PrLocal, GitFail> {
-    let slug = origin_slug(repo)?;
+pub fn pr_local(
+    repo: &Path,
+    base_flag: Option<&str>,
+    config_bases: &[String],
+    github_host: Option<&str>,
+) -> Result<PrLocal, GitFail> {
+    let origin = origin_identity(repo, github_host)?;
     let Some(branch) = git_tristate(repo, &["symbolic-ref", "--quiet", "--short", "HEAD"])? else {
         // Detached HEAD — post-merge cleanup, not a review seat; nothing to publish.
-        return Ok(PrLocal { slug, head_oid: None, candidates: Vec::new() });
+        return Ok(PrLocal { origin, branch: None, head_oid: None, candidates: Vec::new() });
     };
     let head_oid = git_tristate(repo, &["rev-parse", "--verify", "--quiet", "HEAD^{commit}"])?;
-    // One config read backs the whole fetch, so the exclusion set and the base pin can
-    // never disagree about what counts as a base (specs/forge-host.md: one fetch, one
-    // consistent local state).
-    let config_bases = crate::config::base_branches();
-    let bases = base_names(base_flag, &config_bases);
+    let bases = base_names(base_flag, config_bases);
     let push_dest = push_destination(repo, &branch, &bases)?;
     let tips = match &head_oid {
         Some(head) => {
-            let base_oid = pin_base(repo, base_flag, &config_bases)?;
+            let base_oid = pin_base(repo, base_flag, config_bases)?;
             remote_candidates(repo, head, base_oid.as_deref(), &bases)?
         }
         None => Vec::new(), // an unborn branch has no commits to compare against
     };
     let candidates = candidate_order(push_dest.as_deref(), &tips, &branch);
-    Ok(PrLocal { slug, head_oid, candidates })
+    Ok(PrLocal { origin, branch: Some(branch), head_oid, candidates })
 }
 
-/// The `(owner, name)` of `origin` when it is a GitHub remote. A missing `origin` is a
-/// clean absence (→ the not-a-forge state); any other `remote get-url` failure is transient.
+/// Classify origin's primary rewritten fetch URL. A missing origin is a clean state; every other
+/// `remote get-url` failure is transient.
 /// `remote get-url` is kept over `config --get remote.origin.url` because it applies
 /// `url.<base>.insteadOf` rewrites, which can be what maps a shorthand to github.com. Its
 /// missing-remote exit code (2) is also git's generic usage-error code, so absence is told
 /// apart by the message text — stable English under [`run_git`]'s `LC_ALL=C`.
-fn origin_slug(repo: &Path) -> Result<Option<(String, String)>, GitFail> {
+fn origin_identity(repo: &Path, github_host: Option<&str>) -> Result<OriginIdentity, GitFail> {
     let args = ["remote", "get-url", "origin"];
     let out = run_git(repo, &args)?;
     if out.status.success() {
-        return Ok(parse_github_slug(String::from_utf8_lossy(&out.stdout).trim()));
+        return Ok(classify_remote(String::from_utf8_lossy(&out.stdout).trim(), github_host));
     }
     let stderr = String::from_utf8_lossy(&out.stderr);
     if stderr.to_lowercase().contains("no such remote") {
-        return Ok(None);
+        return Ok(OriginIdentity::Missing);
     }
     Err(GitFail(format!("git {args:?}: {}", stderr.trim())))
 }
@@ -213,7 +277,13 @@ fn base_names(base_flag: Option<&str>, config_bases: &[String]) -> HashSet<Strin
         .into_iter()
         .filter(|b| !b.is_empty())
         .chain(config_bases.iter().map(String::as_str))
-        .map(|b| b.strip_prefix("origin/").unwrap_or(b).to_string())
+        .map(|b| {
+            b.strip_prefix("refs/remotes/origin/")
+                .or_else(|| b.strip_prefix("refs/heads/"))
+                .or_else(|| b.strip_prefix("origin/"))
+                .unwrap_or(b)
+                .to_string()
+        })
         .collect()
 }
 
@@ -375,22 +445,9 @@ fn base_ref(repo: &Path, base: Option<&str>, candidates: &[String]) -> Option<St
     candidates.iter().find(|cand| ref_exists(repo, cand)).cloned()
 }
 
-/// The old side of a scope's diff against the worktree. `None` means `HEAD` (the
-/// uncommitted default).
-fn range(repo: &Path, scope: Scope, base: Option<&str>) -> Option<String> {
-    match scope {
-        // Uncommitted diffs the worktree vs `HEAD`; last-turn diffs vs a snapshot tree
-        // (resolved by `changed_against_tree`). Neither is a committed range.
-        Scope::Uncommitted | Scope::LastTurn => None,
-        // Branch diffs the worktree against the merge-base, so it shows committed branch
-        // work and the working tree together — a superset of uncommitted (review-model.md).
-        Scope::Branch => merge_base(repo, base),
-    }
-}
-
-/// The merge-base commit of `base` and `HEAD`, the old side of a branch-scope diff.
-pub fn merge_base(repo: &Path, base: Option<&str>) -> Option<String> {
-    let base = base_ref(repo, base, &crate::config::base_branches())?;
+/// The merge-base commit of `base` and `HEAD` using one base-config snapshot.
+pub fn merge_base(repo: &Path, base: Option<&str>, config_bases: &[String]) -> Option<String> {
+    let base = base_ref(repo, base, config_bases)?;
     git_line(repo, &["merge-base", &base, "HEAD"])
 }
 
@@ -512,9 +569,14 @@ fn diff_base(repo: &Path) -> String {
     }
 }
 
-/// The changed files for `scope`, sorted by path. `base` overrides the branch base ref.
+/// The changed files for `scope`, sorted by path. `base` overrides the base-config snapshot.
 /// `last-turn` is resolved separately by [`changed_against_tree`], so it lists nothing here.
-pub fn changed_files(repo: &Path, scope: Scope, base: Option<&str>) -> Result<Vec<ChangedFile>> {
+pub fn changed_files(
+    repo: &Path,
+    scope: Scope,
+    base: Option<&str>,
+    config_bases: &[String],
+) -> Result<Vec<ChangedFile>> {
     let (numstat, name_status) = match scope {
         Scope::Uncommitted => {
             // A repo with no commits has no HEAD; diff against the empty tree so a fresh
@@ -525,7 +587,7 @@ pub fn changed_files(repo: &Path, scope: Scope, base: Option<&str>) -> Result<Ve
                 git(repo, &["diff", &base, "--name-status", "-z"])?,
             )
         }
-        Scope::Branch => match range(repo, scope, base) {
+        Scope::Branch => match merge_base(repo, base, config_bases) {
             Some(r) => (
                 git(repo, &["diff", &r, "--numstat", "-z"])?,
                 git(repo, &["diff", &r, "--name-status", "-z"])?,
@@ -779,7 +841,10 @@ fn parse_name_status(out: &str) -> Vec<(ChangeKind, String, Option<String>)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ChangeKind, candidate_order, parse_github_slug, parse_name_status, parse_numstat};
+    use super::{
+        ChangeKind, OriginIdentity, RepoTarget, candidate_order, classify_remote,
+        parse_name_status, parse_numstat,
+    };
 
     #[test]
     fn candidates_order_push_dest_then_nearest_tips_then_local() {
@@ -821,26 +886,122 @@ mod tests {
     }
 
     #[test]
-    fn github_slug_parses_every_remote_form_and_rejects_non_github() {
-        let g = parse_github_slug;
-        let owned = |o: &str, n: &str| Some((o.to_string(), n.to_string()));
+    fn origin_identity_parses_github_and_enterprise_remote_forms() {
+        let repo = |host: &str, owner: &str, name: &str| {
+            OriginIdentity::Repository(RepoTarget {
+                host: host.to_string(),
+                owner: owner.to_string(),
+                name: name.to_string(),
+            })
+        };
         // HTTPS, with and without `.git` and a trailing slash.
-        assert_eq!(g("https://github.com/owner/repo.git"), owned("owner", "repo"));
-        assert_eq!(g("https://github.com/owner/repo"), owned("owner", "repo"));
-        assert_eq!(g("https://github.com/owner/repo/"), owned("owner", "repo"));
+        assert_eq!(
+            classify_remote("https://github.com/owner/repo.git", None),
+            repo("github.com", "owner", "repo")
+        );
+        assert_eq!(
+            classify_remote("https://github.com/owner/repo", None),
+            repo("github.com", "owner", "repo")
+        );
+        assert_eq!(
+            classify_remote("https://github.com/owner/repo/", None),
+            repo("github.com", "owner", "repo")
+        );
         // scp-like SSH, and the `ssh://` scheme form with a port.
-        assert_eq!(g("git@github.com:owner/repo.git"), owned("owner", "repo"));
-        assert_eq!(g("ssh://git@github.com/owner/repo.git"), owned("owner", "repo"));
-        assert_eq!(g("ssh://git@github.com:22/owner/repo.git"), owned("owner", "repo"));
-        assert_eq!(g("git://github.com/owner/repo"), owned("owner", "repo"));
+        assert_eq!(
+            classify_remote("git@github.com:owner/repo.git", None),
+            repo("github.com", "owner", "repo")
+        );
+        assert_eq!(
+            classify_remote("ssh://git@github.com/owner/repo.git", None),
+            repo("github.com", "owner", "repo")
+        );
+        assert_eq!(
+            classify_remote("ssh://git@github.com:22/owner/repo.git", None),
+            repo("github.com", "owner", "repo")
+        );
+        assert_eq!(
+            classify_remote("git://github.com/owner/repo", None),
+            repo("github.com", "owner", "repo")
+        );
         // Multi-account SSH host alias (`~/.ssh/config` `Host github.com-work`).
-        assert_eq!(g("git@github.com-work:owner/repo.git"), owned("owner", "repo"));
-        // Non-GitHub and GitHub Enterprise hosts are not github.com.
-        assert_eq!(g("git@gitlab.com:owner/repo.git"), None);
-        assert_eq!(g("git@github.company.com:owner/repo.git"), None);
-        assert_eq!(g("https://github.company.com/owner/repo.git"), None);
-        // A host with no repo segment has no slug.
-        assert_eq!(g("https://github.com/owner"), None);
+        assert_eq!(
+            classify_remote("git@github.com-work:owner/repo.git", None),
+            repo("github.com", "owner", "repo")
+        );
+        assert_eq!(
+            classify_remote(
+                "git@github.company.com-work:owner/repo.git",
+                Some("github.company.com")
+            ),
+            repo("github.company.com", "owner", "repo")
+        );
+        assert_eq!(
+            classify_remote(
+                "https://github.company.com/owner/repo.git",
+                Some("github.company.com")
+            ),
+            repo("github.company.com", "owner", "repo")
+        );
+    }
+
+    #[test]
+    fn origin_identity_keeps_alias_and_failure_states_distinct() {
+        assert_eq!(
+            classify_remote("https://github.com-attacker/owner/repo", None),
+            OriginIdentity::Unsupported("github.com-attacker".to_string())
+        );
+        assert_eq!(
+            classify_remote(
+                "https://github.company.com-work/owner/repo",
+                Some("github.company.com")
+            ),
+            OriginIdentity::Unsupported("github.company.com-work".to_string())
+        );
+        assert_eq!(
+            classify_remote("git@gitlab.com:owner/repo.git", Some("github.company.com")),
+            OriginIdentity::Unsupported("gitlab.com".to_string())
+        );
+        assert_eq!(
+            classify_remote("https://github.com/owner", None),
+            OriginIdentity::Malformed("github.com".to_string())
+        );
+        assert_eq!(
+            classify_remote("https://github.com", None),
+            OriginIdentity::Malformed("github.com".to_string())
+        );
+        assert_eq!(
+            classify_remote("https://gitlab.com", None),
+            OriginIdentity::Unsupported("gitlab.com".to_string())
+        );
+        assert_eq!(
+            classify_remote(
+                "https://github.company.com:8443/owner/repo.git",
+                Some("github.company.com")
+            ),
+            OriginIdentity::Unsupported("github.company.com".to_string())
+        );
+        assert_eq!(classify_remote("/tmp/repo", None), OriginIdentity::Hostless);
+        assert_eq!(classify_remote("file:///tmp/repo", None), OriginIdentity::Hostless);
+        assert_eq!(
+            classify_remote("file://github.com/owner/repo", None),
+            OriginIdentity::Unsupported("github.com".to_string())
+        );
+        assert_eq!(
+            classify_remote("ftp://github.com/owner/repo", None),
+            OriginIdentity::Unsupported("github.com".to_string())
+        );
+    }
+
+    #[test]
+    fn configured_base_refs_normalize_to_bare_names() {
+        assert_eq!(
+            super::base_names(
+                Some("refs/heads/release"),
+                &["refs/remotes/origin/main".to_string(), "origin/develop".to_string(),],
+            ),
+            ["release", "main", "develop"].into_iter().map(str::to_string).collect()
+        );
     }
 
     #[test]

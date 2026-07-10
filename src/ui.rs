@@ -24,6 +24,13 @@ use crate::theme::Palette;
 
 pub fn render(frame: &mut Frame, app: &App) {
     let area = frame.area();
+    if let Some(error) = app.config_error() {
+        frame.render_widget(
+            Paragraph::new(error).wrap(ratatui::widgets::Wrap { trim: false }),
+            area,
+        );
+        return;
+    }
     let p = panes(area, app.list_pct);
 
     if app.tab == Tab::Pr {
@@ -1388,6 +1395,7 @@ fn pr_state_line(s: &forge::PrSnapshot) -> String {
         match s.sync {
             forge::Sync::Unpushed(n) => parts.push(format!("⇡ {n} unpushed")),
             forge::Sync::Behind(n) => parts.push(format!("⇣ {n} behind")),
+            forge::Sync::Unknown => parts.push("? sync unknown".to_string()),
             forge::Sync::InSync => {}
         }
     }
@@ -1510,6 +1518,14 @@ fn render_pr_read(frame: &mut Frame, app: &App, area: Rect) {
     let width = inner.width as usize;
     let mut lines: Vec<Line<'static>> = Vec::new();
 
+    if let Some(notice) = app.pr_notice() {
+        lines.push(Line::from(Span::styled(notice.to_owned(), Style::default().fg(p.yellow))));
+        lines.push(Line::raw(""));
+    } else if app.pr_refreshing() {
+        lines.push(Line::from(Span::styled("refreshing…", Style::default().fg(p.overlay0))));
+        lines.push(Line::raw(""));
+    }
+
     if let Some(cm) = selected {
         if let Some(hunk) = &cm.snippet {
             for raw in hunk.lines() {
@@ -1550,9 +1566,12 @@ fn render_pr_read(frame: &mut Frame, app: &App, area: Rect) {
 /// The no-PR state names the candidate branches it queried, so a resolution that surprises
 /// is inspectable rather than silent (specs/forge-host.md).
 fn pr_empty_msg(view: &forge::PrView) -> String {
+    if let Some(message) = view.retry_remedy() {
+        return message;
+    }
     match view {
         forge::PrView::Loading => "loading…".into(),
-        forge::PrView::Pr(_) => String::new(),
+        forge::PrView::Pending | forge::PrView::Pr(_) => String::new(),
         forge::PrView::NoPr(candidates) if candidates.is_empty() => {
             "detached HEAD — check out a branch to resolve its PR".into()
         }
@@ -1562,12 +1581,16 @@ fn pr_empty_msg(view: &forge::PrView) -> String {
         forge::PrView::Ambiguous(n) => {
             format!("{n} open PRs back this branch — open one on GitHub")
         }
-        forge::PrView::NoGh => "gh not found — install gh, then press r".into(),
-        forge::PrView::NotAuthed => "not signed in — run `gh auth login`, then press r".into(),
-        forge::PrView::NotGitHub => {
-            "not a GitHub remote — the PR tab needs a github.com origin".into()
+        forge::PrView::NoGh | forge::PrView::NotAuthed(_) | forge::PrView::Error(_) => {
+            unreachable!("retry failures returned above")
         }
-        forge::PrView::Error(_) => "github unavailable — retrying; press r to retry now".into(),
+        forge::PrView::NeedsGitHubOrigin => "the PR tab needs a supported GitHub origin".into(),
+        forge::PrView::UnsupportedHost(host) => {
+            format!("unsupported host {host} — Enterprise users can set `github_host`")
+        }
+        forge::PrView::MalformedOrigin(host) => {
+            format!("malformed GitHub origin for {host} — expected owner/repository")
+        }
     }
 }
 

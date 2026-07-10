@@ -1,6 +1,6 @@
 id = "persiyanov.reviewr"
 name = "reviewr"
-version = "0.10.0"
+version = "0.11.0"
 min_herdr_version = "0.7.0"
 platforms = ["macos", "linux"]
 description = "Native terminal code-review sidebar for herdr."
@@ -42,4 +42,3 @@ command = ["bash", "herdr/sidebar.sh", "close"]
 [[events]]
 on = "worktree.created"
 command = ["bash", "herdr/sidebar.sh", "auto-open"]
-

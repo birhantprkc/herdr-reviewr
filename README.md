@@ -179,6 +179,23 @@ Create the file if it does not exist yet. herdr hands this directory to the plug
 reviewr's file, not herdr's — settings added to herdr's own `~/.config/herdr/config.toml` are
 never read by reviewr.
 
+The file accepts these six keys:
+
+```toml
+theme = "tokyo-night"
+base_branches = ["origin/develop", "origin/main", "main", "master"]
+toggle_placement = "overlay"
+toggle_direction = "down"
+auto_open = false
+github_host = "github.example.com"
+```
+
+A missing file or omitted key uses its default. Any unknown key, wrong type, or invalid value
+makes the whole file invalid; reviewr never applies the valid-looking parts. The sidebar then
+shows only the config error, and actions or events exit non-zero without touching the workspace.
+Fixing the file restores the running sidebar on its next refresh. Replace the file atomically if
+your editor or config manager might expose a partial save.
+
 ### Theme
 
 One theme colors the whole UI — chrome and syntax together. Set it in reviewr's config file
@@ -198,7 +215,8 @@ the terminal's background. Available:
 - **Light:** `catppuccin-latte`, `gruvbox-light`, `one-light`, `solarized-light`, `github-light`,
   `tokyo-night-day`, `rose-pine-dawn`.
 
-Names match herdr's where both ship a palette. An unknown name falls back to `catppuccin`.
+Names match herdr's where both ship a palette. An unknown config name is an error. The standalone
+`--theme` development flag retains its older fallback to `catppuccin`.
 
 ### Base branch
 
@@ -215,7 +233,27 @@ base_branches = ["origin/develop", "origin/main", "main", "master"]
 ```
 
 reviewr picks the first entry that exists in the repo. A `--base <ref>` flag still wins when it
-names an existing ref. A missing or malformed config falls back to the default list.
+names an existing ref. A missing file or omitted key uses the default list; a malformed value
+blocks the plugin like any other invalid config.
+
+### GitHub hosts
+
+GitHub.com works without configuration. To read pull requests from one GitHub Enterprise host,
+set its bare hostname:
+
+```toml
+github_host = "github.example.com"
+```
+
+reviewr matches either that exact origin host or a trusted SSH alias beginning
+`github.example.com-`, such as `git@github.example.com-work:owner/repo.git`. The alias convention
+applies only to scp-style and `ssh://` origins; HTTPS hosts must match exactly. GitHub.com and its
+SSH aliases continue to work when Enterprise is configured.
+
+Host identity comes from origin's fetch URL after Git's `url.*.insteadOf` rewrite; a separate
+push URL does not change it. API calls always pass the canonical host explicitly, so `GH_HOST`
+cannot redirect a fetch. Authenticate the Enterprise host with
+`gh auth login --hostname github.example.com`.
 
 ### Sidebar placement
 
@@ -237,8 +275,8 @@ toggle_direction = "down"      # right | down — split only        (default: ri
 - **`tab`** opens reviewr in its own tab and hands it the keyboard.
 
 When you create a new worktree, reviewr auto-opens only for `split` and `tab`. With `overlay` or
-`zoomed` it stays out of the way until you press the toggle yourself. Any value it does not
-recognize falls back to the default. You can also turn the auto-open off entirely — see below.
+`zoomed` it stays out of the way until you press the toggle yourself. An unrecognized value makes
+the config invalid. You can also turn the auto-open off entirely — see below.
 
 ### Auto-open and layout plugins
 

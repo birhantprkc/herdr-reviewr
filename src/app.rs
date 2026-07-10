@@ -206,6 +206,10 @@ pub struct App {
     pub should_quit: bool,
     /// The read-only `PR` tab's view of the pull request (`specs/forge-host.md`).
     pub pr: forge::PrView,
+    /// Persistent same-input fetch remedy shown without replacing the visible snapshot.
+    pr_notice: Option<String>,
+    /// A same-input refresh that crossed the loading-indicator delay.
+    pr_refreshing: bool,
     /// The PR navigator's cursor over its rows (checks then comments).
     pub(crate) pr_cursor: usize,
     /// Top visible line of the PR read pane, reset when the selected comment changes.
@@ -220,6 +224,8 @@ pub struct App {
     theme_name: &'static str,
     /// The `--theme` override name (highest precedence); `None` lets the config file decide.
     cli_theme_name: Option<String>,
+    /// The plugin is either ready with one validated snapshot or wholly blocked on its error.
+    config: PluginConfigState,
     /// The last theme name requested, so re-resolving the same name skips work and logging.
     requested_theme_name: Option<String>,
     cache: DiffCache,
@@ -229,12 +235,31 @@ pub struct App {
     turn_key: String,
 }
 
+#[derive(Debug)]
+enum PluginConfigState {
+    Ready(crate::config::PluginConfig),
+    Blocked { error: String },
+}
+
 impl App {
     pub fn new(repo: PathBuf, scope: Scope, base: Option<String>) -> Self {
+        Self::build(repo, scope, base, true)
+    }
+
+    /// Construct the error-only sidebar without reading repository state.
+    pub(crate) fn blocked(repo: PathBuf, scope: Scope, base: Option<String>) -> Self {
+        Self::build(repo, scope, base, false)
+    }
+
+    fn build(repo: PathBuf, scope: Scope, base: Option<String>, load_turn: bool) -> Self {
         // Resume any persisted turn baseline for this worktree, so `last-turn` keeps its
         // anchor across a sidebar restart (specs/herdr-host.md).
         let turn_key = git::worktree_key(&repo);
-        let turn = TurnTracker::with_baseline(git::read_baseline_ref(&repo, &turn_key));
+        let turn = if load_turn {
+            TurnTracker::with_baseline(git::read_baseline_ref(&repo, &turn_key))
+        } else {
+            TurnTracker::default()
+        };
         let theme = theme::resolve(None);
         Self {
             repo,
@@ -271,7 +296,9 @@ impl App {
             caret: 0,
             status: String::new(),
             should_quit: false,
-            pr: forge::PrView::Loading,
+            pr: forge::PrView::Pending,
+            pr_notice: None,
+            pr_refreshing: false,
             pr_cursor: 0,
             pr_read_scroll: 0,
             pr_pending: false,
@@ -279,6 +306,7 @@ impl App {
             palette: theme.palette,
             theme_name: theme.name,
             cli_theme_name: None,
+            config: PluginConfigState::Ready(crate::config::PluginConfig::default()),
             requested_theme_name: None,
             cache: DiffCache::new(),
             turn,
@@ -311,11 +339,100 @@ impl App {
         self.refresh_theme();
     }
 
-    /// Re-resolve the active theme: the `--theme` override, else the config file's `theme`,
-    /// else the default. Idempotent — `set_theme` no-ops when the name is unchanged.
-    pub fn refresh_theme(&mut self) {
-        let name = self.cli_theme_name.clone().or_else(crate::config::config_file_theme);
-        self.set_theme(name.as_deref());
+    /// Apply one complete validated plugin configuration snapshot.
+    pub(crate) fn set_plugin_config(&mut self, config: crate::config::PluginConfig) {
+        self.config = PluginConfigState::Ready(config);
+        self.refresh_theme();
+    }
+
+    /// The validated plugin configuration snapshot normal work currently uses.
+    pub fn plugin_config(&self) -> Option<&crate::config::PluginConfig> {
+        match &self.config {
+            PluginConfigState::Ready(config) => Some(config),
+            PluginConfigState::Blocked { .. } => None,
+        }
+    }
+
+    /// Block the sidebar on one whole-file configuration failure.
+    pub fn set_config_error(&mut self, error: String) {
+        self.config = PluginConfigState::Blocked { error };
+        self.pr_pending = false;
+    }
+
+    /// The error-only state rendered while plugin configuration is invalid.
+    pub fn config_error(&self) -> Option<&str> {
+        match &self.config {
+            PluginConfigState::Ready(_) => None,
+            PluginConfigState::Blocked { error, .. } => Some(error),
+        }
+    }
+
+    /// Move user-authored review state into a freshly loaded app after config recovery. Saved
+    /// comments always survive; an in-progress draft keeps the exact frozen diff it was written
+    /// against, matching the ordinary refresh invariant.
+    pub(crate) fn carry_authored_state_from(&mut self, old: &mut Self) {
+        self.store = std::mem::take(&mut old.store);
+        self.list_cursor = old.list_cursor;
+        let old_mode = old.mode.clone();
+        match old_mode {
+            Mode::Normal => {}
+            Mode::List | Mode::Composing { .. } => {
+                self.scope = old.scope;
+                self.tab = old.tab;
+                self.active_file_tab = old.active_file_tab;
+                self.focus = old.focus;
+                self.entries = std::mem::take(&mut old.entries);
+                self.file_rows = std::mem::take(&mut old.file_rows);
+                self.file_cursor = old.file_cursor;
+                self.file_scroll = old.file_scroll;
+                self.reveal_files = old.reveal_files;
+                self.reveal_diff = old.reveal_diff;
+                self.changed = std::mem::take(&mut old.changed);
+                self.diff = std::mem::take(&mut old.diff);
+                self.visible = std::mem::take(&mut old.visible);
+                self.expanded_folds = std::mem::take(&mut old.expanded_folds);
+                self.diff_path = old.diff_path.take();
+                self.diff_cursor = old.diff_cursor;
+                self.diff_scroll = old.diff_scroll;
+                self.h_scroll = old.h_scroll;
+                self.select_anchor = old.select_anchor;
+                self.resume_list = old.resume_list;
+                self.toggled_dirs = std::mem::take(&mut old.toggled_dirs);
+                self.stash = std::mem::take(&mut old.stash);
+                self.wrap = old.wrap;
+                self.list_pct = old.list_pct;
+                self.mode = old.mode.clone();
+                self.input = std::mem::take(&mut old.input);
+                self.caret = old.caret;
+            }
+        }
+    }
+
+    fn config_snapshot(&self) -> &crate::config::PluginConfig {
+        match &self.config {
+            PluginConfigState::Ready(config) => config,
+            PluginConfigState::Blocked { .. } => {
+                unreachable!("normal work is gated while plugin configuration is invalid")
+            }
+        }
+    }
+
+    fn ensure_config_ready(&self) -> Result<()> {
+        match &self.config {
+            PluginConfigState::Ready(_) => Ok(()),
+            PluginConfigState::Blocked { error } => {
+                Err(anyhow::anyhow!("plugin configuration is invalid: {error}"))
+            }
+        }
+    }
+
+    /// Re-resolve the active theme from the CLI override or current validated snapshot.
+    fn refresh_theme(&mut self) {
+        let name = self
+            .cli_theme_name
+            .clone()
+            .unwrap_or_else(|| self.config_snapshot().theme().to_owned());
+        self.set_theme(Some(&name));
     }
 
     /// The active palette every renderer paints from (`specs/theme.md`).
@@ -422,9 +539,7 @@ impl App {
     /// Never touches the comment store or the in-progress input — that is the
     /// "a comment is never lost to a refresh" invariant (`specs/overview.md`).
     pub fn reload(&mut self) -> Result<()> {
-        // The active theme can change between polls (a config edit), independent of the tab, so
-        // re-resolve cheaply first — it no-ops unless the name actually changed (specs/theme.md).
-        self.refresh_theme();
+        self.ensure_config_ready()?;
         // The PR tab holds its own state and renders nothing from the file tree, so a poll on
         // it skips the rebuild; switching back to a file tab reloads it then (specs/tui.md).
         if !self.tab.is_file_tab() {
@@ -458,7 +573,12 @@ impl App {
                 Some(t) => git::changed_against_tree(&self.repo, t)?,
                 None => Vec::new(),
             },
-            _ => git::changed_files(&self.repo, self.scope, self.base.as_deref())?,
+            _ => git::changed_files(
+                &self.repo,
+                self.scope,
+                self.base.as_deref(),
+                self.config_snapshot().base_branches(),
+            )?,
         };
         self.changed = changed.iter().map(|f| (f.path.clone(), Annotation::from(f))).collect();
         self.entries = match self.tab {
@@ -627,7 +747,11 @@ impl App {
                 (old, new)
             }
             Scope::Branch => {
-                let mb = git::merge_base(&self.repo, self.base.as_deref());
+                let mb = git::merge_base(
+                    &self.repo,
+                    self.base.as_deref(),
+                    self.config_snapshot().base_branches(),
+                );
                 let old =
                     mb.map(|m| git::file_content(&self.repo, &m, old_path)).unwrap_or_default();
                 (old, worktree_content(&self.repo, new_path))
@@ -654,6 +778,9 @@ impl App {
     /// propagates — a missing herdr is normal, so failures only log. Returns whether this
     /// sample ended a turn (the agent went idle after acting), the `PR` tab's refetch signal.
     pub fn track_turn(&mut self) -> bool {
+        if self.plugin_config().is_none() {
+            return false;
+        }
         let status = crate::herdr::resolved_agent_status().ok().flatten();
         self.apply_agent_status(status.as_deref())
     }
@@ -665,6 +792,9 @@ impl App {
     /// only log, so a transient git failure never crashes the poll. Returns whether this
     /// sample ended a turn (a `working`→resting edge), the `PR` tab's refetch signal.
     pub fn apply_agent_status(&mut self, status: Option<&str>) -> bool {
+        if self.plugin_config().is_none() {
+            return false;
+        }
         let Some(status) = status else { return false };
         let parsed = Status::parse(status);
         // Read the turn-end edge before `observe` advances `prev`.
@@ -791,6 +921,7 @@ impl App {
     /// Switch the changeset scope and reload. A no-op while composing, so a comment
     /// in progress is never stranded against a different diff.
     pub fn set_scope(&mut self, scope: Scope) -> Result<()> {
+        self.ensure_config_ready()?;
         if self.scope != scope && !self.composing() {
             self.scope = scope;
             // A scope switch changes the Changes changeset (and each file's old side), so the
@@ -825,6 +956,7 @@ impl App {
     /// file and scroll, so returning to a tab lands exactly where you left it (specs/tui.md). A
     /// no-op on the active tab or while composing; focus stays on the same side.
     pub fn set_tab(&mut self, tab: Tab) -> Result<()> {
+        self.ensure_config_ready()?;
         if self.tab == tab || self.composing() {
             return Ok(());
         }
@@ -855,14 +987,30 @@ impl App {
 
     // ---- PR tab (specs/forge-host.md, specs/tui.md) -------------------------------------
 
+    /// Clear a snapshot whose complete fetch input no longer matches the worktree.
+    pub fn clear_pr(&mut self) {
+        self.pr = forge::PrView::Pending;
+        self.pr_notice = None;
+        self.pr_refreshing = false;
+        self.pr_cursor = 0;
+        self.pr_read_scroll = 0;
+    }
+
     /// Apply a snapshot fetched off-thread (`forge::fetch` runs on a worker so the UI never
     /// blocks — `lib.rs`). A transient `Error` keeps the last good snapshot frozen with a status
     /// note, so a failed poll never blanks a populated tab; the cursor clamps to the new rows.
     pub fn apply_pr(&mut self, view: forge::PrView) {
-        if let (forge::PrView::Error(msg), forge::PrView::Pr(_)) = (&view, &self.pr) {
-            self.status = format!("PR refresh failed: {msg}");
+        self.pr_refreshing = false;
+        let has_snapshot = matches!(
+            self.pr,
+            forge::PrView::Pr(_) | forge::PrView::NoPr(_) | forge::PrView::Ambiguous(_)
+        );
+        if has_snapshot && let Some(message) = view.retry_remedy() {
+            self.pr_notice = Some(message);
+            self.pr_read_scroll = 0;
             return;
         }
+        self.pr_notice = None;
         // Follow the selected comment by identity, not index, so a refresh that inserts a newer
         // comment (the list is newest-first) keeps the cursor on the same one and leaves the read
         // scroll intact — only a vanished or absent selection resets it (mirrors the file tabs'
@@ -884,6 +1032,24 @@ impl App {
             self.pr_cursor = self.pr_row_count().saturating_sub(1);
             self.pr_read_scroll = 0;
         }
+    }
+
+    /// Persistent remedy for a failed same-input refresh.
+    pub fn pr_notice(&self) -> Option<&str> {
+        self.pr_notice.as_deref()
+    }
+
+    pub fn set_pr_refreshing(&mut self, refreshing: bool) {
+        if refreshing && matches!(self.pr, forge::PrView::Pending) {
+            self.pr = forge::PrView::Loading;
+            self.pr_refreshing = false;
+        } else {
+            self.pr_refreshing = refreshing;
+        }
+    }
+
+    pub fn pr_refreshing(&self) -> bool {
+        self.pr_refreshing
     }
 
     /// The resolved snapshot, or `None` in a loading/degraded view.
@@ -973,6 +1139,7 @@ impl App {
     /// keeps the current diff so scanning the tree never blanks the pane. The page/half-page keys
     /// reuse this with a larger `delta`, since paging is just a bigger cursor move in the focus.
     pub fn move_cursor(&mut self, delta: isize) -> Result<()> {
+        self.ensure_config_ready()?;
         match self.focus {
             Focus::Files => {
                 if !self.file_rows.is_empty() {
@@ -1011,6 +1178,7 @@ impl App {
     /// Act on the file-list row at `index` (a mouse click): a file opens its diff, a
     /// directory toggles its expansion.
     pub fn select_file(&mut self, index: usize) -> Result<()> {
+        self.ensure_config_ready()?;
         if index >= self.file_rows.len() {
             return Ok(());
         }
@@ -1067,6 +1235,9 @@ impl App {
 
     /// Expand the directory under the cursor (`→`); a no-op if it is a file or already open.
     pub fn expand_dir(&mut self) {
+        if self.plugin_config().is_none() {
+            return;
+        }
         if let Some(path) = self.dir_under_cursor()
             && self.set_dir_expanded(&path, true)
         {
@@ -1076,6 +1247,9 @@ impl App {
 
     /// Collapse the directory under the cursor (`←`); a no-op if it is a file or already shut.
     pub fn collapse_dir(&mut self) {
+        if self.plugin_config().is_none() {
+            return;
+        }
         if let Some(path) = self.dir_under_cursor()
             && self.set_dir_expanded(&path, false)
         {
@@ -1822,4 +1996,73 @@ fn anchor(selected: &[&Row]) -> Option<(Side, u32, u32, String)> {
     let min = *old_nos.iter().min()?;
     let max = *old_nos.iter().max()?;
     Some((Side::Old, min, max, snippet))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{App, Mode};
+    use crate::model::{Comment, Scope, Side};
+    use std::path::PathBuf;
+
+    #[test]
+    fn config_recovery_carries_saved_comments_and_the_live_draft() {
+        let mut old = App::blocked(PathBuf::from("."), Scope::Uncommitted, None);
+        old.store.add(Comment {
+            file: "src/lib.rs".to_string(),
+            side: Side::New,
+            start: 1,
+            end: 1,
+            lines: "+line".to_string(),
+            text: "saved".to_string(),
+            diff_anchored: true,
+        });
+        old.mode = Mode::Composing { editing: None };
+        old.resume_list = true;
+        old.input = "draft".to_string();
+        old.caret = 3;
+
+        let mut recovered = App::new(PathBuf::from("."), Scope::Uncommitted, None);
+        recovered.carry_authored_state_from(&mut old);
+
+        assert_eq!(recovered.store.len(), 1);
+        assert_eq!(recovered.input, "draft");
+        assert_eq!(recovered.caret, 3);
+        assert!(recovered.resume_list);
+        assert!(matches!(recovered.mode, Mode::Composing { editing: None }));
+    }
+
+    #[test]
+    fn config_recovery_keeps_the_comment_list_view_and_navigation() {
+        let mut old = App::blocked(PathBuf::from("."), Scope::Branch, None);
+        old.mode = Mode::List;
+        old.file_cursor = 4;
+        old.file_scroll = 2;
+        old.diff_cursor = 8;
+        old.diff_scroll = 5;
+        old.input = "unsent".to_string();
+
+        let mut recovered = App::new(PathBuf::from("."), Scope::Uncommitted, None);
+        recovered.carry_authored_state_from(&mut old);
+
+        assert!(matches!(recovered.mode, Mode::List));
+        assert_eq!(recovered.scope, Scope::Branch);
+        assert_eq!(recovered.file_cursor, 4);
+        assert_eq!(recovered.file_scroll, 2);
+        assert_eq!(recovered.diff_cursor, 8);
+        assert_eq!(recovered.diff_scroll, 5);
+        assert_eq!(recovered.input, "unsent");
+    }
+
+    #[test]
+    fn blocked_app_rejects_normal_repository_work_without_panicking() {
+        let mut app = App::blocked(PathBuf::from("."), Scope::Uncommitted, None);
+        app.set_config_error("bad config".to_string());
+
+        assert!(app.reload().unwrap_err().to_string().contains("bad config"));
+        assert!(app.set_scope(Scope::Branch).is_err());
+        assert!(app.set_tab(super::Tab::AllFiles).is_err());
+        assert!(app.move_cursor(1).is_err());
+        assert!(app.select_file(0).is_err());
+        assert!(!app.track_turn());
+    }
 }

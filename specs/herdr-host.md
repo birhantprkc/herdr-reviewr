@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-06-23
-Last edited: 2026-07-09
+Last edited: 2026-07-10
 ---
 
 # herdr host
@@ -18,7 +18,7 @@ reviewr ships as a herdr plugin. The manifest (`herdr-plugin.toml`) declares:
 | actions | `toggle`, `open`, `close` | manage the sidebar pane                                  |
 | event   | `worktree.created`        | auto-opens the sidebar (off with `auto_open = false`)    |
 
-herdr owns the pane. The binary just runs in it. One script (`herdr/sidebar.sh`) implements the actions and the event.
+herdr owns the pane. The binary runs inside it. The actions and event follow the same placement contract.
 
 The pane never shows herdr's blank grid. The binary paints its empty frame before the first git scan. A failing scan shows the error in the status line. A genuinely hung `git` leaves a frozen-but-visible sidebar. Neither is a blank pane.
 
@@ -38,7 +38,7 @@ What each action does:
 | `close`  | does nothing   | closes them all |
 | `toggle` | opens one      | closes them all |
 
-The shared rules, numbered for citation:
+With valid plugin config, the shared rules are:
 
 | #  | question                | answer                                                        |
 | -- | ----------------------- | -------------------------------------------------------------- |
@@ -50,11 +50,11 @@ The shared rules, numbered for citation:
 | A6 | which workspace?        | the focused one, wherever the action is invoked from            |
 | A7 | what does `close` sweep? | every labeled pane, even one herdr's plugin registry forgot after a restart |
 
-An action refuses in two cases: no workspace context, or an open outside a git repo. Both outcomes land in `herdr plugin log list` (→ A4).
+Every action validates plugin config before inspecting the workspace (config.md). An action also refuses when there is no workspace context or an open is outside a git repo. Both outcomes land in `herdr plugin log list` (→ A4).
 
 ## Sidebar placement
 
-The config file is `$HERDR_PLUGIN_CONFIG_DIR/config.toml`. The script re-reads it on every invocation.
+The placement settings come from `$HERDR_PLUGIN_CONFIG_DIR/config.toml`. Each action and event reads one config snapshot.
 
 ```toml
 toggle_placement = "overlay"   # split | overlay | zoomed | tab   (default: split)
@@ -65,7 +65,7 @@ auto_open = false              # auto-open on worktree.created    (default: true
 | #  | Always true                                                                             |
 | -- | --------------------------------------------------------------------------------------- |
 | P1 | Every open uses the placement named by `toggle_placement`.                                |
-| P2 | An unknown or missing key falls back to its own default. No key errors.                   |
+| P2 | A missing key uses its default. Invalid plugin config follows `config.md`.                |
 | P3 | `toggle_direction` affects `split` only.                                                  |
 | P4 | The event auto-opens only `split` and `tab`.                                              |
 | P5 | The event never takes focus.                                                              |
@@ -176,6 +176,7 @@ Send and tracking:
 
 ## Related specs
 
+- [configuration](./config.md)
 - [overview](./overview.md)
 - [review-model](./review-model.md)
 - [theme](./theme.md)

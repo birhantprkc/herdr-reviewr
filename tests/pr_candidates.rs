@@ -6,7 +6,13 @@
 mod common;
 
 use common::Repo;
-use herdr_reviewr::git::{ahead_behind_oids, pr_local};
+use herdr_reviewr::config::{PluginConfig, plugin_config_in};
+use herdr_reviewr::forge::fetch_input;
+use herdr_reviewr::git::{
+    GitFail, OriginIdentity, PrLocal, RepoTarget, ahead_behind_oids,
+    pr_local as pr_local_with_config,
+};
+use std::path::Path;
 
 /// A repo on branch `work` (one commit past `main`), with a GitHub `origin` remote and
 /// `origin/main` tracking-ref at `main`'s tip — the baseline every test builds on.
@@ -26,6 +32,15 @@ fn head(repo: &Repo) -> String {
     repo.git(&["rev-parse", "HEAD"]).trim().to_string()
 }
 
+fn defaults() -> PluginConfig {
+    PluginConfig::default()
+}
+
+fn pr_local(repo: &Path, base: Option<&str>) -> Result<PrLocal, GitFail> {
+    let config = defaults();
+    pr_local_with_config(repo, base, config.base_branches(), None)
+}
+
 #[test]
 fn push_head_other_name_yields_the_remote_branch_before_the_local_name() {
     // The headline workflow: `git push origin HEAD:other` with no `-u` updates the
@@ -33,7 +48,14 @@ fn push_head_other_name_yields_the_remote_branch_before_the_local_name() {
     let repo = worktree();
     repo.git(&["update-ref", "refs/remotes/origin/other", "HEAD"]);
     let local = pr_local(repo.path(), None).expect("pr_local");
-    assert_eq!(local.slug, Some(("owner".to_string(), "repo".to_string())));
+    assert_eq!(
+        local.origin,
+        OriginIdentity::Repository(RepoTarget {
+            host: "github.com".to_string(),
+            owner: "owner".to_string(),
+            name: "repo".to_string(),
+        })
+    );
     assert_eq!(local.head_oid.as_deref(), Some(head(&repo).as_str()));
     assert_eq!(local.candidates, ["other", "work"]);
 }
@@ -157,11 +179,63 @@ fn a_missing_origin_is_absence_but_a_non_repo_is_failure() {
     repo.write("a.txt", "one\n");
     repo.commit_all("base");
     let local = pr_local(repo.path(), None).expect("pr_local");
-    assert_eq!(local.slug, None, "no origin remote is a clean absence");
+    assert_eq!(local.origin, OriginIdentity::Missing, "no origin remote is a clean absence");
     assert_eq!(local.candidates, ["main"]);
 
     let dir = tempfile::tempdir().unwrap();
     assert!(pr_local(dir.path(), None).is_err(), "a non-repo directory is a failure");
+}
+
+#[test]
+fn origin_identity_uses_instead_of_rewrite_and_ignores_pushurl() {
+    let repo = worktree();
+    repo.git(&["remote", "set-url", "origin", "corp:owner/repo.git"]);
+    repo.git(&["config", "url.https://github.company.com/.insteadOf", "corp:"]);
+    repo.git(&["remote", "set-url", "--push", "origin", "git@gitlab.com:owner/repo.git"]);
+
+    let local = pr_local_with_config(
+        repo.path(),
+        None,
+        &["origin/main".to_string(), "main".to_string()],
+        Some("github.company.com"),
+    )
+    .expect("pr_local");
+
+    assert_eq!(
+        local.origin,
+        OriginIdentity::Repository(RepoTarget {
+            host: "github.company.com".to_string(),
+            owner: "owner".to_string(),
+            name: "repo".to_string(),
+        })
+    );
+}
+
+#[test]
+fn fetch_input_changes_with_head_candidates_and_base_configuration() {
+    let repo = worktree();
+    let first = fetch_input(repo.path(), None, &defaults()).unwrap();
+
+    repo.git(&["update-ref", "refs/remotes/origin/published", "HEAD"]);
+    let candidate_changed = fetch_input(repo.path(), None, &defaults()).unwrap();
+    assert_ne!(candidate_changed, first);
+    assert!(candidate_changed.candidates.contains(&"published".to_string()));
+
+    repo.write("new.txt", "new\n");
+    repo.commit_all("new head");
+    let head_changed = fetch_input(repo.path(), None, &defaults()).unwrap();
+    assert_ne!(head_changed, candidate_changed);
+
+    let config_dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        config_dir.path().join("config.toml"),
+        "base_branches = [\"origin/develop\", \"develop\"]\n",
+    )
+    .unwrap();
+    let custom = plugin_config_in(config_dir.path()).unwrap();
+    let base_changed = fetch_input(repo.path(), None, &custom).unwrap();
+    assert_ne!(base_changed, head_changed);
+    assert_eq!(base_changed.base_branches, ["origin/develop", "develop"]);
 }
 
 #[test]
@@ -172,7 +246,7 @@ fn ahead_behind_oids_counts_between_pins_and_tolerates_a_missing_head() {
     assert_eq!(ahead_behind_oids(repo.path(), &work, &main).unwrap(), Some((1, 0)));
     assert_eq!(ahead_behind_oids(repo.path(), &main, &work).unwrap(), Some((0, 1)));
     assert_eq!(ahead_behind_oids(repo.path(), &work, &work).unwrap(), Some((0, 0)));
-    // A PR head OID never fetched locally reads as in-sync-unknown, not an error.
+    // A PR head OID never fetched locally cannot be compared, but is not a git failure.
     let missing = "0123456789abcdef0123456789abcdef01234567";
     assert_eq!(ahead_behind_oids(repo.path(), &work, missing).unwrap(), None);
 }

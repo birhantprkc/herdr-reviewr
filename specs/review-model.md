@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-06-23
-Last edited: 2026-07-09
+Last edited: 2026-07-10
 ---
 
 # Review model
@@ -73,7 +73,7 @@ Precedence. The first source that yields a ref existing in the repo wins:
 
 - The list is re-read on refresh. Editing it re-bases the scope without a relaunch.
 - A listed ref absent from the repo is skipped, never an error.
-- A missing or unparseable config, or a list with no string entries, uses the default list. Non-string entries in a valid list are dropped.
+- A missing config or omitted `base_branches` uses the default list. Invalid plugin config follows `config.md`.
 - When no candidate exists, `branch` shows nothing. The other scopes are unaffected.
 - The installed pane passes no arguments, so inside herdr the config key is the only channel. `--base` serves standalone and dev runs, where it wins.
 - Standalone, with no `HERDR_PLUGIN_CONFIG_DIR`, reviewr reads no config file.
@@ -178,6 +178,7 @@ How the agent pane is found and filled is in `herdr-host.md`.
 
 ## Related specs
 
+- [configuration](./config.md)
 - [diff-view](./diff-view.md)
 - [tui](./tui.md)
 - [herdr-host](./herdr-host.md)

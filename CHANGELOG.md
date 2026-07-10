@@ -6,6 +6,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-07-10
+
+### Added
+- **GitHub Enterprise support in the PR tab.** Set one bare `github_host` in reviewr's
+  `config.toml`; GitHub.com remains available, exact Enterprise origins and documented SSH aliases
+  resolve to their canonical API host, and every `gh api` call pins that host explicitly. Origin
+  rewrites, malformed URLs, unsupported hosts, and authentication remedies are surfaced directly.
+  (#11)
+
+### Changed
+- **Plugin configuration now fails loud as one value.** Unknown keys or invalid values block the
+  sidebar, actions, and events instead of silently falling back or partially applying settings.
+  The running sidebar shows only the path-aware config error, discards work from the invalidated
+  snapshot, and recovers after the file is corrected. Missing files and omitted keys still use
+  defaults.
+- **PR refreshes reject stale work by complete input.** Host, repository, branch, pinned `HEAD`,
+  candidate branches, and base settings are probed off-thread. Superseded results never replace
+  the current view; same-input failures preserve it with the exact remedy.
+
 ## [0.10.0] — 2026-07-09
 
 ### Added

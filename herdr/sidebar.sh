@@ -8,7 +8,8 @@
 #
 # The workspace's sidebar is any pane labeled "reviewr" in the live pane list.
 # There is no state file. Actions refuse loudly (exit 1, one stderr line) and
-# report successes on stdout; the event exits silently either way.
+# report successes on stdout; a refused event reports its config error through stderr for herdr's
+# plugin log.
 set -uo pipefail
 
 # herdr runs plugin commands with a minimal PATH; ensure jq/git resolve on common installs.
@@ -17,8 +18,46 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
 mode="${1:-toggle}"
 H="${HERDR_BIN_PATH:-herdr}"
 
+# Validate the whole plugin config before reading workspace state or taking any action. The Rust
+# binary owns TOML parsing and defaults, so every plugin entry point shares exactly one contract.
+if [ -n "${HERDR_REVIEWR_BIN:-}" ]; then
+  REVIEWR="$HERDR_REVIEWR_BIN"
+elif [ -n "${HERDR_PLUGIN_ROOT:-}" ]; then
+  REVIEWR="$HERDR_PLUGIN_ROOT/bin/herdr-reviewr"
+else
+  REVIEWR="herdr-reviewr"
+fi
+config_json=$("$REVIEWR" --resolve-plugin-config 2>&1)
+config_status=$?
+if [ "$config_status" -ne 0 ]; then
+  [ -n "$config_json" ] || config_json="reviewr: configuration validation failed"
+  printf '%s\n' "$config_json" >&2
+  exit 1
+fi
+placement=$(printf '%s' "$config_json" | jq -er '.toggle_placement' 2>/dev/null) || {
+  printf 'reviewr: normalized configuration is unreadable\n' >&2
+  exit 1
+}
+direction=$(printf '%s' "$config_json" | jq -er '.toggle_direction' 2>/dev/null) || {
+  printf 'reviewr: normalized configuration is unreadable\n' >&2
+  exit 1
+}
+auto_open=$(printf '%s' "$config_json" | jq -r 'if has("auto_open") then .auto_open else error("missing auto_open") end' 2>/dev/null) || {
+  printf 'reviewr: normalized configuration is unreadable\n' >&2
+  exit 1
+}
+
+# Event policy gates the event alone: explicit actions ignore it. This is after validation but
+# before workspace or pane inspection, so a disabled event performs no normal work.
+if [ "$mode" = auto-open ]; then
+  [ "$auto_open" = "false" ] && exit 0
+  if [ "$placement" != "split" ] && [ "$placement" != "tab" ]; then
+    exit 0
+  fi
+fi
+
 refuse() {
-  [ "$mode" = auto-open ] && exit 0 # an event has no caller to inform
+  [ "$mode" = auto-open ] && exit 0
   printf 'reviewr: %s\n' "$1" >&2
   exit 1
 }
@@ -88,29 +127,6 @@ esac
 # Opening from here on. Only inside a git repo.
 if [ -z "$cwd" ] || ! git -C "$cwd" rev-parse --show-toplevel >/dev/null 2>&1; then
   refuse "not a git repo: '${cwd:-<no cwd>}'"
-fi
-
-# Placement, direction, and auto_open come from reviewr's config, re-read every run;
-# an unknown value falls back to its default (spec P1, P2).
-placement="split"
-direction="right"
-auto_open="true"
-conf="${HERDR_PLUGIN_CONFIG_DIR:-}/config.toml"
-if [ -n "${HERDR_PLUGIN_CONFIG_DIR:-}" ] && [ -f "$conf" ]; then
-  p=$(sed -n "s/^[[:space:]]*toggle_placement[[:space:]]*=[[:space:]]*[\"']\([^\"']*\)[\"'].*/\1/p" "$conf" 2>/dev/null | tail -n1)
-  d=$(sed -n "s/^[[:space:]]*toggle_direction[[:space:]]*=[[:space:]]*[\"']\([^\"']*\)[\"'].*/\1/p" "$conf" 2>/dev/null | tail -n1)
-  a=$(sed -n "s/^[[:space:]]*auto_open[[:space:]]*=[[:space:]]*[\"']*\([a-z]*\)[\"']*.*/\1/p" "$conf" 2>/dev/null | tail -n1)
-  case "$p" in split | overlay | zoomed | tab) placement="$p" ;; esac
-  case "$d" in right | down) direction="$d" ;; esac
-  case "$a" in true | false) auto_open="$a" ;; esac
-fi
-
-# Event policy gates the event alone (spec A2, P4, P8): explicit actions ignore it.
-if [ "$mode" = auto-open ]; then
-  [ "$auto_open" = "false" ] && exit 0
-  if [ "$placement" != "split" ] && [ "$placement" != "tab" ]; then
-    exit 0
-  fi
 fi
 
 # Focus follows the placement on a manual open; the event never takes it (spec A3, P5, P6).

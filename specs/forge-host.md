@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-06-27
-Last edited: 2026-07-09
+Last edited: 2026-07-10
 ---
 
 # forge host
@@ -31,7 +31,7 @@ The snapshot:
 | `head_is_fork` | bool      | the head lives in another repository (GitHub's `isCrossRepository`)    |
 | `base_ref`     | string    | the merge target                                                       |
 | `merge`        | enum      | `clean`, `conflicting`, or `blocked`                                   |
-| `sync`         | enum      | `in_sync`, `unpushed`, or `behind`, with a commit count                |
+| `sync`         | enum      | `in_sync`, `unpushed`, `behind`, or `unknown`, with a count when known |
 | `checks`       | list      | one row per latest check: `name` and `status` (conclusion folded in)   |
 | `comments`     | list      | one row per comment, newest first                                      |
 | `truncated`    | bool      | a capped surface had a further page, so a list is a prefix             |
@@ -49,6 +49,32 @@ A `comments` row:
 | `reply_count`                | int    | replies on a `finding`'s thread beyond the root                         |
 
 ## Behavior
+
+### GitHub hosts
+
+`github_host` in reviewr's `config.toml` adds one GitHub Enterprise hostname. Its value contract lives in `config.md`.
+
+```toml
+github_host = "github.example.com"
+```
+
+Host matching is case-insensitive. A missing setting adds no Enterprise host. `github.com` remains supported when the setting is present.
+
+Host identity comes from `origin`'s primary fetch URL after Git's `url.*.insteadOf` rewrite. A separate push URL does not affect PR reads.
+
+| condition                                                 | outcome                                                                         |
+| --------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| exact `github_host` or SSH alias `github_host-<alias>`    | reviewr reads the repository from the configured Enterprise host                |
+| `github.com` or SSH alias `github.com-<alias>`            | reviewr reads the repository from GitHub.com                                    |
+| any other hosted `origin`                                 | reviewr names the unsupported host and points Enterprise users to `github_host` |
+| missing `origin` or an origin without a host              | reviewr says the PR tab needs a supported GitHub origin                         |
+| supported host without an owner and repository path       | reviewr says the GitHub origin is malformed                                     |
+
+The alias rows apply only to scp-style and `ssh://` origins. An alias is a trusted naming convention; reviewr does not inspect SSH config to verify where it connects.
+
+Hosted URL forms use `http://`, `https://`, or `git://`. File URLs and other schemes are not GitHub repository identities and remain unsupported.
+
+A fetch target is the canonical matched host plus the origin's owner and repository. A fetch input adds the pinned local branch, `HEAD`, candidate branches, and base configuration. `GH_HOST` cannot redirect a fetch to another instance.
 
 ### Resolution
 
@@ -82,7 +108,7 @@ What a user observes:
 
 - `merge` folds GitHub's fields to the blockers worth surfacing: `CONFLICTING`/`DIRTY` → `conflicting`, `BLOCKED` → `blocked`, and everything else (`CLEAN`, `BEHIND`, `UNSTABLE`, still-computing `UNKNOWN`) → `clean`, which the footer shows as nothing.
 - `mergeable=UNKNOWN` is GitHub computing lazily. It folds to `clean` unless `mergeStateStatus` is `DIRTY`.
-- `sync` compares the pinned `HEAD` OID to the PR's `head_oid`: equal is `in_sync`, `HEAD` ahead is `unpushed` with a `git rev-list --count` count, `head_oid` ahead is `behind`.
+- `sync` compares the pinned `HEAD` OID to the PR's `head_oid`: equal is `in_sync`, `HEAD` ahead is `unpushed` with a `git rev-list --count` count, and `head_oid` ahead is `behind`. If the PR head object is unavailable locally, the relation is `unknown`; reviewr never guesses `in_sync`.
 - `unpushed` means the checks and comments on screen describe an older commit than the local tree.
 
 ### Checks
@@ -104,29 +130,36 @@ What a user observes:
 - The first fetch starts when the panel opens, so the tab is populated before the user reaches it.
 - A refetch fires on entering the tab, on `r`, and on the agent's turn-end (a `working` → `idle`/`done` edge) while the tab is active. A turn may have pushed or merged, changing forge state with no other local signal.
 - A fallback poll refetches every 60 seconds while the tab is active. Off the tab there is no polling.
-- Each fetch is two GraphQL calls on a worker thread. `gh` never blocks input or scrolling.
-- One fetch is in flight at a time. A trigger arriving mid-flight marks it dirty, and a dirty fetch re-runs on completion, so a mid-flight push is picked up seconds later, not at the next poll.
-- The snapshot re-derives in full each fetch. reviewr keeps no PR state across fetches.
+- A fetch-input change observed on refresh clears the current PR. It starts a fetch while the tab is active; otherwise the next tab entry starts it.
+- A fetch with an open PR is two GraphQL calls. A fetch that checks historical PRs is three. All run on a worker thread, so `gh` never blocks input or scrolling.
+- One fetch is in flight at a time. A trigger arriving mid-flight supersedes its result and starts a fresh fetch when it completes.
+- Each fetch uses one snapshot of reviewr's config for host and base selection. A later fetch sees a config edit without restarting reviewr.
+- A completed fetch updates the PR tab only when the current worktree and config still derive the same input.
+- The snapshot re-derives in full each fetch. reviewr keeps no hidden or historical PR cache beyond the visible snapshot.
 
 ## Failure semantics
 
 reviewr reads GitHub and never writes it, so every failure degrades to a clear state. `Changes` and `All files` are unaffected.
 
-- `gh` absent, unauthenticated, or a non-GitHub remote each show their own remediation line naming the unblocking command. Any other failure shows a generic retry message, never read as "no PR".
-- A git command failing during the fetch's local reads is a transient fetch failure: the last good snapshot freezes with a retry marker. Only a command that succeeds and finds nothing narrows the answer. Failure is never read as absence, a detached `HEAD`, or a non-forge remote.
+- A missing `gh` preserves a same-input snapshot and shows the install remedy. With no same-input snapshot, the remedy fills the tab.
+- An unauthenticated fetch preserves a same-input snapshot and shows `gh auth login --hostname <host>`. With no same-input snapshot, the remedy fills the tab.
+- An unsupported origin names the host and points Enterprise users to `github_host`.
+- Any other fetch failure preserves a same-input snapshot and shows the retry error. With no same-input snapshot, the error fills the tab.
+- A missing `origin` is a clean absence. Any other git command failure is transient and never read as absence, a detached `HEAD`, or an unsupported remote.
 - No open PR shows a directional empty state naming the queried candidates. The next poll lights the tab up when a PR appears.
-- A rate-limited or unreachable poll freezes on the last good snapshot with a quiet marker. A failed poll never blanks a populated tab.
 - Every read is idempotent and side-effect-free. A retry returns the same snapshot.
-- Two sidebars on one worktree re-derive independently and converge within one poll interval. Neither writes, so nothing coordinates.
+- Two active PR tabs on one worktree converge within one poll interval. An inactive tab catches up when entered.
 
 ## Non-goals
 
 - No writes to GitHub. reviewr never posts, resolves a thread, re-runs a check, or merges. It never routes PR feedback to the agent.
 - No event subscription. The snapshot polls `gh`, no webhook or socket.
+- No server-version compatibility layer. An Enterprise schema that lacks the snapshot's fields fails like any unavailable GitHub API.
 - No second forge. GitHub via `gh` only, and the forge-agnostic core never imports this module.
 
 ## Related specs
 
+- [configuration](./config.md)
 - [tui](./tui.md)
 - [herdr-host](./herdr-host.md)
 - [overview](./overview.md)

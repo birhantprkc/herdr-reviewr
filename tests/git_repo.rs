@@ -3,16 +3,37 @@
 mod common;
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use common::Repo;
 use herdr_reviewr::git::{
-    all_files, changed_against_tree, changed_files, file_content, merge_base, read_baseline_ref,
-    snapshot_worktree, worktree_key, write_baseline_ref,
+    all_files, changed_against_tree, changed_files as changed_files_with_config, file_content,
+    merge_base as merge_base_with_config, read_baseline_ref, snapshot_worktree, worktree_key,
+    write_baseline_ref,
 };
 use herdr_reviewr::model::{ChangeKind, ChangedFile, Scope};
 
 fn by_path(files: &[ChangedFile]) -> HashMap<&str, &ChangedFile> {
     files.iter().map(|f| (f.path.as_str(), f)).collect()
+}
+
+fn bases() -> Vec<String> {
+    herdr_reviewr::config::DEFAULT_BASE_BRANCHES
+        .iter()
+        .map(|branch| (*branch).to_string())
+        .collect()
+}
+
+fn changed_files(
+    repo: &Path,
+    scope: Scope,
+    base: Option<&str>,
+) -> anyhow::Result<Vec<ChangedFile>> {
+    changed_files_with_config(repo, scope, base, &bases())
+}
+
+fn merge_base(repo: &Path, base: Option<&str>) -> Option<String> {
+    merge_base_with_config(repo, base, &bases())
 }
 
 #[test]

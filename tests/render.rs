@@ -59,6 +59,21 @@ fn composing(app: &mut App) {
 }
 
 #[test]
+fn invalid_config_replaces_the_entire_sidebar_with_its_error() {
+    let mut app = edited_app();
+    app.set_config_error(
+        "config /tmp/reviewr/config.toml: invalid value for `theme`; expected a built-in theme name"
+            .to_string(),
+    );
+
+    let out = render(&app);
+
+    assert!(out.contains("config /tmp/reviewr/config.toml"));
+    assert!(out.contains("expected a built-in theme name"));
+    assert!(!out.contains("Changes"), "normal sidebar chrome must be hidden");
+}
+
+#[test]
 fn the_empty_comment_box_shows_a_placeholder() {
     let mut app = edited_app();
     composing(&mut app);
