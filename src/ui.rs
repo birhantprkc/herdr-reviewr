@@ -19,6 +19,7 @@ use crate::app::{App, Focus, FooterAction, Mode, Tab, Tier};
 use crate::diff::{FileDiff, FileState, Row};
 use crate::file_list::{Annotation, RowKind};
 use crate::forge;
+use crate::keymap::Keymap;
 use crate::model::Comment;
 use crate::theme::Palette;
 
@@ -367,20 +368,24 @@ pub enum HeaderHit {
     Send,
 }
 
-/// Which header control a click at `(col, row)` lands on, if any.
+/// Which header control a click at `(col, row)` lands on, if any. `keymap` must be the keymap
+/// the on-screen frame was drawn with, so a config swap between the draw and the click cannot
+/// shift the spans under the pointer (`specs/config.md`: one snapshot per frame).
 #[must_use]
-pub fn hit_header(area: Rect, app: &App, col: u16, row: u16) -> Option<HeaderHit> {
+pub fn hit_header(area: Rect, app: &App, keymap: &Keymap, col: u16, row: u16) -> Option<HeaderHit> {
     if row != area.y {
         return None;
     }
-    for (tab, start, end) in tab_spans() {
+    let spans = tab_spans(keymap);
+    for &(tab, start, end) in &spans {
         if (start as u16..end as u16).contains(&col) {
             return Some(HeaderHit::Tab(tab));
         }
     }
-    let scope_start = header_prefix_len() as u16;
+    let prefix = header_prefix_len(&spans);
+    let scope_start = prefix as u16;
     let scope_end = scope_start + scope_chip(app).len() as u16;
-    let button_start = send_button_col(app, area.width as usize) as u16;
+    let button_start = send_button_col(app, prefix, area.width as usize) as u16;
     if (scope_start..scope_end).contains(&col) {
         Some(HeaderHit::Scope)
     } else if col >= button_start && col < area.width {
@@ -390,32 +395,38 @@ pub fn hit_header(area: Rect, app: &App, col: u16, row: u16) -> Option<HeaderHit
     }
 }
 
-/// The two tabs and their labels, left to right. All-ASCII labels keep the byte length equal
-/// to the display width, so the header column math stays simple.
-const TABS: [(Tab, &str); 3] =
-    [(Tab::Changes, "1 Changes"), (Tab::AllFiles, "2 All files"), (Tab::Pr, "3 PR")];
+/// The three tabs and their labels, left to right, each led by its `tab-*` action's hint key
+/// (`specs/tui.md`). Column math uses display width, since a bound hint key can be wide.
+fn tab_labels(keymap: &Keymap) -> [(Tab, String); 3] {
+    use crate::keymap::Action as K;
+    [
+        (Tab::Changes, format!("{} Changes", keymap.hint(K::TabChanges))),
+        (Tab::AllFiles, format!("{} All files", keymap.hint(K::TabAllFiles))),
+        (Tab::Pr, format!("{} PR", keymap.hint(K::TabPr))),
+    ]
+}
 const HEADER_LEAD: &str = " ";
 const TAB_GAP: &str = "  ";
 const HEADER_GAP: &str = "  ";
 
 /// Each tab's `(tab, start_col, end_col)` in the header, the single source the bar paints and
 /// the click hit-tests against.
-fn tab_spans() -> Vec<(Tab, usize, usize)> {
+fn tab_spans(keymap: &Keymap) -> Vec<(Tab, usize, usize)> {
     let mut col = HEADER_LEAD.len();
     let mut out = Vec::new();
-    for (i, (tab, label)) in TABS.iter().enumerate() {
+    for (i, (tab, label)) in tab_labels(keymap).iter().enumerate() {
         if i > 0 {
             col += TAB_GAP.len();
         }
-        out.push((*tab, col, col + label.len()));
-        col += label.len();
+        out.push((*tab, col, col + label.width()));
+        col += label.width();
     }
     out
 }
 
 /// The column where the scope chip starts: past the tab bar and its trailing gap.
-fn header_prefix_len() -> usize {
-    tab_spans().last().map_or(HEADER_LEAD.len(), |&(_, _, end)| end) + HEADER_GAP.len()
+fn header_prefix_len(spans: &[(Tab, usize, usize)]) -> usize {
+    spans.last().map_or(HEADER_LEAD.len(), |&(_, _, end)| end) + HEADER_GAP.len()
 }
 
 fn scope_chip(app: &App) -> String {
@@ -427,7 +438,9 @@ fn send_button(app: &App) -> String {
 }
 
 /// The header suffix: the active scope's changed-file count. Shared so the painter and the
-/// hit-test place the right-aligned `Send` button at the same column.
+/// hit-test place the right-aligned `Send` button at the same column. The scope chip, suffix,
+/// and `Send` button are all-ASCII, so their byte `.len()` equals their display width; the tab
+/// labels carry the only rebindable (possibly wide) glyphs and are measured by width.
 fn header_suffix(app: &App) -> String {
     format!("  {} changed", app.changed_count())
 }
@@ -436,8 +449,8 @@ fn header_suffix(app: &App) -> String {
 /// when the header fits, packed left right after the suffix when the bar overflows (`pad`
 /// collapses to 0). `hit_header` must use this, not a bare right-alignment, or a `Send` click
 /// mis-fires (and on a narrow sidebar lands in a tab span) when the header overflows.
-fn send_button_col(app: &App, width: usize) -> usize {
-    let before = header_prefix_len() + scope_chip(app).len() + header_suffix(app).len();
+fn send_button_col(app: &App, prefix: usize, width: usize) -> usize {
+    let before = prefix + scope_chip(app).len() + header_suffix(app).len();
     before + width.saturating_sub(before + send_button(app).len())
 }
 
@@ -448,16 +461,16 @@ fn tab_bar_spans(app: &App) -> Vec<Span<'static>> {
     let p = app.palette();
     let bar = Style::default().bg(p.surface0);
     let mut spans = vec![Span::styled(HEADER_LEAD, bar)];
-    for (i, (tab, label)) in TABS.iter().enumerate() {
+    for (i, (tab, label)) in tab_labels(app.keymap()).into_iter().enumerate() {
         if i > 0 {
             spans.push(Span::styled(TAB_GAP, bar));
         }
-        let style = if *tab == app.tab {
+        let style = if tab == app.tab {
             bar.fg(p.lavender).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
         } else {
             bar.fg(p.subtext0)
         };
-        spans.push(Span::styled(*label, style));
+        spans.push(Span::styled(label, style));
     }
     spans.push(Span::styled(HEADER_GAP, bar));
     spans
@@ -467,7 +480,8 @@ fn render_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
     let chip = scope_chip(app);
     let suffix = header_suffix(app);
     let button = send_button(app);
-    let used = header_prefix_len() + chip.len() + suffix.len() + button.len();
+    let prefix = header_prefix_len(&tab_spans(app.keymap()));
+    let used = prefix + chip.len() + suffix.len() + button.len();
     let pad = (area.width as usize).saturating_sub(used);
 
     // A quiet surface bar: the active tab in bright lavender, the inactive one dimmed, the
@@ -1102,34 +1116,47 @@ fn render_composer(frame: &mut Frame, app: &App, area: Rect) {
 /// The key glyph and label for a footer action; an empty label renders the glyph alone. The
 /// `TogglePane` and `Send` labels depend on `app` (the destination pane, the comment count).
 fn action_key_label(app: &App, action: FooterAction) -> (String, String) {
+    use crate::keymap::Action as K;
     use FooterAction as A;
-    let (k, l): (&str, &str) = match action {
-        A::Comment => ("c", "comment"),
-        A::Select => ("v", "select"),
-        A::ClearSelection => ("esc", "clear"),
-        A::EditComment => ("e", "edit"),
-        A::DeleteComment => ("d", "delete"),
-        A::JumpComment => ("n/N", "jump"),
-        A::ExpandFold => ("→", "expand fold"),
-        A::ExpandDir => ("→", "expand"),
-        A::CollapseDir => ("←", "collapse"),
+    // A rebindable action's hint is its first bound key (`specs/tui.md`).
+    let hint = |action: K| app.keymap().hint(action).to_string();
+    let (k, l): (String, &str) = match action {
+        A::Comment => (hint(K::Comment), "comment"),
+        A::Select => (hint(K::Select), "select"),
+        A::ClearSelection => ("esc".into(), "clear"),
+        A::EditComment => (hint(K::Edit), "edit"),
+        A::DeleteComment => (hint(K::Delete), "delete"),
+        A::JumpComment => (format!("{}/{}", hint(K::NextComment), hint(K::PrevComment)), "jump"),
+        A::ExpandFold => ("→".into(), "expand fold"),
+        A::ExpandDir => ("→".into(), "expand"),
+        A::CollapseDir => ("←".into(), "collapse"),
         A::TogglePane => {
             return ("⇥".into(), if app.focus == Focus::Files { "diff" } else { "files" }.into());
         }
-        A::Scope => ("u/b/t", "scope"),
-        A::Send => return ("s".into(), format!("send {}", app.store.len())),
-        A::List => ("l", "list"),
-        A::Copy => ("y", "copy"),
-        A::Save => ("enter", "save"),
-        A::Newline => ("⇧⏎", "newline"),
-        A::Cancel => ("esc", "cancel"),
-        A::CloseList => ("esc", "close"),
-        A::OpenPr => ("o", "open ↗"),
-        A::Refresh => ("r", "refresh"),
-        A::Tabs => ("1·2·3", ""),
-        A::Quit => ("q", ""),
+        A::Scope => (
+            format!(
+                "{}/{}/{}",
+                hint(K::ScopeUncommitted),
+                hint(K::ScopeBranch),
+                hint(K::ScopeLastTurn)
+            ),
+            "scope",
+        ),
+        A::Send => return (hint(K::Send), format!("send {}", app.store.len())),
+        A::List => (hint(K::Comments), "list"),
+        A::Copy => (hint(K::Copy), "copy"),
+        A::Save => ("enter".into(), "save"),
+        A::Newline => ("⇧⏎".into(), "newline"),
+        A::Cancel => ("esc".into(), "cancel"),
+        A::CloseList => ("esc".into(), "close"),
+        A::OpenPr => (hint(K::OpenPr), "open ↗"),
+        A::Refresh => (hint(K::Refresh), "refresh"),
+        A::Tabs => {
+            (format!("{}·{}·{}", hint(K::TabChanges), hint(K::TabAllFiles), hint(K::TabPr)), "")
+        }
+        A::Quit => (hint(K::Quit), ""),
     };
-    (k.into(), l.into())
+    (k, l.into())
 }
 
 /// A tier's `(key, label)` styles: the primary bright and bold, normal actions readable, the
@@ -1552,8 +1579,11 @@ fn render_pr_read(frame: &mut Frame, app: &App, area: Rect) {
             )));
         }
     } else {
-        lines
-            .push(Line::from(Span::styled(pr_empty_msg(&app.pr), Style::default().fg(p.overlay0))));
+        let refresh = app.keymap().hint(crate::keymap::Action::Refresh);
+        lines.push(Line::from(Span::styled(
+            pr_empty_msg(&app.pr, refresh),
+            Style::default().fg(p.overlay0),
+        )));
     }
 
     // Clamp in `usize` before the `u16` cast — `pr_read_scroll` grows unbounded via the wheel,
@@ -1564,9 +1594,10 @@ fn render_pr_read(frame: &mut Frame, app: &App, area: Rect) {
 
 /// The one-line message for a loading or degraded PR view, each naming what unblocks it.
 /// The no-PR state names the candidate branches it queried, so a resolution that surprises
-/// is inspectable rather than silent (specs/forge-host.md).
-fn pr_empty_msg(view: &forge::PrView) -> String {
-    if let Some(message) = view.retry_remedy() {
+/// is inspectable rather than silent (specs/forge-host.md). `refresh` is the active `refresh`
+/// binding's hint key.
+fn pr_empty_msg(view: &forge::PrView, refresh: char) -> String {
+    if let Some(message) = view.retry_remedy(refresh) {
         return message;
     }
     match view {
@@ -1576,7 +1607,10 @@ fn pr_empty_msg(view: &forge::PrView) -> String {
             "detached HEAD — check out a branch to resolve its PR".into()
         }
         forge::PrView::NoPr(candidates) => {
-            format!("no PR for {} yet — push and open one, then press r", name_a_few(candidates))
+            format!(
+                "no PR for {} yet — push and open one, then press {refresh}",
+                name_a_few(candidates)
+            )
         }
         forge::PrView::Ambiguous(n) => {
             format!("{n} open PRs back this branch — open one on GitHub")

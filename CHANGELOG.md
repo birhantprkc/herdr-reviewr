@@ -6,6 +6,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.12.0] — 2026-07-12
+
+### Added
+- **Customizable keybindings.** A `[keybindings]` table in reviewr's `config.toml` rebinds every
+  single-key shortcut per action, with several keys per action so CJK input sources can alias the
+  composed character their layout produces on the same physical key (e.g. `comment = ["c", "ㅊ"]`).
+  A key bound to two actions invalidates the whole file with an error naming both actions. Footer
+  and header hints follow the active bindings. (#12)
+
+### Changed
+- **The comments list no longer closes on `q`.** It closes on `esc` and the `comments` binding
+  (default `l`). `q` inside the list is inert.
+- **Bindings act uniformly wherever their action fires.** The comments list now answers `S` and
+  `Y` for send and copy, matching the main panes.
+- **Ctrl chords no longer trigger character shortcuts.** A bound key fires only unmodified.
+  `ctrl+u` / `ctrl+d` half-page movement and the comment editor's chords are unchanged.
+- **Degraded PR messages name the active refresh key.** "press r" hints follow a rebound
+  `refresh` binding.
+
 ## [0.11.0] — 2026-07-10
 
 ### Added

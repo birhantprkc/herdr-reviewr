@@ -60,8 +60,15 @@ impl Config {
 /// sets no `base_branches` (`specs/review-model.md`).
 pub const DEFAULT_BASE_BRANCHES: [&str; 4] = ["origin/main", "origin/master", "main", "master"];
 
-const PLUGIN_CONFIG_KEYS: [&str; 6] =
-    ["theme", "base_branches", "toggle_placement", "toggle_direction", "auto_open", "github_host"];
+const PLUGIN_CONFIG_KEYS: [&str; 7] = [
+    "theme",
+    "base_branches",
+    "toggle_placement",
+    "toggle_direction",
+    "auto_open",
+    "github_host",
+    "keybindings",
+];
 
 /// Where the toggle action opens the sidebar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -108,6 +115,7 @@ pub struct PluginConfig {
     toggle_direction: ToggleDirection,
     auto_open: bool,
     github_host: Option<String>,
+    keymap: crate::keymap::Keymap,
 }
 
 impl Default for PluginConfig {
@@ -119,6 +127,7 @@ impl Default for PluginConfig {
             toggle_direction: ToggleDirection::Right,
             auto_open: true,
             github_host: None,
+            keymap: crate::keymap::Keymap::default(),
         }
     }
 }
@@ -148,8 +157,22 @@ impl PluginConfig {
         self.github_host.as_deref()
     }
 
+    /// The resolved keymap: the defaults with this snapshot's `[keybindings]` applied.
+    pub fn keymap(&self) -> &crate::keymap::Keymap {
+        &self.keymap
+    }
+
     /// Stable machine-readable output consumed by the shell entry points.
     pub fn to_json(&self) -> serde_json::Value {
+        let keybindings: serde_json::Map<String, serde_json::Value> = self
+            .keymap
+            .bindings()
+            .iter()
+            .map(|(action, keys)| {
+                let keys: Vec<String> = keys.iter().map(char::to_string).collect();
+                (action.name().to_owned(), serde_json::json!(keys))
+            })
+            .collect();
         serde_json::json!({
             "theme": self.theme,
             "base_branches": self.base_branches,
@@ -157,6 +180,7 @@ impl PluginConfig {
             "toggle_direction": self.toggle_direction.as_str(),
             "auto_open": self.auto_open,
             "github_host": self.github_host,
+            "keybindings": keybindings,
         })
     }
 }
@@ -209,10 +233,7 @@ fn parse_plugin_config(path: &Path) -> Result<PluginConfig, PluginConfigError> {
         PluginConfigError::new(path, format!("syntax error: {}", error.message()))
     })?;
     if let Some(key) = table.keys().find(|key| !PLUGIN_CONFIG_KEYS.contains(&key.as_str())) {
-        return Err(PluginConfigError::new(
-            path,
-            format!("unknown key {key:?}; expected one of {}", PLUGIN_CONFIG_KEYS.join(", ")),
-        ));
+        return Err(unknown_key_error(path, key, &PLUGIN_CONFIG_KEYS.join(", ")));
     }
 
     let mut config = PluginConfig::default();
@@ -304,7 +325,62 @@ fn parse_plugin_config(path: &Path) -> Result<PluginConfig, PluginConfigError> {
         }
         config.github_host = Some(host.to_ascii_lowercase());
     }
+    if let Some(value) = table.get("keybindings") {
+        config.keymap = parse_keybindings(path, value)?;
+    }
     Ok(config)
+}
+
+/// Parse and resolve the `[keybindings]` table (`specs/config.md` K1–K2): action names from the
+/// keymap table in `specs/tui.md`, each bound to a non-empty array of one-character keys.
+fn parse_keybindings(
+    path: &Path,
+    value: &toml::Value,
+) -> Result<crate::keymap::Keymap, PluginConfigError> {
+    use crate::keymap::{Action, Keymap};
+    let Some(entries) = value.as_table() else {
+        return Err(value_error(path, "keybindings", "a table of action bindings"));
+    };
+    let mut overrides = Vec::with_capacity(entries.len());
+    for (name, keys) in entries {
+        let Some(action) = Action::by_name(name) else {
+            return Err(unknown_key_error(
+                path,
+                &format!("keybindings.{name}"),
+                &Action::names().collect::<Vec<_>>().join(", "),
+            ));
+        };
+        let entry_key = format!("keybindings.{name}");
+        let expected = "a non-empty array of one-character keys, printable and not whitespace";
+        let Some(values) = keys.as_array() else {
+            return Err(value_error(path, &entry_key, expected));
+        };
+        if values.is_empty() {
+            return Err(value_error(path, &entry_key, expected));
+        }
+        let mut chars = Vec::with_capacity(values.len());
+        for value in values {
+            let Some(text) = value.as_str() else {
+                return Err(value_error(path, &entry_key, expected));
+            };
+            let mut it = text.chars();
+            match (it.next(), it.next()) {
+                // K1's "printable" is one visible cell: a positive display width also rejects
+                // the zero-width class `is_control` misses (format chars, combining marks).
+                (Some(key), None)
+                    if !key.is_whitespace()
+                        && unicode_width::UnicodeWidthChar::width(key).unwrap_or(0) > 0 =>
+                {
+                    chars.push(key);
+                }
+                _ => return Err(value_error(path, &entry_key, expected)),
+            }
+        }
+        overrides.push((action, chars));
+    }
+    Keymap::resolve(&overrides).map_err(|detail| {
+        PluginConfigError::new(path, format!("invalid value for `keybindings`: {detail}"))
+    })
 }
 
 fn string_value<'a>(
@@ -318,6 +394,11 @@ fn string_value<'a>(
 
 fn value_error(path: &Path, key: &str, expected: &str) -> PluginConfigError {
     PluginConfigError::new(path, format!("invalid value for `{key}`; expected {expected}"))
+}
+
+/// The one C3 unknown-key grammar, shared by the top-level table and `[keybindings]`.
+fn unknown_key_error(path: &Path, key: &str, options: &str) -> PluginConfigError {
+    PluginConfigError::new(path, format!("unknown key {key:?}; expected one of {options}"))
 }
 
 fn valid_enterprise_host(host: &str) -> bool {
@@ -482,6 +563,72 @@ mod tests {
     }
 
     #[test]
+    fn keybindings_alias_and_replace_per_action() {
+        use crate::keymap::Action;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "[keybindings]\ncomment = [\"c\", \"ㅊ\"]\nsend = [\"x\"]\n",
+        )
+        .unwrap();
+        let config = super::plugin_config_in(dir.path()).unwrap();
+        let keymap = config.keymap();
+        assert_eq!(keymap.action_for('ㅊ'), Some(Action::Comment));
+        assert_eq!(keymap.action_for('c'), Some(Action::Comment));
+        assert_eq!(keymap.action_for('x'), Some(Action::Send));
+        assert_eq!(keymap.action_for('s'), None, "a binding replaces its action's defaults");
+        assert_eq!(keymap.action_for('S'), None);
+        assert_eq!(keymap.action_for('v'), Some(Action::Select), "unbound actions keep theirs");
+    }
+
+    #[test]
+    fn key_is_one_printable_codepoint() {
+        let cases = [
+            "comment = [\"cc\"]\n",
+            "comment = [\"\"]\n",
+            "comment = [\" \"]\n",
+            "comment = [\"\\u0007\"]\n",
+            "comment = [\"e\\u0301\"]\n",
+            "comment = [\"\\u200B\"]\n",
+            "comment = [\"\\u0301\"]\n",
+            "comment = []\n",
+            "comment = \"c\"\n",
+            "comment = [1]\n",
+        ];
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        for entry in cases {
+            std::fs::write(&path, format!("[keybindings]\n{entry}")).unwrap();
+            let error = super::plugin_config_in(dir.path()).unwrap_err().to_string();
+            assert!(error.contains("`keybindings.comment`"), "{entry}: {error}");
+            assert!(error.contains("expected"), "{entry}: {error}");
+        }
+    }
+
+    #[test]
+    fn keybinding_collision_names_each_action() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        std::fs::write(&path, "[keybindings]\ncomment = [\"v\"]\n").unwrap();
+        let error = super::plugin_config_in(dir.path()).unwrap_err().to_string();
+        assert!(error.contains("`comment`") && error.contains("`select`"), "{error}");
+
+        std::fs::write(&path, "[keybindings]\ncomment = [\"c\", \"c\"]\n").unwrap();
+        let error = super::plugin_config_in(dir.path()).unwrap_err().to_string();
+        assert!(error.contains("bound twice") && error.contains("`comment`"), "{error}");
+    }
+
+    #[test]
+    fn unknown_action_is_an_unknown_key() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.toml"), "[keybindings]\nfoo = [\"x\"]\n").unwrap();
+        let error = super::plugin_config_in(dir.path()).unwrap_err().to_string();
+        assert!(error.contains("unknown key \"keybindings.foo\""), "{error}");
+        assert!(error.contains("comment"), "the error lists the action names: {error}");
+    }
+
+    #[test]
     #[cfg(unix)]
     fn unreadable_config_path_is_an_error() {
         let dir = tempfile::tempdir().unwrap();
@@ -495,10 +642,18 @@ mod tests {
     fn normalized_json_contains_every_key() {
         let value = PluginConfig::default().to_json();
         let object = value.as_object().unwrap();
-        assert_eq!(object.len(), 6);
+        assert_eq!(object.len(), super::PLUGIN_CONFIG_KEYS.len(), "one JSON key per config key");
         assert_eq!(object["toggle_placement"], "split");
         assert_eq!(object["toggle_direction"], "right");
         assert_eq!(object["auto_open"], true);
         assert!(object["github_host"].is_null());
+        let keybindings = object["keybindings"].as_object().unwrap();
+        assert_eq!(
+            keybindings.len(),
+            crate::keymap::Action::names().count(),
+            "every action is present, resolved"
+        );
+        assert_eq!(keybindings["quit"], serde_json::json!(["q"]));
+        assert_eq!(keybindings["send"], serde_json::json!(["s", "S"]));
     }
 }

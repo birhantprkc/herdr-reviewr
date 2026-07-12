@@ -18,6 +18,7 @@ pub mod forge;
 pub mod git;
 pub mod herdr;
 pub mod highlight;
+pub mod keymap;
 #[macro_use]
 pub mod log;
 pub mod model;
@@ -47,6 +48,7 @@ use ratatui::layout::Rect;
 use crate::app::{App, Focus, Mode};
 use crate::config::{Config, PluginConfig};
 use crate::export::{Agent, Clipboard};
+use crate::keymap::Keymap;
 use crate::model::Scope;
 
 /// Entry point: parse config, set up the terminal, run the loop, restore.
@@ -316,6 +318,7 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
     let mut pr = PrCoordinator::new(app.plugin_config().is_some());
     let mut config_epoch = 0_u64;
     let mut validate_before_draw = true;
+    let mut frame_keymap = app.keymap().clone();
     let mut status_at = Instant::now();
     let mut last_status = String::new();
     // Fetch the PR snapshot as soon as the panel opens, not on first switching to the tab, so the
@@ -397,6 +400,11 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
         }
         app.bound_file_scroll(file_vp);
         terminal.draw(|f| ui::render(f, app))?;
+        // Input dispatches under the keymap this frame rendered its hints from, so a config swap
+        // between the draw and the press or click cannot fire a different action than the frame
+        // advertised (`specs/config.md`: the frame on screen and the keys it answers use one
+        // snapshot).
+        frame_keymap.clone_from(app.keymap());
         // A fetch completion waits for a fresh local-input probe before it may paint.
         if let Ok(completion) = pr_rx.try_recv() {
             let tag = (completion.generation, completion.config_epoch);
@@ -531,7 +539,12 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
             match event::read()? {
                 Event::Key(k) if k.kind == KeyEventKind::Press => {
                     if app.config_error().is_some() {
-                        if k.code == KeyCode::Char('q') {
+                        // A blocked sidebar answers only the default `quit` key, derived from
+                        // the default keymap so a changed default can't strand the error screen
+                        // (`specs/config.md`).
+                        if let KeyCode::Char(c) = k.code
+                            && keymap::default_keymap().action_for(c) == Some(keymap::Action::Quit)
+                        {
                             app.should_quit = true;
                         }
                         continue;
@@ -547,7 +560,7 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
                     if !config_gate.ready() {
                         continue;
                     }
-                    if let Err(e) = handle_key(app, k, area) {
+                    if let Err(e) = handle_key(app, k, area, &frame_keymap) {
                         app.status = format!("error: {e}");
                     }
                     validate_before_draw = true;
@@ -583,7 +596,7 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
                     }
                     // Reuse this frame's `area` and `heights` (computed above for the scroll
                     // settle) so a drag-select doesn't re-measure the whole diff per motion.
-                    if let Err(e) = handle_mouse(app, m, area, &heights) {
+                    if let Err(e) = handle_mouse(app, m, area, &heights, &frame_keymap) {
                         app.status = format!("error: {e}");
                     }
                     validate_before_draw = true;
@@ -769,7 +782,11 @@ fn apply_plugin_config_observation(
 const PAGE: isize = 15;
 const HALF_PAGE: isize = 8;
 
-fn handle_key(app: &mut App, key: KeyEvent, area: Rect) -> Result<()> {
+/// Map one key press onto `App` through `keymap` — the keymap of the frame on screen, so a
+/// stale hint never dispatches a different action than it advertised (`specs/config.md`).
+/// Public for the dispatch tests; the event loop is the runtime caller.
+pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Result<()> {
+    use crate::keymap::Action as K;
     use KeyCode::{
         Backspace, Char, Delete, Down, End, Enter, Esc, Home, Left, PageDown, PageUp, Right, Tab,
         Up,
@@ -818,93 +835,119 @@ fn handle_key(app: &mut App, key: KeyEvent, area: Rect) -> Result<()> {
         return Ok(());
     }
 
-    // The read-only PR tab: navigate the snapshot and open links; authoring keys are inert.
+    // The bound character shortcuts dispatch through the frame's keymap; a `ctrl` chord is
+    // never a bound key. `↓`/`↑` are fixed synonyms of the `down`/`up` actions, folded in here
+    // so every context pairs them exactly once. The other fixed keys (`tab`, `esc`, the page
+    // keys, `←`/`→`) stay hardcoded per context below (`specs/tui.md`).
+    let action = match key.code {
+        Char(c) if !ctrl => keymap.action_for(c),
+        Down => Some(K::Down),
+        Up => Some(K::Up),
+        _ => None,
+    };
+
+    // The read-only PR tab: navigate the snapshot and open links; authoring actions are inert.
     if app.tab == crate::app::Tab::Pr {
-        match key.code {
-            Char('q') => app.should_quit = true,
-            Char('r') => app.pr_pending = true,
-            Char('1') => app.set_tab(crate::app::Tab::Changes)?,
-            Char('2') => app.set_tab(crate::app::Tab::AllFiles)?,
-            Char('o') => app.pr_open(),
-            Char('j') | Down => app.pr_move(1),
-            Char('k') | Up => app.pr_move(-1),
+        match (action, key.code) {
+            (Some(K::Quit), _) => app.should_quit = true,
+            (Some(K::Refresh), _) => app.pr_pending = true,
+            (Some(K::TabChanges), _) => app.set_tab(crate::app::Tab::Changes)?,
+            (Some(K::TabAllFiles), _) => app.set_tab(crate::app::Tab::AllFiles)?,
+            (Some(K::OpenPr), _) => app.pr_open(),
+            (Some(K::Down), _) => app.pr_move(1),
+            (Some(K::Up), _) => app.pr_move(-1),
             // The navigator is short; the read pane is what overflows, so the page keys scroll it.
-            PageDown => app.pr_scroll_read(PAGE),
-            PageUp => app.pr_scroll_read(-PAGE),
+            (_, PageDown) => app.pr_scroll_read(PAGE),
+            (_, PageUp) => app.pr_scroll_read(-PAGE),
             _ => {}
         }
         return Ok(());
     }
 
+    // The comments-list overlay acts through the same bindings and closes on `esc` and the
+    // `comments` binding (`specs/tui.md`).
     if app.mode == Mode::List {
-        match key.code {
-            Esc | Char('l' | 'q') => app.close_list(),
-            Char('j') | Down => app.list_move(1),
-            Char('k') | Up => app.list_move(-1),
-            Char('s') => app.export(&Agent),
-            Char('y') => app.export(&Clipboard),
-            Char('e') => app.start_edit(),
-            Char('d') => app.delete_comment(),
+        match (action, key.code) {
+            (Some(K::Comments), _) | (_, Esc) => app.close_list(),
+            (Some(K::Down), _) => app.list_move(1),
+            (Some(K::Up), _) => app.list_move(-1),
+            (Some(K::Send), _) => app.export(&Agent),
+            (Some(K::Copy), _) => app.export(&Clipboard),
+            (Some(K::Edit), _) => app.start_edit(),
+            (Some(K::Delete), _) => app.delete_comment(),
             _ => {}
         }
         return Ok(());
     }
 
-    match (key.code, ctrl) {
-        // ctrl combos first, so they win over the plain `u`/`d` bindings below. Half-page
-        // keys move the focused pane's cursor (the view follows), like `j`/`k`.
-        (Char('u'), true) => app.move_cursor(-HALF_PAGE)?,
-        (Char('d'), true) => app.move_cursor(HALF_PAGE)?,
-        (Char('q'), _) => app.should_quit = true,
-        (Char('r'), _) => app.reload()?,
-        // `1` / `2` / `3` switch tabs (provisional; the keymap is an Open Decision in tui.md).
-        (Char('1'), _) => app.set_tab(crate::app::Tab::Changes)?,
-        (Char('2'), _) => app.set_tab(crate::app::Tab::AllFiles)?,
-        (Char('3'), _) => app.set_tab(crate::app::Tab::Pr)?,
-        (Tab, _) => app.toggle_focus(),
-        (Char('j') | Down, _) => app.move_cursor(1)?,
-        (Char('k') | Up, _) => app.move_cursor(-1)?,
-        // Page keys move the focused pane's cursor.
-        (PageDown, _) => app.move_cursor(PAGE)?,
-        (PageUp, _) => app.move_cursor(-PAGE)?,
-        (Char('w'), _) => app.toggle_wrap(),
-        // `]` widens the file list, `[` narrows it (widening the diff).
-        (Char(']'), _) => app.resize_list(4),
-        (Char('['), _) => app.resize_list(-4),
+    if let Some(action) = action {
+        match action {
+            K::Quit => app.should_quit = true,
+            K::Refresh => app.reload()?,
+            K::TabChanges => app.set_tab(crate::app::Tab::Changes)?,
+            K::TabAllFiles => app.set_tab(crate::app::Tab::AllFiles)?,
+            K::TabPr => app.set_tab(crate::app::Tab::Pr)?,
+            K::Down => app.move_cursor(1)?,
+            K::Up => app.move_cursor(-1)?,
+            K::Wrap => app.toggle_wrap(),
+            // `list-wider` widens the file list, `list-narrower` narrows it (widening the diff).
+            K::ListWider => app.resize_list(4),
+            K::ListNarrower => app.resize_list(-4),
+            K::ScopeUncommitted => app.set_scope(Scope::Uncommitted)?,
+            K::ScopeBranch => app.set_scope(Scope::Branch)?,
+            K::ScopeLastTurn => app.set_scope(Scope::LastTurn)?,
+            K::Select => app.toggle_select(),
+            K::Comment => app.start_comment(),
+            // `edit`/`delete` act on the comment under the diff cursor, so they only fire with
+            // the diff focused — otherwise `delete` would silently drop a comment under an
+            // off-screen cursor. (The comments-list overlay targets the highlighted row instead.)
+            K::Edit if app.focus == Focus::Diff => app.start_edit(),
+            K::Delete if app.focus == Focus::Diff => app.delete_comment(),
+            K::Send => app.export(&Agent),
+            K::Copy => app.export(&Clipboard),
+            K::NextComment => app.jump_comment(1),
+            K::PrevComment => app.jump_comment(-1),
+            K::Comments => app.open_list(),
+            // `edit`/`delete` off the diff, and `open-pr` off the `PR` tab, are inert.
+            K::Edit | K::Delete | K::OpenPr => {}
+        }
+        return Ok(());
+    }
+
+    match key.code {
+        Tab => app.toggle_focus(),
+        // Page and half-page keys move the focused pane's cursor (the view follows).
+        Char('u') if ctrl => app.move_cursor(-HALF_PAGE)?,
+        Char('d') if ctrl => app.move_cursor(HALF_PAGE)?,
+        PageDown => app.move_cursor(PAGE)?,
+        PageUp => app.move_cursor(-PAGE)?,
         // `←`/`→` expand/collapse the collapsible under the cursor — a directory in the file
         // list, a fold in the diff (expand-only); otherwise they scroll the diff sideways
         // (`scroll_h` is a no-op while wrapping, so it only acts when h-scroll is meaningful).
-        (Right, _) if app.on_folder() => app.expand_dir(),
-        (Left, _) if app.on_folder() => app.collapse_dir(),
-        (Right, _) if app.on_fold() => {
+        Right if app.on_folder() => app.expand_dir(),
+        Left if app.on_folder() => app.collapse_dir(),
+        Right if app.on_fold() => {
             let heights = ui::diff_row_heights(app, area);
             app.expand_fold(&heights, ui::diff_viewport_height(area, app.list_pct));
         }
-        (Right, _) => app.scroll_h(8),
-        (Left, _) => app.scroll_h(-8),
-        (Char('u'), false) => app.set_scope(Scope::Uncommitted)?,
-        (Char('b'), false) => app.set_scope(Scope::Branch)?,
-        (Char('t'), false) => app.set_scope(Scope::LastTurn)?,
-        (Char('v'), _) => app.toggle_select(),
-        (Char('c'), _) => app.start_comment(),
-        // `e`/`d` act on the comment under the diff cursor, so they only fire with the diff
-        // focused — otherwise `d` would silently delete a comment under an off-screen cursor.
-        // (The comments-list overlay has its own `e`/`d`, which target the highlighted row.)
-        (Char('e'), _) if app.focus == Focus::Diff => app.start_edit(),
-        (Char('d'), false) if app.focus == Focus::Diff => app.delete_comment(),
-        (Char('s' | 'S'), _) => app.export(&Agent),
-        (Char('y' | 'Y'), _) => app.export(&Clipboard),
-        (Char('n'), _) => app.jump_comment(1),
-        (Char('N'), _) => app.jump_comment(-1),
-        (Char('l'), _) => app.open_list(),
+        Right => app.scroll_h(8),
+        Left => app.scroll_h(-8),
         // `esc` clears an in-progress line selection (the footer's `esc clear`).
-        (Esc, _) => app.clear_selection(),
+        Esc => app.clear_selection(),
         _ => {}
     }
     Ok(())
 }
 
-fn handle_mouse(app: &mut App, m: MouseEvent, area: Rect, heights: &[usize]) -> Result<()> {
+/// Map one mouse event onto `App`. Header hit-testing uses `keymap` — the keymap of the frame
+/// on screen — so a config swap at the click boundary cannot shift the spans under the pointer.
+fn handle_mouse(
+    app: &mut App,
+    m: MouseEvent,
+    area: Rect,
+    heights: &[usize],
+    keymap: &Keymap,
+) -> Result<()> {
     // A modal (the comment composer or the comments-list overlay) captures the screen and is
     // keyboard-driven, so the mouse is inert while one is open — otherwise clicks and the
     // wheel would drive the panes drawn underneath it.
@@ -916,7 +959,9 @@ fn handle_mouse(app: &mut App, m: MouseEvent, area: Rect, heights: &[usize]) -> 
     if app.tab == crate::app::Tab::Pr {
         match m.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                if let Some(ui::HeaderHit::Tab(tab)) = ui::hit_header(area, app, m.column, m.row) {
+                if let Some(ui::HeaderHit::Tab(tab)) =
+                    ui::hit_header(area, app, keymap, m.column, m.row)
+                {
                     app.set_tab(tab)?;
                 } else if ui::hit_pr_open(area, app, m.column, m.row) {
                     app.pr_open();
@@ -943,7 +988,7 @@ fn handle_mouse(app: &mut App, m: MouseEvent, area: Rect, heights: &[usize]) -> 
             // The divider is checked first: a grab there starts a resize, not a selection.
             if ui::hit_divider(area, app.list_pct, m.column, m.row) {
                 app.resizing = true;
-            } else if let Some(hit) = ui::hit_header(area, app, m.column, m.row) {
+            } else if let Some(hit) = ui::hit_header(area, app, keymap, m.column, m.row) {
                 match hit {
                     ui::HeaderHit::Tab(tab) => app.set_tab(tab)?,
                     ui::HeaderHit::Scope => app.set_scope(app.scope.cycle())?,

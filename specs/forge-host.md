@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-06-27
-Last edited: 2026-07-10
+Last edited: 2026-07-12
 ---
 
 # forge host
@@ -128,7 +128,7 @@ What a user observes:
 ### Refresh
 
 - The first fetch starts when the panel opens, so the tab is populated before the user reaches it.
-- A refetch fires on entering the tab, on `r`, and on the agent's turn-end (a `working` → `idle`/`done` edge) while the tab is active. A turn may have pushed or merged, changing forge state with no other local signal.
+- A refetch fires on entering the tab, on the `refresh` binding (default `r`), and on the agent's turn-end (a `working` → `idle`/`done` edge) while the tab is active. A turn may have pushed or merged, changing forge state with no other local signal.
 - A fallback poll refetches every 60 seconds while the tab is active. Off the tab there is no polling.
 - A fetch-input change observed on refresh clears the current PR. It starts a fetch while the tab is active; otherwise the next tab entry starts it.
 - A fetch with an open PR is two GraphQL calls. A fetch that checks historical PRs is three. All run on a worker thread, so `gh` never blocks input or scrolling.

@@ -47,8 +47,8 @@ pub fn resolve_agent_pane() -> Result<String> {
     let (tab, ws, me) = agent_env();
     match pick_agent(&agent_list()?, tab.as_deref(), ws.as_deref(), me.as_deref()) {
         Ok(agent) => pane_id(agent).context("agent entry has no pane_id"),
-        Err(Refusal::NoAgent) => bail!("no agent here — press y to copy instead"),
-        Err(Refusal::Several) => bail!("several agents here — press y to copy instead"),
+        Err(Refusal::NoAgent) => bail!("no agent here — copy to the clipboard instead"),
+        Err(Refusal::Several) => bail!("several agents here — copy to the clipboard instead"),
     }
 }
 

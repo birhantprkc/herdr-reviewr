@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-07-10
-Last edited: 2026-07-10
+Last edited: 2026-07-12
 ---
 
 # Configuration
@@ -19,29 +19,34 @@ toggle_placement = "overlay"
 toggle_direction = "down"
 auto_open = false
 github_host = "github.example.com"
+
+[keybindings]
+comment = ["c", "ㅊ"]
+select  = ["v", "ㅍ"]
 ```
 
-| key                    | value                                                                    |
-| ---------------------- | ------------------------------------------------------------------------ |
-| `theme`                | one name from the theme set in `theme.md`                                 |
-| `base_branches`        | non-empty array of non-empty ref names                                    |
-| `toggle_placement`     | `split`, `overlay`, `zoomed`, or `tab`                                    |
-| `toggle_direction`     | `right` or `down`                                                         |
-| `auto_open`            | boolean                                                                  |
-| `github_host`          | bare hostname outside the `github.com` and `github.com-*` namespace       |
+| key                | value                                                                        |
+| ------------------ | ---------------------------------------------------------------------------- |
+| `theme`            | one name from the theme set in `theme.md`                                    |
+| `base_branches`    | non-empty array of non-empty ref names                                       |
+| `toggle_placement` | `split`, `overlay`, `zoomed`, or `tab`                                       |
+| `toggle_direction` | `right` or `down`                                                            |
+| `auto_open`        | boolean                                                                      |
+| `github_host`      | bare hostname outside the `github.com` and `github.com-*` namespace          |
+| `keybindings`      | table of actions from the keymap in `tui.md`, each a non-empty array of keys |
 
 ## Behavior
 
-| #  | Always true                                                                                  |
-| -- | -------------------------------------------------------------------------------------------- |
-| C1 | A missing config file uses every default.                                                     |
-| C2 | An omitted key uses that key's default.                                                       |
-| C3 | An unknown key makes the whole file invalid.                                                  |
-| C4 | An invalid value makes the whole file invalid.                                                |
-| C5 | An invalid file applies none of its keys.                                                      |
-| C6 | Every sidebar, action, and event validates the whole file before doing its normal work.         |
-| C7 | An entrypoint that observes an invalid file performs none of its normal work.                   |
-| C8 | One operation or refresh uses one validated config snapshot.                                   |
+| #  | Always true                                                                             |
+| -- | --------------------------------------------------------------------------------------- |
+| C1 | A missing config file uses every default.                                               |
+| C2 | An omitted key uses that key's default.                                                 |
+| C3 | An unknown key makes the whole file invalid.                                            |
+| C4 | An invalid value makes the whole file invalid.                                          |
+| C5 | An invalid file applies none of its keys.                                               |
+| C6 | Every sidebar, action, and event validates the whole file before doing its normal work. |
+| C7 | An entrypoint that observes an invalid file performs none of its normal work.           |
+| C8 | One operation or refresh uses one validated config snapshot.                            |
 
 A repository may lack every ref named by a valid `base_branches` list. That is runtime absence, not invalid configuration.
 
@@ -55,11 +60,29 @@ An error names the config path and the read, syntax, key, or value failure. It s
 
 The sidebar reads the file at startup and on every refresh. While blocked, it starts no new review work and performs the config reads needed to detect a fix.
 
+The `PR` tab's fetch is not a config read. It runs under the sidebar's current snapshot (→ C8).
+
+`--resolve-plugin-config` prints the validated config as JSON, every key included, the keymap resolved.
+
 Work started under a valid snapshot may finish after the config becomes invalid. Its result is discarded.
 
 An action or event reads the file once at invocation. A later file change affects the next invocation, not work already started (→ C8).
 
 Config writers must build a complete file beside `config.toml`, then replace it atomically. reviewr cannot identify a syntactically valid intermediate save as unfinished.
+
+### Keybindings
+
+`[keybindings]` rebinds the character shortcuts. The resolved keymap is the default keymap with each bound action's characters replaced by its binding.
+
+| #  | Always true                                                          |
+| -- | -------------------------------------------------------------------- |
+| K1 | A key is one codepoint, printable and not whitespace.                |
+| K2 | A character appears at most once across the resolved keymap's lists. |
+| K3 | A binding never displaces a fixed key (`tui.md`).                    |
+
+An unknown action name is an unknown key (→ C3). A K1 or K2 violation is an invalid value (→ C4). A collision error names each action involved.
+
+The frame on screen and the keys it answers use one snapshot (→ C8). A blocked sidebar answers only the default `quit` key.
 
 ## Traces
 
@@ -96,3 +119,4 @@ Config writers must build a complete file beside `config.toml`, then replace it 
 - [herdr host](./herdr-host.md)
 - [review model](./review-model.md)
 - [theme](./theme.md)
+- [tui](./tui.md)

@@ -47,15 +47,16 @@ pub enum PrView {
 impl PrView {
     /// A same-input failure that can be retried without discarding the visible snapshot.
     /// Both snapshot preservation and the empty-state renderer consume this projection so a
-    /// newly added retryable failure cannot diverge between those surfaces.
-    pub fn retry_remedy(&self) -> Option<String> {
+    /// newly added retryable failure cannot diverge between those surfaces. `refresh` is the
+    /// active `refresh` binding's hint key, so the advertised retry key follows a rebind.
+    pub fn retry_remedy(&self, refresh: char) -> Option<String> {
         match self {
-            Self::NoGh => Some("gh not found — install `gh`, then press r".to_string()),
-            Self::NotAuthed(host) => {
-                Some(format!("not signed in — run `gh auth login --hostname {host}`, then press r"))
-            }
+            Self::NoGh => Some(format!("gh not found — install `gh`, then press {refresh}")),
+            Self::NotAuthed(host) => Some(format!(
+                "not signed in — run `gh auth login --hostname {host}`, then press {refresh}"
+            )),
             Self::Error(message) => {
-                Some(format!("GitHub unavailable — {message}; press r to retry now"))
+                Some(format!("GitHub unavailable — {message}; press {refresh} to retry now"))
             }
             _ => None,
         }

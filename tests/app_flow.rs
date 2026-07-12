@@ -9,7 +9,11 @@ use anyhow::{Result, bail};
 use common::Repo;
 use herdr_reviewr::app::{App, Focus, FooterAction, Mode};
 use herdr_reviewr::export::ExportTarget;
+use herdr_reviewr::handle_key;
+use herdr_reviewr::keymap::{Action, Keymap};
 use herdr_reviewr::model::{Scope, Side};
+use ratatui::crossterm::event::{KeyCode, KeyEvent};
+use ratatui::layout::Rect;
 
 /// An export target that records what it was handed and can be made to fail.
 struct FakeTarget {
@@ -2077,4 +2081,96 @@ fn theme_selection_swaps_the_palette_and_falls_back() {
     // An unknown name falls back to the default — never a half-applied palette.
     app.set_cli_theme(Some("nope".to_string()));
     assert_eq!(*app.palette(), theme::resolve(Some("catppuccin")).palette);
+}
+
+/// Dispatch one key through the event loop's dispatcher, under `keymap` as the frame keymap.
+fn press(app: &mut App, keymap: &Keymap, code: KeyCode) {
+    handle_key(app, KeyEvent::from(code), Rect::new(0, 0, 120, 40), keymap).unwrap();
+}
+
+#[test]
+fn rebound_keys_dispatch_and_replaced_defaults_go_inert() {
+    let r = edited_repo();
+    let mut app = app_on(&r);
+    let keymap = Keymap::resolve(&[(Action::Comment, vec!['ㅊ'])]).unwrap();
+    app.focus = Focus::Diff;
+    app.diff_cursor = row_with(&app, '+');
+
+    press(&mut app, &keymap, KeyCode::Char('c'));
+    assert!(!app.composing(), "`c` was replaced and is inert");
+
+    press(&mut app, &keymap, KeyCode::Char('ㅊ'));
+    assert!(app.composing(), "the bound key opens the composer");
+}
+
+#[test]
+fn fixed_keys_survive_rebinding() {
+    let r = edited_repo();
+    let mut app = app_on(&r);
+    let keymap = Keymap::resolve(&[(Action::Down, vec!['x']), (Action::Up, vec!['z'])]).unwrap();
+    app.focus = Focus::Diff;
+    app.diff_cursor = 0;
+
+    press(&mut app, &keymap, KeyCode::Down);
+    assert!(app.diff_cursor > 0, "the down arrow still moves the cursor");
+
+    press(&mut app, &keymap, KeyCode::Tab);
+    assert_eq!(app.focus, Focus::Files, "tab still switches focus");
+}
+
+#[test]
+fn the_comments_list_ignores_quit_and_closes_on_the_comments_binding() {
+    let r = edited_repo();
+    let mut app = app_on(&r);
+    comment_on(&mut app, '+', "note");
+    let keymap = Keymap::default();
+
+    app.open_list();
+    assert_eq!(app.mode, Mode::List);
+    press(&mut app, &keymap, KeyCode::Char('q'));
+    assert_eq!(app.mode, Mode::List, "`q` does not close the list");
+    assert!(!app.should_quit, "and does not quit");
+
+    press(&mut app, &keymap, KeyCode::Char('l'));
+    assert_eq!(app.mode, Mode::Normal, "the `comments` binding closes it");
+
+    app.open_list();
+    press(&mut app, &keymap, KeyCode::Esc);
+    assert_eq!(app.mode, Mode::Normal, "`esc` closes it");
+}
+
+#[test]
+fn the_comments_list_acts_through_the_same_bindings() {
+    let r = edited_repo();
+    let mut app = app_on(&r);
+    comment_on(&mut app, '+', "note");
+    let keymap = Keymap::resolve(&[(Action::Delete, vec!['x'])]).unwrap();
+
+    app.open_list();
+    press(&mut app, &keymap, KeyCode::Char('d'));
+    assert_eq!(app.store.len(), 1, "the replaced default is inert in the list too");
+    press(&mut app, &keymap, KeyCode::Char('x'));
+    assert!(app.store.is_empty(), "the rebound `delete` acts on the highlighted row");
+}
+
+#[test]
+fn the_pr_remedy_names_the_rebound_refresh_key() {
+    use herdr_reviewr::forge::PrView;
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("config.toml"), "[keybindings]\nrefresh = [\"R\"]\n").unwrap();
+    let config = herdr_reviewr::config::plugin_config_in(dir.path()).unwrap();
+
+    let repo = Repo::init();
+    let mut app = app_on(&repo);
+    app.set_plugin_config(config);
+    app.apply_pr(PrView::NoPr(vec!["feature".to_string()]));
+
+    app.apply_pr(PrView::NotAuthed("github.example.com".to_string()));
+
+    assert!(
+        app.pr_notice().is_some_and(|notice| notice.ends_with("then press R")),
+        "the remedy follows the active refresh binding: {:?}",
+        app.pr_notice()
+    );
 }

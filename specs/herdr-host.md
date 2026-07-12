@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-06-23
-Last edited: 2026-07-10
+Last edited: 2026-07-12
 ---
 
 # herdr host
@@ -131,7 +131,7 @@ reviewr writes the comment blocks into the agent pane without submitting, then f
 | S2 | The sidebar's own pane is never a candidate.                                  |
 | S3 | A sole tab agent wins over the workspace fallback.                            |
 | S4 | Zero or several candidates refuse the send. Nothing is sent partially.        |
-| S5 | A refusal says why and points at the clipboard copy (`y`).                    |
+| S5 | A refusal says why and points at the clipboard copy.                          |
 
 With `tab` placement the sidebar has its own tab, so resolution goes straight to the workspace fallback.
 

@@ -4,7 +4,7 @@
 mod common;
 
 use common::Repo;
-use herdr_reviewr::app::{App, Focus};
+use herdr_reviewr::app::{App, Focus, Tab};
 use herdr_reviewr::model::Scope;
 use herdr_reviewr::ui::{self, HeaderHit};
 use ratatui::Terminal;
@@ -583,10 +583,10 @@ fn header_clicks_map_to_scope_and_send() {
     // Scan the header row instead of hardcoding columns, so the test survives changes
     // to the label/button text.
     let scope: Vec<u16> = (0..AREA.width)
-        .filter(|&c| ui::hit_header(AREA, &app, c, 0) == Some(HeaderHit::Scope))
+        .filter(|&c| ui::hit_header(AREA, &app, app.keymap(), c, 0) == Some(HeaderHit::Scope))
         .collect();
     let send: Vec<u16> = (0..AREA.width)
-        .filter(|&c| ui::hit_header(AREA, &app, c, 0) == Some(HeaderHit::Send))
+        .filter(|&c| ui::hit_header(AREA, &app, app.keymap(), c, 0) == Some(HeaderHit::Send))
         .collect();
 
     assert!(!scope.is_empty(), "scope chip is clickable");
@@ -595,8 +595,16 @@ fn header_clicks_map_to_scope_and_send() {
     assert!(*send.iter().max().unwrap() < AREA.width);
 
     let gap = scope.iter().max().unwrap() + 1;
-    assert_eq!(ui::hit_header(AREA, &app, gap, 0), None, "the space between controls is inert");
-    assert_eq!(ui::hit_header(AREA, &app, scope[0], 5), None, "only row 0 is the header");
+    assert_eq!(
+        ui::hit_header(AREA, &app, app.keymap(), gap, 0),
+        None,
+        "the space between controls is inert"
+    );
+    assert_eq!(
+        ui::hit_header(AREA, &app, app.keymap(), scope[0], 5),
+        None,
+        "only row 0 is the header"
+    );
 }
 
 #[test]
@@ -735,12 +743,14 @@ fn a_narrow_overflowing_header_does_not_mis_map_a_click_to_send() {
     // over the chip/tab region, swallowing those clicks as a Send.
     let width: u16 = 34;
     let area = Rect::new(0, 0, width, 40);
-    let phantom = (0..width).any(|c| ui::hit_header(area, &app, c, 0) == Some(HeaderHit::Send));
+    let phantom =
+        (0..width).any(|c| ui::hit_header(area, &app, app.keymap(), c, 0) == Some(HeaderHit::Send));
     assert!(!phantom, "no on-screen column mis-maps to Send when the narrow header overflows");
 
     // At a wide width the Send button is right-aligned and clickable.
     let wide = Rect::new(0, 0, 140, 40);
-    let send = (0..140).any(|c| ui::hit_header(wide, &app, c, 0) == Some(HeaderHit::Send));
+    let send =
+        (0..140).any(|c| ui::hit_header(wide, &app, app.keymap(), c, 0) == Some(HeaderHit::Send));
     assert!(send, "Send is clickable when the header fits");
 }
 
@@ -772,4 +782,72 @@ fn renders_a_light_theme_without_panic() {
         .flat_map(|y| (0..140).map(move |x| (x, y)))
         .any(|(x, y)| buf.cell((x, y)).is_some_and(|c| c.fg == latte_lavender));
     assert!(painted, "the Latte palette reaches the painted buffer");
+}
+
+/// An `edited_app` running under `[keybindings]` from a real config file.
+fn rebound_app(keybindings: &str) -> App {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("config.toml"), format!("[keybindings]\n{keybindings}"))
+        .unwrap();
+    let config = herdr_reviewr::config::plugin_config_in(dir.path()).unwrap();
+    let mut app = edited_app();
+    app.set_plugin_config(config);
+    app.focus = Focus::Diff;
+    app
+}
+
+#[test]
+fn hints_show_the_first_bound_key() {
+    let app = rebound_app("comment = [\"ㅊ\", \"c\"]\ntab-pr = [\"p\"]\n");
+    let out = render(&app);
+    let footer = footer_line(&out);
+    // A wide hint key spans two buffer cells, so the dump carries a placeholder space after it.
+    assert!(footer.contains("ㅊ  comment"), "the hint is the first bound key:\n{footer}");
+    assert!(out.contains("p PR"), "the header tab hint follows its binding:\n{out}");
+    assert!(!out.contains("3 PR"), "the replaced digit is gone:\n{out}");
+}
+
+/// The header columns `hit_header` maps to `tab` under `keymap`, scanned instead of hardcoded
+/// so the tests survive changes to the label text and gaps.
+fn tab_hit_cols(app: &App, keymap: &herdr_reviewr::keymap::Keymap, tab: Tab) -> Vec<u16> {
+    let area = Rect::new(0, 0, 140, 40);
+    (0..140)
+        .filter(|&c| ui::hit_header(area, app, keymap, c, 0) == Some(HeaderHit::Tab(tab)))
+        .collect()
+}
+
+#[test]
+fn header_hits_use_the_frame_keymap_not_the_live_one() {
+    use herdr_reviewr::keymap::default_keymap;
+    // The live keymap has a wide tab-changes hint, shifting every span right by one column.
+    let app = rebound_app("tab-changes = [\"ㅊ\"]\n");
+    for tab in [Tab::Changes, Tab::AllFiles, Tab::Pr] {
+        assert_ne!(
+            tab_hit_cols(&app, default_keymap(), tab),
+            tab_hit_cols(&app, app.keymap(), tab),
+            "the passed frame keymap decides the spans, not the app's live one"
+        );
+    }
+}
+
+#[test]
+fn header_tab_hits_align_with_wide_hint_keys() {
+    let app = rebound_app("tab-changes = [\"ㅊ\"]\n");
+    let out = render(&app);
+    // The wide hint spans two buffer cells, so the dump shows a placeholder space after it.
+    assert!(out.contains("ㅊ  Changes"), "the wide hint renders:\n{out}");
+    // Each rendered label must be clickable at its own drawn column (one dumped char per cell,
+    // so the char offset of the label in row 0 is its column).
+    let row0 = out.lines().next().unwrap().to_string();
+    let col_of = |needle: &str| row0[..row0.find(needle).unwrap()].chars().count() as u16;
+    let area = Rect::new(0, 0, 140, 40);
+    for (needle, tab) in
+        [("Changes", Tab::Changes), ("2 All files", Tab::AllFiles), ("3 PR", Tab::Pr)]
+    {
+        assert_eq!(
+            ui::hit_header(area, &app, app.keymap(), col_of(needle), 0),
+            Some(HeaderHit::Tab(tab)),
+            "the drawn {needle:?} label answers its own click"
+        );
+    }
 }

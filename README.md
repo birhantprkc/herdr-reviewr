@@ -79,6 +79,9 @@ below are the full reference.
 
 ## Controls
 
+The single-key shortcuts below are defaults. Any of them can be rebound per action, including to
+several keys at once ([Keybindings](#keybindings)).
+
 **Getting around**
 
 | Key | Action |
@@ -181,7 +184,7 @@ Create the file if it does not exist yet. herdr hands this directory to the plug
 reviewr's file, not herdr's. Settings added to herdr's own `~/.config/herdr/config.toml` never
 reach reviewr.
 
-The file accepts these six keys:
+The file accepts these seven keys:
 
 ```toml
 theme = "tokyo-night"
@@ -190,6 +193,10 @@ toggle_placement = "overlay"
 toggle_direction = "down"
 auto_open = false
 github_host = "github.example.com"
+
+[keybindings]
+comment = ["c", "ㅊ"]
+select  = ["v", "ㅍ"]
 ```
 
 A missing file or omitted key uses its default. Any unknown key, wrong type, or invalid value
@@ -238,6 +245,50 @@ base_branches = ["origin/develop", "origin/main", "main", "master"]
 reviewr picks the first entry that exists in the repo. A `--base <ref>` flag still wins when it
 names an existing ref. A missing file or omitted key uses the default list. A malformed value
 blocks the plugin like any other invalid config.
+
+### Keybindings
+
+Every single-key shortcut is rebindable per action. Set `[keybindings]` in the same config file.
+Each entry maps an action name to an array of keys. That array replaces the action's default
+keys, and actions you don't mention keep theirs. The footer and header hints show the first key
+in the array. reviewr re-reads the file on refresh, so a keymap edit applies without a relaunch.
+
+```toml
+# ~/.config/herdr/plugins/config/persiyanov.reviewr/config.toml
+[keybindings]
+comment = ["c", "ㅊ"]
+select  = ["v", "ㅍ"]
+```
+
+Several keys per action is the point when a CJK input source is active. The OS sends the
+composed character to the terminal, so the plain ASCII shortcut never arrives. Bind the
+character your layout produces on the same physical key, and the shortcut works without
+switching the input source to English.
+
+The action names and their defaults:
+
+| Action | Default |
+| --- | --- |
+| `down` / `up` | `j` / `k` |
+| `scope-uncommitted` / `scope-branch` / `scope-last-turn` | `u` / `b` / `t` |
+| `tab-changes` / `tab-all-files` / `tab-pr` | `1` / `2` / `3` |
+| `wrap` | `w` |
+| `list-wider` / `list-narrower` | `]` / `[` |
+| `select` | `v` |
+| `comment` | `c` |
+| `edit` / `delete` | `e` / `d` |
+| `next-comment` / `prev-comment` | `n` / `N` |
+| `comments` | `l` |
+| `send` | `s`, `S` |
+| `copy` | `y`, `Y` |
+| `open-pr` | `o` |
+| `refresh` | `r` |
+| `quit` | `q` |
+
+A key is one character, and any printable character works. The arrows, `Tab`, `Esc`, `Enter`,
+and the page keys are fixed and always work. Keys still type normally in the comment box. Two
+actions can never share a key. A collision makes the whole file invalid, and the error names
+both actions, so a typo can't silently shadow another shortcut.
 
 ### GitHub hosts
 
@@ -395,9 +446,10 @@ herdr plugin link .
 
 ## Roadmap
 
-Customizable keybindings, structured (JSON) export, in-diff search, a side-by-side split view,
-mark-file-reviewed, OSC light/dark theme autodetect, more themes (`kanagawa`, `vesper`,
-`everforest`, `ayu`, a dark `github`), a `terminal`-following palette, and OSC 52 clipboard.
+Structured (JSON) export, in-diff search, a side-by-side split view, mark-file-reviewed,
+modifier and named-key notation for keybindings, OSC light/dark theme autodetect, more themes
+(`kanagawa`, `vesper`, `everforest`, `ayu`, a dark `github`), a `terminal`-following palette,
+and OSC 52 clipboard.
 
 ## Design
 

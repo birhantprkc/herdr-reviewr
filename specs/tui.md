@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-06-23
-Last edited: 2026-07-09
+Last edited: 2026-07-12
 ---
 
 # TUI
@@ -37,32 +37,42 @@ The terminal interface: the layout, the keyboard and mouse, and how the view sta
 
 ### Interaction
 
-Every action has a key. The mouse-relevant ones also work by click or drag. The keys are a provisional v1, not a final keymap.
+Every action has a key. The mouse-relevant ones also work by click or drag.
 
-| action                                        | keyboard                            | mouse                       |
-| --------------------------------------------- | ----------------------------------- | --------------------------- |
-| move the cursor in the focused pane           | `j` / `k` / `↑` / `↓`               | click a row                 |
-| collapse / expand a directory                 | `←` / `→`                           | click the directory row     |
-| switch focus between list and diff            | `tab`                               | click a pane                |
-| move a page                                   | `PageUp` / `PageDown` / `ctrl+u` / `ctrl+d` | —                   |
-| scroll the viewport, selection put            | —                                   | wheel over the pane         |
-| scroll the diff horizontally (wrap off)       | `←` / `→`                           | —                           |
-| switch scope                                  | `u` uncommitted / `b` branch / `t` last-turn | click the scope chip to cycle |
-| switch tab                                    | `1` / `2` / `3`                     | click a tab name            |
-| expand the fold under the cursor              | `→`                                 | click the `⋯` row           |
-| toggle line wrap                              | `w`                                 | —                           |
-| resize the panes                              | `]` / `[`                           | drag the divider            |
-| select a line range, removed lines included   | `v` then move                       | click-drag in the diff      |
-| clear the selection                           | `esc`                               | —                           |
-| comment on the selection                      | `c`, type, `enter`                  | after a drag-select         |
-| edit the comment under the cursor             | `e`                                 | —                           |
-| delete the comment under the cursor           | `d`                                 | —                           |
-| jump to next / previous comment               | `n` / `N`                           | —                           |
-| list and manage all comments                  | `l`                                 | —                           |
-| send all comments to the agent                | `s` / `S`                           | click `Send`                |
-| copy all comments to the clipboard            | `y` / `Y`                           | —                           |
-| refresh now                                   | `r`                                 | —                           |
-| quit                                          | `q`                                 | —                           |
+The keymap is rebindable per action through `[keybindings]` in the plugin config (`config.md`):
+
+- The `action` column names the action for `[keybindings]`.
+- The character keys are defaults.
+- A key that is not a bare character (the arrows, `tab`, `esc`, `enter`, the page keys) is fixed.
+- A key hint in the header or the footer shows its action's first bound key.
+- The comments list acts through the same bindings and closes on `esc` and the `comments` binding.
+- Prose and mockups elsewhere show the default keys.
+
+| action                                                   | does                                        | keys                                        | mouse                         |
+| -------------------------------------------------------- | ------------------------------------------- | ------------------------------------------- | ----------------------------- |
+| `down` / `up`                                            | move the cursor in the focused pane         | `j` / `k` / `↓` / `↑`                       | click a row                   |
+| —                                                        | collapse / expand a directory               | `←` / `→`                                   | click the directory row       |
+| —                                                        | switch focus between list and diff          | `tab`                                       | click a pane                  |
+| —                                                        | move a page                                 | `PageUp` / `PageDown` / `ctrl+u` / `ctrl+d` | —                             |
+| —                                                        | scroll the viewport, selection put          | —                                           | wheel over the pane           |
+| —                                                        | scroll the diff horizontally (wrap off)     | `←` / `→`                                   | —                             |
+| `scope-uncommitted` / `scope-branch` / `scope-last-turn` | switch scope                                | `u` / `b` / `t`                             | click the scope chip to cycle |
+| `tab-changes` / `tab-all-files` / `tab-pr`               | switch tab                                  | `1` / `2` / `3`                             | click a tab name              |
+| —                                                        | expand the fold under the cursor            | `→`                                         | click the `⋯` row             |
+| `wrap`                                                   | toggle line wrap                            | `w`                                         | —                             |
+| `list-wider` / `list-narrower`                           | resize the panes                            | `]` / `[`                                   | drag the divider              |
+| `select`                                                 | select a line range, removed lines included | `v` then move                               | click-drag in the diff        |
+| —                                                        | clear the selection                         | `esc`                                       | —                             |
+| `comment`                                                | comment on the selection                    | `c`, type, `enter`                          | after a drag-select           |
+| `edit`                                                   | edit the comment under the cursor           | `e`                                         | —                             |
+| `delete`                                                 | delete the comment under the cursor         | `d`                                         | —                             |
+| `next-comment` / `prev-comment`                          | jump to next / previous comment             | `n` / `N`                                   | —                             |
+| `comments`                                               | list and manage all comments                | `l`                                         | —                             |
+| `send`                                                   | send all comments to the agent              | `s` / `S`                                   | click `Send`                  |
+| `copy`                                                   | copy all comments to the clipboard          | `y` / `Y`                                   | —                             |
+| `open-pr`                                                | open the PR in the browser (`PR` tab)       | `o`                                         | click the status chip         |
+| `refresh`                                                | refresh now                                 | `r`                                         | —                             |
+| `quit`                                                   | quit                                        | `q`                                         | —                             |
 
 Writing a comment: select a range or land on a line, press `c`, type into the inline box, `enter` saves and `esc` cancels. A saved comment renders as a read-only card spliced under its line, titled with its location, so written feedback stays on screen. `e` reopens the card as an edit box in place, hiding the card while editing. `d` deletes it. A successful send reports a transient `sent N comments` status that fades.
 
@@ -186,6 +196,7 @@ A plain-text field that edits at the caret, not only at the end. An empty box sh
 ## Failure semantics
 
 - A poll never touches the comment input or saved comments. Draft text and caret survive every refresh.
+- A config error replaces the view. Saved comments always survive. An open composer or comments list survives with its tab's state. Recovery restores them.
 - A poll that finds no change makes no visible update: no flicker, no lost selection or scroll.
 - Git, clipboard, and agent-send calls run synchronously between frames. A very large diff or a hung send can briefly block input. Moving them off the draw path is a v1 non-goal.
 - A paste outside the comment editor is ignored. It never starts or mutates a comment.
@@ -195,9 +206,11 @@ A plain-text field that edits at the caret, not only at the end. An empty box sh
 - No editing, staging, or committing from the UI.
 - No side-by-side split view. The diff is one unified column, split is roadmap.
 - No text selection, cut/copy, undo/redo, markdown rendering, or click-to-place-caret in the comment editor.
+- No modifier, named-key, or sequence notation in the keymap. Single characters are the v1 surface.
 
 ## Related specs
 
+- [config](./config.md)
 - [diff-view](./diff-view.md)
 - [file-list](./file-list.md)
 - [review-model](./review-model.md)

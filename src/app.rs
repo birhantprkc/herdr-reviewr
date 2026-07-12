@@ -340,7 +340,7 @@ impl App {
     }
 
     /// Apply one complete validated plugin configuration snapshot.
-    pub(crate) fn set_plugin_config(&mut self, config: crate::config::PluginConfig) {
+    pub fn set_plugin_config(&mut self, config: crate::config::PluginConfig) {
         self.config = PluginConfigState::Ready(config);
         self.refresh_theme();
     }
@@ -357,6 +357,16 @@ impl App {
     pub fn set_config_error(&mut self, error: String) {
         self.config = PluginConfigState::Blocked { error };
         self.pr_pending = false;
+    }
+
+    /// The active keymap: the snapshot's while ready, the defaults while blocked. The blocked
+    /// arm only keeps this total — blocked key handling never reaches dispatch; the event
+    /// loop's error gate answers the default `quit` key itself (`lib.rs`).
+    pub fn keymap(&self) -> &crate::keymap::Keymap {
+        match &self.config {
+            PluginConfigState::Ready(config) => config.keymap(),
+            PluginConfigState::Blocked { .. } => crate::keymap::default_keymap(),
+        }
     }
 
     /// The error-only state rendered while plugin configuration is invalid.
@@ -1005,7 +1015,10 @@ impl App {
             self.pr,
             forge::PrView::Pr(_) | forge::PrView::NoPr(_) | forge::PrView::Ambiguous(_)
         );
-        if has_snapshot && let Some(message) = view.retry_remedy() {
+        if has_snapshot
+            && let Some(message) =
+                view.retry_remedy(self.keymap().hint(crate::keymap::Action::Refresh))
+        {
             self.pr_notice = Some(message);
             self.pr_read_scroll = 0;
             return;
