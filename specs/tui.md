@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-06-23
-Last edited: 2026-07-12
+Last edited: 2026-07-13
 ---
 
 # TUI
@@ -61,7 +61,7 @@ The keymap is rebindable per action through `[keybindings]` in the plugin config
 | —                                                        | expand the fold under the cursor            | `→`                                         | click the `⋯` row             |
 | —                                                        | open a link in rendered markdown            | —                                           | click the link                |
 | `wrap`                                                   | toggle line wrap                            | `w`                                         | —                             |
-| `preview`                                                | toggle the markdown preview (`All files`)   | `m`                                         | —                             |
+| `preview`                                                | toggle the markdown preview                 | `m`                                         | —                             |
 | `list-wider` / `list-narrower`                           | resize the panes                            | `]` / `[`                                   | drag the divider              |
 | `select`                                                 | select a line range, removed lines included | `v` then move                               | click-drag in the diff        |
 | —                                                        | clear the selection                         | `esc`                                       | —                             |
@@ -101,7 +101,7 @@ The actions follow the cursor:
 | cursor on                                | primary          | also                    |
 | ---------------------------------------- | ---------------- | ----------------------- |
 | a diff line                              | `c comment`      | `v select`              |
-| a line of a markdown file (`All files`)  | `c comment`      | `v select · m preview`  |
+| a line of a markdown file that previews  | `c comment`      | `v select · m preview`  |
 | a live selection                         | `c comment`      | `esc clear`             |
 | a commented line                         | `e edit`         | `d delete · n/N jump`   |
 | a fold                                   | `→ expand fold`  | —                       |

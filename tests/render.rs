@@ -876,6 +876,25 @@ fn the_markdown_preview_renders_styled_lines_without_a_gutter() {
 }
 
 #[test]
+fn a_deleted_markdown_file_offers_no_preview_in_the_footer() {
+    let r = Repo::init();
+    r.write("gone.md", "# Doc\n\nbody\n");
+    r.commit_all("init");
+    r.remove("gone.md");
+    let mut app = App::new(r.path_buf(), Scope::Uncommitted, None);
+    app.reload().unwrap();
+    assert_eq!(app.diff_path.as_deref(), Some("gone.md"));
+    app.focus = Focus::Diff;
+
+    // The deletion rows are commentable, but a deleted file has no current content, so
+    // the footer never offers the inert preview toggle (specs/tui.md).
+    let out = render(&app);
+    let footer = out.lines().last().unwrap();
+    assert!(footer.contains("c comment"), "a deletion row is commentable:\n{footer}");
+    assert!(!footer.contains("m preview"), "a deleted file offers no preview:\n{footer}");
+}
+
+#[test]
 fn pr_bodies_render_as_markdown_and_the_description_row_pins_first() {
     use herdr_reviewr::forge::{Comment, CommentKind, PrSnapshot, PrView};
     let r = Repo::init();
@@ -1102,6 +1121,35 @@ fn the_preview_paints_link_regions_and_names_itself_in_the_title() {
     assert!(out.contains("README.md · preview"), "the title names the mode:\n{out}");
     let hit = first_painted_link(&app);
     assert_eq!(hit.as_deref(), Some("https://docs.example/x"));
+}
+
+#[test]
+fn the_changes_tab_paints_the_markdown_preview() {
+    let r = Repo::init();
+    r.write("README.md", "# Install\n");
+    r.commit_all("init");
+    r.write("README.md", "# Install\n\nRun `cargo test` for **all** checks.\n");
+    let mut app = App::new(r.path_buf(), Scope::Uncommitted, None);
+    app.reload().unwrap();
+    app.focus = Focus::Diff;
+
+    // The Changes diff shows raw markdown, and the footer surfaces the way into the preview.
+    let source = render(&app);
+    assert!(source.contains("# Install"), "the diff shows raw markdown:\n{source}");
+    let footer = source.lines().last().unwrap();
+    assert!(footer.contains("m preview"), "the diff discovers the preview:\n{footer}");
+
+    // The toggle paints the rendered document over the diff and names the mode in the title.
+    app.toggle_preview();
+    let out = render(&app);
+    assert!(out.contains("README.md · preview"), "the title names the mode:\n{out}");
+    assert!(out.contains("Install"), "the heading text renders:\n{out}");
+    assert!(!out.contains("# Install"), "the # markers are gone in the preview:\n{out}");
+    // "checks" is on the new side only (the committed side is the bare heading), so this
+    // proves the preview renders current content, not the old version being diffed.
+    assert!(out.contains("checks"), "the preview renders the new-side content:\n{out}");
+    let footer = out.lines().last().unwrap();
+    assert!(footer.contains("m source"), "the footer leads back to the diff:\n{footer}");
 }
 
 #[test]

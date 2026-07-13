@@ -197,15 +197,16 @@ pub struct App {
     pub h_scroll: usize,
     /// Whether long diff lines wrap (default) or are scrolled horizontally.
     pub wrap: bool,
-    /// Whether the markdown preview is open for the active file tab's file. Only `All
-    /// files` renders it; the flag is per file tab and dies with a file change
-    /// (specs/diff-view.md). Only the armed toggle — `preview_active()` is the honest
-    /// on-screen predicate.
+    /// Whether the markdown preview is open for the active file tab's file. Both file tabs
+    /// render it; the flag is per file tab and resets on a file change (specs/diff-view.md).
+    /// Only the armed toggle — `preview_active()` is the honest on-screen predicate.
     preview: bool,
     /// Top visible rendered line of the markdown preview, clamped to the rendered length.
     pub preview_scroll: usize,
-    /// The open markdown file's current content — the preview's render input, refreshed
-    /// by `set_file_view` so no frame rebuilds it. Empty for a non-markdown file.
+    /// The open markdown file's current content — the preview's render input, refreshed by
+    /// `set_diff` and `set_file_view` so no frame rebuilds it. Empty whenever the current
+    /// content does not render as a preview: a non-markdown file, a notice, or an empty new
+    /// side (a deleted or empty file). One half of the `previewable()` signal.
     preview_text: String,
     /// The preview's maximum useful scroll (rendered lines minus the viewport), noted
     /// by the renderer each frame so [`Self::preview_scroll_by`] can clamp. `usize::MAX`
@@ -265,7 +266,7 @@ pub struct App {
     /// The last theme name requested, so re-resolving the same name skips work and logging.
     requested_theme_name: Option<String>,
     cache: DiffCache,
-    /// The one-slot markdown render memo behind the PR read pane and the File-view
+    /// The one-slot markdown render memo behind the PR read pane and the file tabs'
     /// preview (`specs/markdown.md`). Interior-mutable so the renderer can fill it from
     /// `&App`; cleared with the diff cache on a theme switch.
     markdown_cache: std::cell::RefCell<crate::markdown::RenderCache>,
@@ -711,15 +712,27 @@ impl App {
     /// Build the diff for a specific `path` regardless of whether its row is visible in the
     /// tree — so editing a comment can surface its file even from a collapsed directory.
     fn set_diff(&mut self, path: String, previous_path: Option<String>) {
-        // A different file opens with all folds collapsed. `expanded_folds` is keyed by line
-        // number, so without this a fold in the new file whose first hidden line matches an
-        // expanded one in the old file would render pre-expanded. A same-file poll keeps them.
+        // A different file opens with all folds collapsed and in source. `expanded_folds` is
+        // keyed by line number, so without the clear a fold in the new file whose first hidden
+        // line matches an expanded one in the old file would render pre-expanded. A same-file
+        // poll or scope switch keeps both the folds and the preview choice (specs/diff-view.md).
         if self.diff_path.as_deref() != Some(path.as_str()) {
             self.expanded_folds.clear();
+            self.preview = false;
+            self.preview_scroll = 0;
+            self.preview_max_scroll.set(usize::MAX);
         }
         self.diff_path = Some(path.clone());
         let (old, new) = self.content_sides(&path, previous_path.as_deref());
         self.diff = self.cache.get(path, previous_path, &old, &new, &self.highlighter);
+        // Hold the new side as the preview's render input, the same current content the File
+        // view previews. A non-markdown file, a notice, or a deleted file (empty new side)
+        // holds nothing, so its toggle stays inert (specs/diff-view.md).
+        if self.markdown_file() && self.diff.state == crate::diff::FileState::Normal {
+            self.preview_text = new;
+        } else {
+            self.preview_text.clear();
+        }
         self.rebuild_visible();
         self.settle_left();
     }
@@ -950,24 +963,34 @@ impl App {
         self.diff_path.as_deref().is_some_and(is_markdown_path)
     }
 
-    /// Whether the markdown preview is on screen: `All files`, the toggle on, the file
-    /// still qualifying, and the source view rendering rows (not a notice) — a file
-    /// renamed away from markdown or degraded mid-preview drops back to source.
+    /// Whether the `m` toggle would open a preview here: a file tab holding current markdown
+    /// content over a rendered pane. `preview_text` is filled only for a markdown file whose
+    /// source rows render, so a notice, a deleted file (empty new side), or a rename away from
+    /// markdown empties it and makes the toggle inert. The `visible` guard is not redundant:
+    /// an emptied changeset clears `visible` through `load_left` without routing through
+    /// `set_diff`, so a stale `preview_text` must not preview over a pane with no rows. The
+    /// footer offers `m preview` exactly when this holds.
     #[must_use]
-    pub fn preview_active(&self) -> bool {
-        self.tab == Tab::AllFiles
-            && self.preview
-            && self.markdown_file()
-            && !self.visible.is_empty()
+    fn previewable(&self) -> bool {
+        self.tab.is_file_tab() && !self.preview_text.is_empty() && !self.visible.is_empty()
     }
 
-    /// Toggle source ↔ preview on a markdown file in `All files`; inert anywhere else.
-    /// Entering clears a live selection and opens at the cursor's block; returning maps
-    /// the top visible block back to a source cursor (specs/diff-view.md).
+    /// Whether the markdown preview is on screen: previewable and the toggle armed. A file
+    /// renamed away from markdown or degraded mid-preview empties `preview_text` and drops
+    /// back to source without disarming the toggle.
+    #[must_use]
+    pub fn preview_active(&self) -> bool {
+        self.previewable() && self.preview
+    }
+
+    /// Toggle source ↔ preview on a markdown file in a file tab; inert anywhere else.
+    /// Entering clears a live selection and opens at the cursor's block; returning in the
+    /// File view maps the top visible block back to a source cursor (specs/diff-view.md).
     pub fn toggle_preview(&mut self) {
-        // A file whose source view shows a notice (or nothing) never previews, so the
-        // title can never claim a preview over a notice (specs/diff-view.md).
-        if self.tab != Tab::AllFiles || !self.markdown_file() || self.visible.is_empty() {
+        // A file whose source view shows a notice, or a deleted file with no current
+        // content, is not previewable, so the title can never claim a preview over a
+        // notice (specs/diff-view.md).
+        if !self.previewable() {
             return;
         }
         if self.preview {
@@ -980,17 +1003,26 @@ impl App {
         }
     }
 
-    /// Scroll the preview to the block holding the source cursor's line, or the nearest
-    /// block above it. Meta source lines are non-decreasing, so both lookups bisect.
+    /// Scroll the preview to the block holding the cursor's current-content line, or the
+    /// nearest block above it. Meta source lines are non-decreasing, so both lookups bisect.
     fn align_preview_to_cursor(&mut self) {
         self.preview_scroll = 0;
         let width = self.pane_width.get();
         if width == 0 || self.preview_text.is_empty() {
             return;
         }
-        // File-view rows are the file's lines one to one, so the cursor's source line
-        // is its row index plus one.
-        let target = self.diff_cursor + 1;
+        // The preview renders the current content, so a row's new-side line is its render
+        // source line. A row without one — a deletion, a fold — aligns by the nearest row
+        // above with one; none above leaves the preview at its top (specs/diff-view.md). A
+        // File-view row is a context row numbered by its position, so this reduces to it.
+        let Some(target) = self.visible[..=self.diff_cursor]
+            .iter()
+            .rev()
+            .find_map(Row::new_no)
+            .map(|n| n as usize)
+        else {
+            return;
+        };
         let rendered = self.markdown_render(&self.preview_text, width);
         let after = rendered.meta.partition_point(|m| m.source_line <= target);
         let Some(last) = after.checked_sub(1) else {
@@ -1000,11 +1032,16 @@ impl App {
         self.preview_scroll = rendered.meta.partition_point(|m| m.source_line < block_line);
     }
 
-    /// Leave the preview. A scrolled preview maps its top visible block back to a source
-    /// cursor; an unscrolled one leaves the source position exactly as it was.
+    /// Leave the preview. In the Diff view the cursor, scroll, and folds stay exactly as
+    /// they were left. In the File view a scrolled preview maps its top visible block back
+    /// to a source cursor; an unscrolled one leaves the source position exactly as it was
+    /// (specs/diff-view.md).
     fn return_from_preview(&mut self) {
         let scrolled = self.preview_scrolled;
         self.preview = false;
+        if self.tab != Tab::AllFiles {
+            return;
+        }
         let width = self.pane_width.get();
         if !scrolled || width == 0 || self.preview_text.is_empty() {
             return;
@@ -2152,9 +2189,10 @@ impl App {
         } else {
             out.push((A::Comment, Primary));
             out.push((A::Select, Normal));
-            // On a markdown file's source line, surface the way into the preview —
-            // otherwise the rendered view is undiscoverable (specs/tui.md).
-            if self.tab == Tab::AllFiles && self.markdown_file() {
+            // On a markdown file's source line that previews, surface the way in —
+            // otherwise the rendered view is undiscoverable (specs/tui.md). A deleted
+            // file, holding no current content, offers nothing.
+            if self.previewable() {
                 out.push((A::Preview, Normal));
             }
         }

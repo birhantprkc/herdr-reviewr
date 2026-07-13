@@ -98,7 +98,7 @@ several keys at once ([Keybindings](#keybindings)).
 | `Tab` | Switch focus between the file list and the diff |
 | `→` `←` | Expand or collapse a directory or fold, or scroll the diff sideways |
 | `w` | Toggle line wrap |
-| `m` | Toggle the markdown preview of a `.md` file (All files) |
+| `m` | Toggle the markdown preview of a `.md` file (Changes or All files) |
 | `]` `[` | Widen / narrow the file list |
 | `r` | Refresh now |
 | `q` | Quit |
@@ -143,7 +143,8 @@ click (`http`/`https` only), and an anchor link (`#section`) jumps to its headin
 ## The three tabs
 
 - **Changes** — the changed files for the active scope, with `+/-` stats. Pick a file to read its
-  syntax-highlighted diff. This is where you review and comment.
+  syntax-highlighted diff. This is where you review and comment. On a `.md` file, `m` opens a
+  rendered preview of it. Press `m` again to return to the diff where you left off.
 - **All files** — the whole worktree tree, not only what changed. The diff pane renders any
   file's current content. Git-ignored paths show too, dimmed. A directory ignored as a whole
   (`target/`, `node_modules/`) is one collapsed row that loads its contents only when you expand

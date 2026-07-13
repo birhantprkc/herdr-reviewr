@@ -1,12 +1,12 @@
 ---
 Status: Current
 Created: 2026-07-12
-Last edited: 2026-07-12
+Last edited: 2026-07-13
 ---
 
 # Markdown rendering
 
-How markdown text renders as styled terminal lines: one renderer behind the PR tab's bodies and the File view's preview.
+How markdown text renders as styled terminal lines: one renderer behind the PR tab's bodies and the file tabs' preview.
 
 ## Overview
 
@@ -21,7 +21,7 @@ A comment body, rendered:
  See the failing run (https://ci.example/8123)    ← [text](url): accent text, dim destination
 ```
 
-The PR tab's description and comment bodies (`tui.md`) and the File view's preview of a markdown file (`diff-view.md`) render through it.
+The PR tab's description and comment bodies (`tui.md`) and the markdown preview in both file tabs (`diff-view.md`) render through it.
 
 | element                       | renders as                                                                     |
 | ----------------------------- | ------------------------------------------------------------------------------ |
@@ -81,7 +81,7 @@ Every input renders. Malformed or partial markdown degrades toward plain paragra
 
 - No terminal hyperlink escapes (OSC 8). A link acts through the click, never the emitted text.
 - No keyboard link navigation. Opening a link is mouse-only.
-- Nothing else renders through it: not the comment editor, not saved comment cards, not the `Changes` tab.
+- Nothing else renders through it: not the comment editor, not saved comment cards, not diff or source rows.
 
 ## Related specs
 

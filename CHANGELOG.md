@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.0] — 2026-07-13
+
+### Changed
+- **Markdown preview in the Changes tab.** The `preview` binding (default `m`) now toggles the
+  rendered preview from a markdown file's diff, not only in All files. It renders the file's
+  current content, so a deleted file's toggle is inert. Returning to the diff leaves the cursor,
+  scroll, and folds exactly where they were. The preview choice is kept per tab.
+
 ## [0.13.0] — 2026-07-12
 
 ### Added

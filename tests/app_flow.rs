@@ -2138,7 +2138,7 @@ fn markdown_app() -> (Repo, App) {
 }
 
 #[test]
-fn the_markdown_preview_toggles_only_on_markdown_files_in_all_files() {
+fn the_markdown_preview_toggles_on_a_markdown_file_in_either_tab() {
     use herdr_reviewr::app::Tab;
     let r = Repo::init();
     r.write("README.md", "# Title\n");
@@ -2146,11 +2146,14 @@ fn the_markdown_preview_toggles_only_on_markdown_files_in_all_files() {
     r.write("README.md", "# Title\nmore\n");
     let mut app = app_on(&r);
 
-    // `Changes` never previews, even with a markdown file open.
+    // `Changes` previews the diff's markdown file, and toggles back to the diff.
     assert_eq!(app.diff_path.as_deref(), Some("README.md"));
     app.toggle_preview();
-    assert!(!app.preview_active(), "the toggle is inert on the Changes tab");
+    assert!(app.preview_active(), "a markdown file previews on the Changes tab");
+    app.toggle_preview();
+    assert!(!app.preview_active(), "the toggle returns to the diff");
 
+    // `All files` previews the same file the same way.
     app.set_tab(Tab::AllFiles).unwrap();
     app.toggle_preview();
     assert!(app.preview_active(), "a markdown file previews in All files");
@@ -2233,7 +2236,7 @@ fn a_tab_switch_restores_the_preview_choice() {
     assert!(app.preview_active());
 
     app.set_tab(Tab::Changes).unwrap();
-    assert!(!app.preview_active(), "Changes never previews");
+    assert!(!app.preview_active(), "the Changes tab holds its own choice, not All files'");
     app.set_tab(Tab::AllFiles).unwrap();
     assert!(app.preview_active(), "the tab restores its preview choice");
 
@@ -2359,4 +2362,157 @@ fn a_degraded_markdown_file_never_previews() {
     assert_eq!(app.diff_path.as_deref(), Some("empty.md"));
     app.toggle_preview();
     assert!(!app.preview_active(), "a file showing a notice or nothing never previews");
+}
+
+#[test]
+fn the_diff_view_previews_and_returns_to_the_exact_position() {
+    let r = Repo::init();
+    r.write("doc.md", "# Doc\n\nalpha\nbeta\ngamma\n");
+    r.commit_all("init");
+    r.write("doc.md", "# Doc\n\nalpha\ngamma\n"); // delete "beta"
+    let mut app = app_on(&r);
+    assert_eq!(app.diff_path.as_deref(), Some("doc.md"));
+    app.note_diff_width(80);
+    app.focus = Focus::Diff;
+
+    // The cursor on the deletion row ("beta", no new side) aligns entry by the nearest
+    // row above with a current-content line ("alpha", new-side line 3).
+    let del = app
+        .visible
+        .iter()
+        .position(|r| r.new_no().is_none() && r.old_no().is_some())
+        .expect("a deletion row");
+    let theme = herdr_reviewr::theme::resolve(Some("catppuccin"));
+    let rendered = herdr_reviewr::markdown::render(
+        "# Doc\n\nalpha\ngamma\n",
+        80,
+        &herdr_reviewr::highlight::Highlighter::new(theme.syntax),
+        &theme.palette,
+    );
+    let block = rendered.meta.iter().position(|m| m.source_line == 3).expect("the block renders");
+    app.diff_cursor = del;
+    app.diff_scroll = 1; // a non-top scroll that a return must not disturb
+    app.toggle_preview();
+    assert!(app.preview_active(), "a markdown file previews from the Changes diff");
+    assert_eq!(app.preview_scroll, block, "entry aligns to the nearest current-content block");
+
+    // Scrolling the preview and returning leaves the diff cursor and scroll exactly where
+    // they were — the Diff view treats the preview as a peek (specs/diff-view.md).
+    app.preview_scroll_by(1);
+    app.toggle_preview();
+    assert!(!app.preview_active(), "the toggle returns to the diff");
+    assert_eq!(app.diff_cursor, del, "the diff cursor is untouched by a preview scroll");
+    assert_eq!(app.diff_scroll, 1, "the diff scroll is untouched by a preview scroll");
+}
+
+#[test]
+fn diff_preview_entry_falls_back_to_the_top_with_no_current_line_above() {
+    let body = "same\n".repeat(20);
+    let r = Repo::init();
+    r.write("doc.md", &body);
+    r.commit_all("init");
+    r.write("doc.md", &format!("{body}tail\n")); // append past the context margin
+    let mut app = app_on(&r);
+    assert_eq!(app.diff_path.as_deref(), Some("doc.md"));
+    app.note_diff_width(80);
+    app.focus = Focus::Diff;
+
+    // The first visible row is a leading fold, with no current-content line at or above
+    // the cursor, so entry opens the preview at its top (specs/diff-view.md).
+    assert!(app.visible[0].new_no().is_none(), "a leading fold has no current-content line");
+    app.diff_cursor = 0;
+    app.toggle_preview();
+    assert!(app.preview_active());
+    assert_eq!(app.preview_scroll, 0, "entry with nothing above opens at the top");
+
+    // Expanding the fold, then a preview round-trip, leaves the fold expanded — a return
+    // in the Diff view never disturbs the folds (specs/diff-view.md).
+    app.toggle_preview();
+    expand_fold(&mut app);
+    let expanded = app.visible.len();
+    assert!(expanded > 1, "the leading fold expanded into rows");
+    app.toggle_preview();
+    app.toggle_preview();
+    assert_eq!(app.visible.len(), expanded, "the return kept the fold expanded");
+}
+
+#[test]
+fn a_deleted_markdown_file_never_previews_in_the_diff() {
+    let r = Repo::init();
+    r.write("gone.md", "# Doc\n\nbody\n");
+    r.commit_all("init");
+    r.remove("gone.md");
+    let mut app = app_on(&r);
+    assert_eq!(app.diff_path.as_deref(), Some("gone.md"));
+    app.toggle_preview();
+    assert!(!app.preview_active(), "a deleted file has no current content to preview");
+}
+
+#[test]
+fn toggling_preview_after_the_changeset_empties_is_inert() {
+    let r = Repo::init();
+    r.write("doc.md", "# Doc\n\nbody\n");
+    r.commit_all("init");
+    r.write("doc.md", "# Doc\n\nbody edited\n"); // an uncommitted change puts doc.md in scope
+    let mut app = app_on(&r);
+    assert_eq!(app.diff_path.as_deref(), Some("doc.md"));
+    app.note_diff_width(80);
+    app.focus = Focus::Diff;
+
+    // Committing the change empties the uncommitted changeset. The poll clears `visible`
+    // without routing through `set_diff`, so the file's `preview_text` is left stale.
+    r.commit_all("apply");
+    app.reload().unwrap();
+    assert!(app.visible.is_empty(), "the changeset is empty after the commit");
+
+    // The stale render input must not make the empty pane previewable — the toggle is
+    // inert and never indexes the empty row list.
+    app.toggle_preview();
+    assert!(!app.preview_active(), "an empty changeset never previews");
+}
+
+#[test]
+fn a_scope_switch_holds_the_diff_preview() {
+    let r = Repo::init();
+    r.write("doc.md", "# Doc\n\nv1\n");
+    r.commit_all("init"); // on main
+    r.git(&["checkout", "-q", "-b", "feature"]);
+    r.write("doc.md", "# Doc\n\nv2\n");
+    r.commit_all("feature"); // committed: shows in branch scope
+    r.write("doc.md", "# Doc\n\nv3\n"); // uncommitted: shows in uncommitted scope
+    let mut app = App::new(r.path_buf(), Scope::Uncommitted, Some("main".to_string()));
+    app.reload().unwrap();
+    assert_eq!(app.diff_path.as_deref(), Some("doc.md"));
+
+    app.toggle_preview();
+    assert!(app.preview_active(), "the diff previews the markdown file");
+    app.set_scope(Scope::Branch).unwrap();
+    assert_eq!(app.diff_path.as_deref(), Some("doc.md"), "the same file stays open");
+    assert!(app.preview_active(), "the preview holds across a scope switch");
+}
+
+#[test]
+fn each_file_tab_holds_its_own_diff_preview_choice() {
+    use herdr_reviewr::app::Tab;
+    let r = Repo::init();
+    r.write("doc.md", "# Doc\n\nbody\n");
+    r.commit_all("init");
+    r.write("doc.md", "# Doc\n\nbody edited\n");
+    let mut app = app_on(&r);
+    assert_eq!(app.diff_path.as_deref(), Some("doc.md"));
+
+    // Preview in Changes.
+    app.toggle_preview();
+    assert!(app.preview_active(), "the Changes diff previews");
+
+    // All files opens the same file with its own choice, still source.
+    app.set_tab(Tab::AllFiles).unwrap();
+    assert_eq!(app.diff_path.as_deref(), Some("doc.md"));
+    assert!(!app.preview_active(), "All files holds its own choice, still source");
+
+    // Toggling All files on and returning to Changes finds its preview intact.
+    app.toggle_preview();
+    assert!(app.preview_active(), "All files previews");
+    app.set_tab(Tab::Changes).unwrap();
+    assert!(app.preview_active(), "Changes kept its own preview choice");
 }
