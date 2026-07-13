@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-06-23
-Last edited: 2026-07-10
+Last edited: 2026-07-13
 ---
 
 # Review model
@@ -42,7 +42,7 @@ The anchor rules:
 
 ### Scopes
 
-A scope selects which changes `Changes` shows and which files `All files` annotates. The two tabs share one active scope. The default is `uncommitted`.
+A scope selects which changes `Changes` shows and which files `All files` annotates. The two tabs share one active scope. A sidebar starts in the config's `default_scope`, `uncommitted` when unset (`config.md`). A config reread never switches the active scope.
 
 | scope         | shows                                                          | source                                                       |
 | ------------- | --------------------------------------------------------------- | ------------------------------------------------------------ |

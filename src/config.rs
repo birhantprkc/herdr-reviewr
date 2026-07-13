@@ -60,9 +60,10 @@ impl Config {
 /// sets no `base_branches` (`specs/review-model.md`).
 pub const DEFAULT_BASE_BRANCHES: [&str; 4] = ["origin/main", "origin/master", "main", "master"];
 
-const PLUGIN_CONFIG_KEYS: [&str; 7] = [
+const PLUGIN_CONFIG_KEYS: [&str; 8] = [
     "theme",
     "base_branches",
+    "default_scope",
     "toggle_placement",
     "toggle_direction",
     "auto_open",
@@ -111,6 +112,7 @@ impl ToggleDirection {
 pub struct PluginConfig {
     theme: String,
     base_branches: Vec<String>,
+    default_scope: crate::model::Scope,
     toggle_placement: TogglePlacement,
     toggle_direction: ToggleDirection,
     auto_open: bool,
@@ -123,6 +125,7 @@ impl Default for PluginConfig {
         Self {
             theme: crate::theme::DEFAULT.to_owned(),
             base_branches: DEFAULT_BASE_BRANCHES.iter().map(|s| (*s).to_owned()).collect(),
+            default_scope: crate::model::Scope::Uncommitted,
             toggle_placement: TogglePlacement::Split,
             toggle_direction: ToggleDirection::Right,
             auto_open: true,
@@ -139,6 +142,12 @@ impl PluginConfig {
 
     pub fn base_branches(&self) -> &[String] {
         &self.base_branches
+    }
+
+    /// The scope a fresh sidebar is built with — startup and config recovery. A reread never
+    /// switches a running sidebar's scope (specs/review-model.md).
+    pub fn default_scope(&self) -> crate::model::Scope {
+        self.default_scope
     }
 
     pub fn toggle_placement(&self) -> TogglePlacement {
@@ -176,6 +185,7 @@ impl PluginConfig {
         serde_json::json!({
             "theme": self.theme,
             "base_branches": self.base_branches,
+            "default_scope": self.default_scope.name(),
             "toggle_placement": self.toggle_placement.as_str(),
             "toggle_direction": self.toggle_direction.as_str(),
             "auto_open": self.auto_open,
@@ -281,6 +291,25 @@ fn parse_plugin_config(path: &Path) -> Result<PluginConfig, PluginConfigError> {
             branches.push(branch.to_owned());
         }
         config.base_branches = branches;
+    }
+    if let Some(value) = table.get("default_scope") {
+        config.default_scope = match string_value(
+            path,
+            "default_scope",
+            value,
+            "one of uncommitted, branch, last-turn",
+        )? {
+            "uncommitted" => crate::model::Scope::Uncommitted,
+            "branch" => crate::model::Scope::Branch,
+            "last-turn" => crate::model::Scope::LastTurn,
+            _ => {
+                return Err(value_error(
+                    path,
+                    "default_scope",
+                    "one of uncommitted, branch, last-turn",
+                ));
+            }
+        };
     }
     if let Some(value) = table.get("toggle_placement") {
         config.toggle_placement = match string_value(
@@ -450,6 +479,7 @@ pub fn print_plugin_config() -> Result<(), PluginConfigError> {
 #[cfg(test)]
 mod tests {
     use super::{Config, PluginConfig, ToggleDirection, TogglePlacement};
+    use crate::model::Scope;
     use std::time::Duration;
 
     fn parse(args: &[&str]) -> Config {
@@ -490,6 +520,7 @@ mod tests {
         let config = super::plugin_config_in(dir.path()).unwrap();
         assert_eq!(config.theme(), "gruvbox");
         assert_eq!(config.base_branches(), PluginConfig::default().base_branches());
+        assert_eq!(config.default_scope(), Scope::Uncommitted);
         assert_eq!(config.toggle_placement(), TogglePlacement::Split);
         assert_eq!(config.toggle_direction(), ToggleDirection::Right);
         assert!(config.auto_open());
@@ -504,6 +535,7 @@ mod tests {
             concat!(
                 "theme = \"tokyo-night\"\n",
                 "base_branches = [\"origin/dev\", \"main\"]\n",
+                "default_scope = \"last-turn\"\n",
                 "toggle_placement = \"overlay\"\n",
                 "toggle_direction = \"down\"\n",
                 "auto_open = false\n",
@@ -514,6 +546,7 @@ mod tests {
         let config = super::plugin_config_in(dir.path()).unwrap();
         assert_eq!(config.theme(), "tokyo-night");
         assert_eq!(config.base_branches(), ["origin/dev", "main"]);
+        assert_eq!(config.default_scope(), Scope::LastTurn);
         assert_eq!(config.toggle_placement(), TogglePlacement::Overlay);
         assert_eq!(config.toggle_direction(), ToggleDirection::Down);
         assert!(!config.auto_open());
@@ -545,6 +578,8 @@ mod tests {
             ("base_branches = [\"feature branch\"]\n", "`base_branches`"),
             ("base_branches = [\"-main\"]\n", "`base_branches`"),
             ("base_branches = [\"main\", 1]\n", "`base_branches`"),
+            ("default_scope = \"weekly\"\n", "`default_scope`"),
+            ("default_scope = \"last turn\"\n", "`default_scope`"),
             ("toggle_placement = \"left\"\n", "`toggle_placement`"),
             ("toggle_direction = \"left\"\n", "`toggle_direction`"),
             ("auto_open = \"yes\"\n", "`auto_open`"),
@@ -643,6 +678,7 @@ mod tests {
         let value = PluginConfig::default().to_json();
         let object = value.as_object().unwrap();
         assert_eq!(object.len(), super::PLUGIN_CONFIG_KEYS.len(), "one JSON key per config key");
+        assert_eq!(object["default_scope"], "uncommitted");
         assert_eq!(object["toggle_placement"], "split");
         assert_eq!(object["toggle_direction"], "right");
         assert_eq!(object["auto_open"], true);

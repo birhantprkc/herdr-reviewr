@@ -167,6 +167,10 @@ click (`http`/`https` only), and an anchor link (`#section`) jumps to its headin
 - **last turn** — only what the agent changed since its most recent turn started (see
   [Limitations](#limitations)).
 
+The sidebar starts in **uncommitted**. To start in another scope, set `default_scope` in the
+config file (`"uncommitted"`, `"branch"`, or `"last-turn"`). Switching with `u`/`b`/`t` always
+wins for the rest of the session.
+
 Every scope respects `.gitignore`, so build output never clutters **Changes**. To review a file,
 track it in git. An ignored-but-intentional file (a plan, a sample env) belongs in the repo.
 There it shows as a change and ages out once committed. **All files** can still browse any
@@ -194,11 +198,12 @@ Create the file if it does not exist yet. herdr hands this directory to the plug
 reviewr's file, not herdr's. Settings added to herdr's own `~/.config/herdr/config.toml` never
 reach reviewr.
 
-The file accepts these seven keys:
+The file accepts these eight keys:
 
 ```toml
 theme = "tokyo-night"
 base_branches = ["origin/develop", "origin/main", "main", "master"]
+default_scope = "branch"
 toggle_placement = "overlay"
 toggle_direction = "down"
 auto_open = false

@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.0] — 2026-07-13
+
+### Added
+- **Aggregate change stats in the header.** The header now shows the active scope's line totals
+  next to the changed-file count (`9 changed  +42 −18`), colored like the per-file stats. A zero
+  side drops, and an empty changeset shows the bare count.
+- **Configurable startup scope.** A new `default_scope` config key (`"uncommitted"`, `"branch"`,
+  or `"last-turn"`) names the scope the sidebar starts in. It seeds only a fresh sidebar:
+  switching with `u`/`b`/`t` wins for the session, and a config reread never switches the
+  active scope.
+
 ## [0.14.0] — 2026-07-13
 
 ### Changed

@@ -105,8 +105,15 @@ fn ready_app(cfg: &Config, plugin_config: PluginConfig) -> App {
     // A non-repo path is not an error — the sidebar opens to an empty state and starts showing
     // changes if the directory becomes a repo (specs/herdr-host.md).
     let repo = git::toplevel(&cfg.repo).unwrap_or_else(|| cfg.repo.clone());
-    logln!("start repo={} poll={:?} base={:?}", repo.display(), cfg.poll, cfg.base);
-    let mut app = App::new(repo, Scope::Uncommitted, cfg.base.clone());
+    let scope = plugin_config.default_scope();
+    logln!(
+        "start repo={} poll={:?} base={:?} scope={}",
+        repo.display(),
+        cfg.poll,
+        cfg.base,
+        scope.name()
+    );
+    let mut app = App::new(repo, scope, cfg.base.clone());
     app.set_plugin_config(plugin_config);
     app.set_cli_theme(cfg.theme.clone());
     if let Some(wrap) = cfg.wrap {
@@ -1061,6 +1068,7 @@ fn handle_mouse(
 mod refresh_tests {
     use super::{
         ActiveFetch, PrCoordinator, PrEffect, PrRefresh, TaggedPr, apply_plugin_config_observation,
+        ready_app,
     };
     use crate::app::App;
     use crate::config::{Config, plugin_config_in};
@@ -1233,6 +1241,34 @@ mod refresh_tests {
             plugin_config_in(config_dir.path()),
         ));
         assert_eq!(epoch, 1);
+    }
+
+    #[test]
+    fn default_scope_seeds_a_fresh_sidebar_and_a_reread_never_switches_it() {
+        let repo = tempfile::tempdir().unwrap();
+        let config_dir = tempfile::tempdir().unwrap();
+        let path = config_dir.path().join("config.toml");
+        std::fs::write(&path, "default_scope = \"branch\"\n").unwrap();
+        let cfg = Config::parse([repo.path().display().to_string()]);
+        let mut app = ready_app(&cfg, plugin_config_in(config_dir.path()).unwrap());
+        assert_eq!(app.scope, Scope::Branch, "startup seeds the configured scope");
+
+        // The user switches in-session; a reread with a different default must not move it.
+        app.set_scope(Scope::LastTurn).unwrap();
+        std::fs::write(&path, "default_scope = \"uncommitted\"\n").unwrap();
+        let (tx, _rx) = mpsc::channel();
+        let mut epoch = 0;
+        let mut recovery_inflight = false;
+        assert!(apply_plugin_config_observation(
+            &mut app,
+            &cfg,
+            &mut epoch,
+            &tx,
+            &mut recovery_inflight,
+            plugin_config_in(config_dir.path()),
+        ));
+        assert_eq!(app.scope, Scope::LastTurn, "a reread never switches the active scope");
+        assert_eq!(epoch, 0, "a default_scope change invalidates no running work");
     }
 
     #[test]
