@@ -10,6 +10,9 @@ What you get, in one persistent pane pointed at a git worktree:
 
 - **Diff review** — the agent's changed files, syntax-highlighted, scoped to *uncommitted*,
   *branch*, or *last turn*.
+- **Changeset traversal** — `]` and `[` walk the changes hunk by hunk. At a file's last hunk the
+  step stops and the footer offers the crossing, so one more press opens the next file. `f` and
+  `F` jump straight from file to file.
 - **Line comments** — select a range and write a note. It stays visible as a card under the code
   instead of hiding behind a marker.
 - **Send** — one keystroke drops every comment into the agent's input as
@@ -70,7 +73,8 @@ See [Auto-open and layout plugins](#auto-open-and-layout-plugins) for the layout
 The core loop takes five keys. Open the sidebar next to your agent and:
 
 1. **Pick a file.** The agent's changed files are in the right pane. `j` / `k` moves the cursor.
-   The diff opens on the left as you go.
+   The diff opens on the left as you go. Or press `]` to walk the changes hunk by hunk, file
+   after file.
 2. **Focus the diff.** Press `Tab` to move from the file list into the diff.
 3. **Select the lines.** Press `v`, then `j` / `k` to extend the selection (or click-drag).
 4. **Comment.** Press `c`, type your note, `Enter` to save. It stays on screen as a card under
@@ -93,13 +97,15 @@ several keys at once ([Keybindings](#keybindings)).
 | `1` `2` `3` | Switch tab — Changes / All files / PR |
 | `u` `b` `t` | Switch scope — uncommitted / branch / last turn |
 | `j` `k` · `↑` `↓` | Move the cursor in the focused pane |
+| `]` `[` | Jump to the next / previous hunk — press again at a file's edge to cross into the adjacent file |
+| `f` `F` | Jump to the next / previous file |
 | `PageUp` `PageDown` | Move a page |
 | `Ctrl+U` `Ctrl+D` | Move a half-page |
 | `Tab` | Switch focus between the file list and the diff |
 | `→` `←` | Expand or collapse a directory or fold, or scroll the diff sideways |
 | `w` | Toggle line wrap |
 | `m` | Toggle the markdown preview of a `.md` file (Changes or All files) |
-| `]` `[` | Widen / narrow the file list |
+| `<` `>` | Move the pane divider left / right |
 | `r` | Refresh now |
 | `q` | Quit |
 
@@ -285,11 +291,13 @@ The action names and their defaults:
 | Action | Default |
 | --- | --- |
 | `down` / `up` | `j` / `k` |
+| `next-hunk` / `prev-hunk` | `]` / `[` |
+| `next-file` / `prev-file` | `f` / `F` |
 | `scope-uncommitted` / `scope-branch` / `scope-last-turn` | `u` / `b` / `t` |
 | `tab-changes` / `tab-all-files` / `tab-pr` | `1` / `2` / `3` |
 | `wrap` | `w` |
 | `preview` | `m` |
-| `list-wider` / `list-narrower` | `]` / `[` |
+| `list-wider` / `list-narrower` | `<` / `>` |
 | `select` | `v` |
 | `comment` | `c` |
 | `edit` / `delete` | `e` / `d` |

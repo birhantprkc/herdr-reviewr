@@ -4,6 +4,24 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.0] — 2026-07-13
+
+### Added
+- **Changeset traversal.** `]` and `[` jump to the next and previous hunk, so the whole changeset
+  reads hunk by hunk without a detour through the file list. At a file's last hunk the key stops:
+  the footer offers `] next file`, and pressing it again crosses, so a held key never flies past a
+  file. A file with no hunk — a binary, a pure rename — is crossed over. `f` and `F` jump to the
+  next and previous file outright, from either pane. All four are rebindable, like the rest of the
+  keymap.
+
+### Changed
+- **Pane divider keys.** The divider moves with `<` and `>`, each key pointing the way it goes, so
+  `<` widens the file list and `>` narrows it. The old `]` and `[` now step hunks.
+- **Breaking: `]`, `[`, `f`, `F`, `<`, and `>` are new default keys.** A `[keybindings]` config
+  that binds any of them to another action now collides with a default. A collision makes the
+  whole config invalid, so the sidebar shows only the config error until you move the key. The
+  error names both actions involved.
+
 ## [0.15.0] — 2026-07-13
 
 ### Added

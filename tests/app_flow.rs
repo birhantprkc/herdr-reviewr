@@ -7,12 +7,12 @@ use std::cell::RefCell;
 
 use anyhow::{Result, bail};
 use common::Repo;
-use herdr_reviewr::app::{App, Focus, FooterAction, Mode};
+use herdr_reviewr::app::{App, Focus, FooterAction, Mode, Tier};
 use herdr_reviewr::export::ExportTarget;
-use herdr_reviewr::handle_key;
 use herdr_reviewr::keymap::{Action, Keymap};
 use herdr_reviewr::model::{Scope, Side};
-use ratatui::crossterm::event::{KeyCode, KeyEvent};
+use herdr_reviewr::{handle_key, handle_mouse};
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 
 /// An export target that records what it was handed and can be made to fail.
@@ -206,6 +206,320 @@ fn toggling_a_directory_requests_a_reveal() {
     app.reveal_files = false;
     app.collapse_dir();
     assert!(app.reveal_files, "collapsing a directory requests a reveal (even at the same index)");
+}
+
+/// A changeset for the traversal keys: `a.rs` with two hunks, a changed binary file with none,
+/// and `c.rs` with one. Each change is a pure insertion, so a hunk's first changed row carries
+/// the inserted text and the assertions below read as the reviewer's own path through the diff.
+fn traversal_repo() -> Repo {
+    use std::fmt::Write as _;
+    let body = |n: usize| {
+        (0..n).fold(String::new(), |mut s, i| {
+            let _ = writeln!(s, "line {i}");
+            s
+        })
+    };
+    let r = Repo::init();
+    r.write("a.rs", &body(30));
+    r.write("c.rs", &body(10));
+    r.write("bin.dat", "\0\0old\n");
+    r.commit_all("init");
+    r.write(
+        "a.rs",
+        &body(30).replacen("line 2\n", "line 2\nEDIT ONE\n", 1).replacen(
+            "line 25\n",
+            "line 25\nEDIT TWO\n",
+            1,
+        ),
+    );
+    r.write("c.rs", &body(10).replacen("line 5\n", "line 5\nEDIT THREE\n", 1));
+    r.write("bin.dat", "\0\0new\n");
+    r
+}
+
+/// The text under the diff cursor — where a hunk step landed.
+fn cursor_text(app: &App) -> String {
+    app.visible[app.diff_cursor].text()
+}
+
+/// The file the list has selected, which tracks the open file through every traversal.
+fn selected_path(app: &App) -> Option<&str> {
+    let i = app.file_rows[app.file_cursor].file_index()?;
+    Some(&app.entries[i].path)
+}
+
+#[test]
+fn hunk_steps_walk_the_changeset_and_pass_over_hunkless_files() {
+    let r = traversal_repo();
+    let mut app = app_on(&r);
+    app.focus = Focus::Diff;
+    // Files sort alphabetically, so the changeset reads a.rs, bin.dat, c.rs.
+    assert_eq!(app.diff_path.as_deref(), Some("a.rs"));
+
+    app.reveal_diff = false;
+    app.next_hunk();
+    assert_eq!(cursor_text(&app), "EDIT ONE");
+    assert!(app.reveal_diff, "a jumped-to hunk is scrolled into view");
+    app.next_hunk();
+    assert_eq!(cursor_text(&app), "EDIT TWO");
+
+    // Past a.rs's last hunk the first press arms the crossing and holds the cursor still.
+    app.next_hunk();
+    assert_eq!(cursor_text(&app), "EDIT TWO", "the arming press does not move the cursor");
+    assert_eq!(app.armed_cross(), Some(true));
+
+    // The second press takes it, crossing over the binary file, which has no hunk.
+    (app.reveal_diff, app.reveal_files) = (false, false);
+    app.next_hunk();
+    assert_eq!(app.diff_path.as_deref(), Some("c.rs"));
+    assert_eq!(cursor_text(&app), "EDIT THREE");
+    assert!(app.reveal_diff && app.reveal_files, "a crossing reveals the hunk and the file row");
+    assert_eq!(app.armed_cross(), None, "the crossing consumed the arm");
+    assert_eq!(selected_path(&app), Some("c.rs"), "the list selection follows the crossing");
+    assert_eq!(app.focus, Focus::Diff, "crossing keeps the focused pane");
+
+    // The last hunk of the changeset: no file to cross to, so nothing arms and nothing moves.
+    app.next_hunk();
+    assert_eq!(app.armed_cross(), None, "the footer never offers a crossing that cannot happen");
+    app.next_hunk();
+    assert_eq!(app.diff_path.as_deref(), Some("c.rs"));
+    assert_eq!(cursor_text(&app), "EDIT THREE");
+
+    // Backward arms and crosses the same way, landing on the previous file's *last* hunk.
+    app.prev_hunk();
+    assert_eq!(app.armed_cross(), Some(false));
+    app.prev_hunk();
+    assert_eq!(app.diff_path.as_deref(), Some("a.rs"));
+    assert_eq!(cursor_text(&app), "EDIT TWO");
+    app.prev_hunk();
+    assert_eq!(cursor_text(&app), "EDIT ONE");
+    // The first hunk of the changeset: nothing behind it either.
+    app.prev_hunk();
+    app.prev_hunk();
+    assert_eq!(cursor_text(&app), "EDIT ONE");
+    assert_eq!(app.diff_path.as_deref(), Some("a.rs"));
+}
+
+#[test]
+fn an_armed_crossing_takes_the_footer_and_dies_on_any_other_input() {
+    let r = traversal_repo();
+    let mut app = app_on(&r);
+    let keymap = Keymap::default();
+    app.focus = Focus::Diff;
+    app.next_hunk();
+    app.next_hunk();
+
+    // Arm the crossing at a.rs's last hunk: the footer leads with the offer, the one movement
+    // key it ever names, and the comment key stays on the bar because it still works here.
+    press(&mut app, &keymap, KeyCode::Char(']'));
+    assert_eq!(app.armed_cross(), Some(true));
+    let bar = app.footer_actions();
+    assert_eq!(bar.first(), Some(&(FooterAction::CrossFile { forward: true }, Tier::Primary)));
+    assert!(bar.iter().any(|&(a, t)| a == FooterAction::Comment && t == Tier::Normal));
+
+    // Any other key drops the arm and still does its own work — here `j` moves the cursor.
+    let cursor = app.diff_cursor;
+    press(&mut app, &keymap, KeyCode::Char('j'));
+    assert_eq!(app.armed_cross(), None, "another key disarms");
+    assert_eq!(app.diff_cursor, cursor + 1, "and still moves the cursor");
+    assert!(!app.footer_actions().iter().any(|(a, _)| matches!(a, FooterAction::CrossFile { .. })));
+
+    // Disarmed, `]` arms again rather than crossing, so the file boundary always costs two.
+    press(&mut app, &keymap, KeyCode::Char(']'));
+    assert_eq!(app.diff_path.as_deref(), Some("a.rs"), "the re-arming press stays in the file");
+    press(&mut app, &keymap, KeyCode::Char(']'));
+    assert_eq!(app.diff_path.as_deref(), Some("c.rs"));
+
+    // A step the other way is not the repeat the arm waits for.
+    app.next_hunk();
+    assert_eq!(app.armed_cross(), None, "c.rs is the last file: nothing to arm");
+    app.prev_hunk();
+    assert_eq!(app.armed_cross(), Some(false), "armed backward");
+    app.next_hunk();
+    assert_eq!(app.armed_cross(), None, "the opposite step disarms");
+    assert_eq!(app.diff_path.as_deref(), Some("c.rs"), "and does not cross");
+}
+
+#[test]
+fn a_resting_pointer_keeps_the_arm_but_a_gesture_drops_it() {
+    let r = traversal_repo();
+    let mut app = app_on(&r);
+    let keymap = Keymap::default();
+    app.focus = Focus::Diff;
+    app.next_hunk();
+    app.next_hunk();
+    app.next_hunk();
+    assert_eq!(app.armed_cross(), Some(true), "armed at a.rs's last hunk");
+
+    // Mouse capture reports every pointer move over the pane. A pointer resting on the sidebar
+    // is not an input the reviewer made, so it must not drop the crossing they armed.
+    mouse(&mut app, &keymap, MouseEventKind::Moved);
+    assert_eq!(app.armed_cross(), Some(true), "pointer motion is not a gesture");
+
+    // A real gesture is: the reviewer reached for the mouse and left the file's edge behind.
+    mouse(&mut app, &keymap, MouseEventKind::ScrollDown);
+    assert_eq!(app.armed_cross(), None, "a wheel scroll disarms");
+}
+
+#[test]
+fn file_skips_jump_file_to_file_from_either_pane() {
+    let r = Repo::init();
+    // Two files under `src/` so it stays a real directory row rather than folding into its child.
+    r.write("src/b.rs", "x\n");
+    r.write("src/c.rs", "w\n");
+    r.write("a.rs", "y\n");
+    r.commit_all("init");
+    r.write("src/b.rs", "x2\n");
+    r.write("src/c.rs", "w2\n");
+    r.write("a.rs", "y2\n");
+    let mut app = app_on(&r);
+
+    // Directories sort first, so the tree is [src/, src/b.rs, src/c.rs, a.rs] and the initial
+    // cursor lands on the first *file* row.
+    assert_eq!(app.diff_path.as_deref(), Some("src/b.rs"));
+
+    app.next_file();
+    assert_eq!(app.diff_path.as_deref(), Some("src/c.rs"));
+    app.next_file();
+    assert_eq!(app.diff_path.as_deref(), Some("a.rs"));
+    // The last file: no target, so nothing moves.
+    app.next_file();
+    assert_eq!(app.diff_path.as_deref(), Some("a.rs"));
+
+    app.prev_file();
+    assert_eq!(app.diff_path.as_deref(), Some("src/c.rs"));
+    app.prev_file();
+    assert_eq!(app.diff_path.as_deref(), Some("src/b.rs"));
+    // The first file: the directory row above it is never landed on.
+    app.prev_file();
+    assert_eq!(app.diff_path.as_deref(), Some("src/b.rs"));
+
+    // From a directory row, the skip finds the nearest file forward.
+    app.file_cursor = app.file_rows.iter().position(|row| row.dir_path() == Some("src")).unwrap();
+    app.next_file();
+    assert_eq!(app.diff_path.as_deref(), Some("src/b.rs"));
+
+    // And it works from the diff pane, where it opens the file without moving the focus.
+    app.focus = Focus::Diff;
+    app.next_file();
+    assert_eq!(app.diff_path.as_deref(), Some("src/c.rs"));
+    assert_eq!(app.focus, Focus::Diff);
+    assert_eq!(selected_path(&app), Some("src/c.rs"), "the list selection follows the skip");
+}
+
+#[test]
+fn file_skips_land_on_a_file_the_hunk_steps_pass_over() {
+    let r = traversal_repo();
+    let mut app = app_on(&r);
+    app.focus = Focus::Diff;
+    app.next_file();
+    assert_eq!(app.diff_path.as_deref(), Some("bin.dat"), "the binary file is reachable");
+    assert!(app.visible.is_empty(), "a notice diff has no rows");
+    // A hunk step from a rowless notice arms, then crosses to the next file's hunk.
+    app.next_hunk();
+    app.next_hunk();
+    assert_eq!(app.diff_path.as_deref(), Some("c.rs"));
+    assert_eq!(cursor_text(&app), "EDIT THREE");
+}
+
+#[test]
+fn traversals_step_from_the_open_file_not_a_parked_list_cursor() {
+    use std::fmt::Write as _;
+    let body = |n: usize| {
+        (0..n).fold(String::new(), |mut s, i| {
+            let _ = writeln!(s, "line {i}");
+            s
+        })
+    };
+    let r = Repo::init();
+    r.write("src/a.rs", &body(30));
+    r.write("src/z.rs", &body(10));
+    r.commit_all("init");
+    r.write(
+        "src/a.rs",
+        &body(30).replacen("line 2\n", "line 2\nEDIT ONE\n", 1).replacen(
+            "line 25\n",
+            "line 25\nEDIT TWO\n",
+            1,
+        ),
+    );
+    r.write("src/z.rs", &body(10).replacen("line 5\n", "line 5\nEDIT THREE\n", 1));
+    let mut app = app_on(&r);
+    app.focus = Focus::Diff;
+    app.next_hunk();
+    app.next_hunk();
+    assert_eq!(cursor_text(&app), "EDIT TWO", "the diff sits on a.rs's last hunk");
+
+    // Park the list cursor on the directory row above the open file — moving onto a directory
+    // keeps the open diff, so the two can diverge.
+    app.file_cursor = app.file_rows.iter().position(|row| row.dir_path() == Some("src")).unwrap();
+
+    // Both traversals step from the open file. Stepping from the parked cursor would find
+    // `src/a.rs` again — the open file — and wrap the diff back to its first hunk.
+    app.next_hunk();
+    app.next_hunk();
+    assert_eq!(app.diff_path.as_deref(), Some("src/z.rs"));
+    assert_eq!(cursor_text(&app), "EDIT THREE");
+
+    app.file_cursor = app.file_rows.iter().position(|row| row.dir_path() == Some("src")).unwrap();
+    app.prev_file();
+    assert_eq!(app.diff_path.as_deref(), Some("src/a.rs"), "the skip opens a file, never re-opens");
+}
+
+#[test]
+fn a_live_selection_holds_both_traversals_still() {
+    let r = traversal_repo();
+    let mut app = app_on(&r);
+    app.focus = Focus::Diff;
+    app.next_hunk();
+    app.toggle_select();
+    let (path, cursor) = (app.diff_path.clone(), app.diff_cursor);
+
+    app.next_hunk();
+    app.next_file();
+    assert_eq!(app.diff_path, path, "neither traversal drops the selection by opening a file");
+    assert_eq!(app.diff_cursor, cursor, "nor moves the cursor out from under it");
+}
+
+#[test]
+fn hunk_steps_are_inert_where_no_change_rows_are_painted() {
+    let r = traversal_repo();
+    let mut app = app_on(&r);
+    app.focus = Focus::Diff;
+
+    // `All files` renders whole-file content: every row is context, so a step has no target.
+    app.set_tab(herdr_reviewr::app::Tab::AllFiles).unwrap();
+    let (path, cursor) = (app.diff_path.clone(), app.diff_cursor);
+    app.next_hunk();
+    assert_eq!((app.diff_path.clone(), app.diff_cursor), (path, cursor));
+
+    // The file skips still work there.
+    app.next_file();
+    assert_ne!(app.diff_path.as_deref(), Some("a.rs"));
+}
+
+#[test]
+fn a_file_skip_out_of_a_preview_opens_the_next_file_in_source() {
+    let r = Repo::init();
+    r.write("a.md", "# title\n");
+    r.write("b.rs", "x\n");
+    r.commit_all("init");
+    r.write("a.md", "# title\n\nbody\n");
+    r.write("b.rs", "x2\n");
+    let mut app = app_on(&r);
+    app.focus = Focus::Diff;
+    assert_eq!(app.diff_path.as_deref(), Some("a.md"));
+    app.toggle_preview();
+    assert!(app.preview_active(), "the markdown preview is open");
+
+    // The preview has no cursor, so a hunk step has no target there.
+    app.next_hunk();
+    assert_eq!(app.diff_path.as_deref(), Some("a.md"));
+    assert!(app.preview_active());
+
+    app.next_file();
+    assert_eq!(app.diff_path.as_deref(), Some("b.rs"));
+    assert!(!app.preview_active(), "the opened file starts in source");
 }
 
 #[test]
@@ -2064,6 +2378,53 @@ fn theme_selection_swaps_the_palette_and_falls_back() {
 /// Dispatch one key through the event loop's dispatcher, under `keymap` as the frame keymap.
 fn press(app: &mut App, keymap: &Keymap, code: KeyCode) {
     handle_key(app, KeyEvent::from(code), Rect::new(0, 0, 120, 40), keymap).unwrap();
+}
+
+/// Dispatch one mouse event over the diff pane through the event loop's dispatcher.
+fn mouse(app: &mut App, keymap: &Keymap, kind: MouseEventKind) {
+    let area = Rect::new(0, 0, 120, 40);
+    let heights = vec![1usize; app.visible.len()];
+    let event = MouseEvent { kind, column: 10, row: 10, modifiers: KeyModifiers::NONE };
+    handle_mouse(app, event, area, &heights, keymap).unwrap();
+}
+
+#[test]
+fn the_traversal_keys_dispatch_and_rebind() {
+    let r = traversal_repo();
+    let mut app = app_on(&r);
+    let keymap = Keymap::default();
+    app.focus = Focus::Diff;
+
+    press(&mut app, &keymap, KeyCode::Char(']'));
+    assert_eq!(cursor_text(&app), "EDIT ONE");
+    press(&mut app, &keymap, KeyCode::Char(']'));
+    assert_eq!(cursor_text(&app), "EDIT TWO");
+    press(&mut app, &keymap, KeyCode::Char(']')); // arms
+    press(&mut app, &keymap, KeyCode::Char(']'));
+    assert_eq!(app.diff_path.as_deref(), Some("c.rs"), "`]` twice crosses into the next file");
+    press(&mut app, &keymap, KeyCode::Char('[')); // arms
+    press(&mut app, &keymap, KeyCode::Char('['));
+    assert_eq!(cursor_text(&app), "EDIT TWO", "`[` crosses back to the previous file's last hunk");
+
+    press(&mut app, &keymap, KeyCode::Char('f'));
+    assert_eq!(app.diff_path.as_deref(), Some("bin.dat"));
+    press(&mut app, &keymap, KeyCode::Char('F'));
+    assert_eq!(app.diff_path.as_deref(), Some("a.rs"));
+
+    // `]` and `[` no longer resize. The divider follows the key: `<` moves it left, widening
+    // the file list on the right, and `>` moves it back.
+    let start = app.list_pct;
+    press(&mut app, &keymap, KeyCode::Char('<'));
+    assert!(app.list_pct > start, "`<` moves the divider left, widening the file list");
+    press(&mut app, &keymap, KeyCode::Char('>'));
+    assert_eq!(app.list_pct, start, "`>` moves it back right");
+
+    // Every traversal action is rebindable, like the rest of the keymap.
+    let rebound = Keymap::resolve(&[(Action::NextFile, vec!['ㅁ'])]).unwrap();
+    press(&mut app, &rebound, KeyCode::Char('ㅁ'));
+    assert_eq!(app.diff_path.as_deref(), Some("bin.dat"));
+    press(&mut app, &rebound, KeyCode::Char('f'));
+    assert_eq!(app.diff_path.as_deref(), Some("bin.dat"), "the replaced default is inert");
 }
 
 #[test]

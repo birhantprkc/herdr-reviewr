@@ -1176,6 +1176,10 @@ fn action_key_label(app: &App, action: FooterAction) -> (String, String) {
         A::DeleteComment => (hint(K::Delete), "delete"),
         A::JumpComment => (format!("{}/{}", hint(K::NextComment), hint(K::PrevComment)), "jump"),
         A::ExpandFold => ("→".into(), "expand fold"),
+        // The armed crossing is keyed to the hunk step that armed it, so a rebound `next-hunk`
+        // is the key the hint shows.
+        A::CrossFile { forward: true } => (hint(K::NextHunk), "next file"),
+        A::CrossFile { forward: false } => (hint(K::PrevHunk), "prev file"),
         A::ExpandDir => ("→".into(), "expand"),
         A::CollapseDir => ("←".into(), "collapse"),
         A::TogglePane => {

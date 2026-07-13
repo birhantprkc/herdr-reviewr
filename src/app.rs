@@ -81,6 +81,15 @@ struct TabStash {
     preview_text: String,
 }
 
+/// A file crossing offered by the footer, waiting for the hunk step that armed it to repeat: the
+/// direction it crosses in, and the file it resolved to open. Holding the file spares the second
+/// press the walk the first one already paid for (specs/tui.md).
+#[derive(Clone, Debug)]
+struct ArmedCross {
+    forward: bool,
+    path: String,
+}
+
 /// The interaction mode the UI is in.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Mode {
@@ -104,6 +113,11 @@ pub enum FooterAction {
     DeleteComment,
     JumpComment,
     ExpandFold,
+    /// Take the armed crossing: the hunk step that armed it leaves the file when pressed again.
+    /// The direction names the destination and picks the key (`] next file`, `[ prev file`).
+    CrossFile {
+        forward: bool,
+    },
     ExpandDir,
     CollapseDir,
     /// Switch focus between the file list and the diff; the label names the destination pane.
@@ -166,6 +180,9 @@ pub struct App {
     /// Set by a navigation that moves `diff_cursor`; consumed once per frame to scroll the
     /// cursor into view. The wheel never sets it.
     pub reveal_diff: bool,
+    /// The file crossing a hunk step armed when it found no further hunk in the open file. The
+    /// next step the same way takes it, and any other input drops it (specs/tui.md).
+    armed_cross: Option<ArmedCross>,
     /// Whether the current compose was opened from the comments-list overlay, so finishing it
     /// returns there rather than dropping to the diff.
     resume_list: bool,
@@ -228,7 +245,8 @@ pub struct App {
     /// [`Self::pr_scroll_read`].
     pr_read_max_scroll: std::cell::Cell<usize>,
     /// The file-list pane's width as a percent of the body; the diff takes the rest. The
-    /// reviewer resizes it by dragging the divider or with `[` / `]`.
+    /// reviewer resizes it by dragging the divider or with `<` / `>`, which move the divider
+    /// the way the key points.
     pub list_pct: u16,
     /// Whether a mouse drag is currently moving the pane divider.
     pub resizing: bool,
@@ -324,6 +342,7 @@ impl App {
             file_scroll: 0,
             reveal_files: false,
             reveal_diff: false,
+            armed_cross: None,
             resume_list: false,
             toggled_dirs: HashSet::new(),
             stash: TabStash::default(),
@@ -676,9 +695,11 @@ impl App {
         // the scroll/selection under the overlay. The file list still updates above.
         if !self.composing() && self.mode != Mode::List {
             // A poll keeps the reader on the same file; only a different shown file resets
-            // the diff view to the top.
+            // the diff view to the top. It also drops an armed crossing, which was armed at the
+            // edge of a file that is no longer the one on screen (specs/tui.md).
             if self.shown_entry().map(|e| e.path) != self.diff_path {
                 self.reset_diff_view();
+                self.armed_cross = None;
             }
             self.load_left();
         }
@@ -1539,6 +1560,165 @@ impl App {
         }
     }
 
+    /// `next-file`: open the next file, from either pane (`specs/tui.md`).
+    pub fn next_file(&mut self) {
+        self.step_file(true);
+    }
+
+    /// `prev-file`: open the previous file; see [`Self::next_file`].
+    pub fn prev_file(&mut self) {
+        self.step_file(false);
+    }
+
+    /// Move the file cursor to the nearest file row and open it, keeping the focused pane. The
+    /// cursor carries the selection with it, so the list always highlights the open file.
+    ///
+    /// The list steps from its own cursor, which is what the reviewer is moving there. The diff
+    /// steps from the open file, so a press always opens a file — the cursor may sit elsewhere,
+    /// parked on a directory row (which keeps the open diff).
+    fn step_file(&mut self, forward: bool) {
+        if !self.can_traverse() {
+            return;
+        }
+        let from = if self.focus == Focus::Files { self.file_cursor } else { self.open_file_row() };
+        let Some(row) = self.file_row_from(from, forward) else { return };
+        self.file_cursor = row;
+        self.open_cursor_file();
+        self.reveal_files = true;
+    }
+
+    /// `next-hunk`: jump to the nearest hunk below the cursor (`specs/tui.md`).
+    pub fn next_hunk(&mut self) {
+        self.step_hunk(true);
+    }
+
+    /// `prev-hunk`: jump to the nearest hunk above the cursor; see [`Self::next_hunk`].
+    pub fn prev_hunk(&mut self) {
+        self.step_hunk(false);
+    }
+
+    /// Move the diff cursor to the nearest hunk's first changed row past it. With no hunk left
+    /// this way, the first press arms the crossing and the second one takes it, so a held key
+    /// stops at each file. Only `Changes` paints change rows — `All files` is all context, and
+    /// the preview has no cursor — so a step anywhere else has no target (`specs/tui.md`).
+    fn step_hunk(&mut self, forward: bool) {
+        // Any step drops the standing arm. A step the other way is not the repeat it waits for.
+        let armed = self.armed_cross.take().filter(|a| a.forward == forward);
+        if !self.can_traverse() || self.tab != Tab::Changes || self.preview_active() {
+            return;
+        }
+        if let Some(row) = hunk_row(&self.visible, Some(self.diff_cursor), forward) {
+            self.diff_cursor = row;
+            self.reveal_diff = true;
+            return;
+        }
+        let Some(armed) = armed else {
+            // The first press resolves the crossing and arms it, so the footer can offer it and
+            // a held key stops at the file boundary. With no file to cross to — the changeset's
+            // end — nothing is offered and the press is inert.
+            if let Some(row) = self.cross_target(forward)
+                && let Some(path) = self.path_of_row(row)
+            {
+                self.armed_cross = Some(ArmedCross { forward, path });
+            }
+            return;
+        };
+        // The armed file is normally still there, since a poll that changes the open diff
+        // disarms. A poll that dropped the armed file alone leaves the crossing to re-resolve.
+        let Some(row) = self.file_row_of_path(&armed.path).or_else(|| self.cross_target(forward))
+        else {
+            return;
+        };
+        self.file_cursor = row;
+        self.open_cursor_file();
+        // The landing hunk reads off the rows now on screen, so a file reshaped since the arm
+        // still lands on a real change.
+        self.diff_cursor = hunk_row(&self.visible, None, forward).unwrap_or(0);
+        self.reveal_files = true;
+        self.reveal_diff = true;
+    }
+
+    /// The row of the nearest file a crossing would open: the first one that has a hunk. A file
+    /// with no hunk — a binary, a pure rename, an over-budget notice — is crossed over, so a
+    /// crossing always lands on a change. `None` when no such file lies that way.
+    fn cross_target(&mut self, forward: bool) -> Option<usize> {
+        // From the open file, never the file cursor: parked on a directory row above the open
+        // file, the cursor would find that same file again and wrap the diff to its first hunk.
+        let mut row = self.open_file_row();
+        while let Some(next) = self.file_row_from(row, forward) {
+            row = next;
+            let i = self.file_rows[row].file_index().expect("file_row_from yields file rows");
+            let entry = self.entries[i].clone();
+            // Cross over the files git already counted as having no lines — a binary, a pure
+            // rename — without reading them. The reload's `--numstat` knows (`file_list.rs`), so
+            // a keystroke that only passes a file by spends no git on it.
+            if entry.annotation.as_ref().is_some_and(|a| a.additions + a.deletions == 0) {
+                continue;
+            }
+            // An over-budget file renders a notice, so it holds no hunk either. Check the size
+            // before reading, as `set_file_view` does: pulling a vendored bundle in whole would
+            // spike the UI thread for a file the reviewer only crosses over.
+            if std::fs::metadata(self.repo.join(&entry.path))
+                .is_ok_and(|m| crate::diff::over_byte_budget(m.len() as usize))
+            {
+                continue;
+            }
+            let (old, new) = self.content_sides(&entry.path, entry.previous_path.as_deref());
+            let diff =
+                self.cache.get(entry.path, entry.previous_path, &old, &new, &self.highlighter);
+            if hunk_row(&diff.rows, None, forward).is_some() {
+                return Some(row);
+            }
+        }
+        None
+    }
+
+    /// The path of the file at visible row `row`; `None` on a directory row.
+    fn path_of_row(&self, row: usize) -> Option<String> {
+        let i = self.file_rows.get(row)?.file_index()?;
+        Some(self.entries[i].path.clone())
+    }
+
+    /// The direction of the crossing the footer is offering, if a hunk step armed one.
+    #[must_use]
+    pub fn armed_cross(&self) -> Option<bool> {
+        self.armed_cross.as_ref().map(|a| a.forward)
+    }
+
+    /// Drop an armed crossing. Every input but a repeat of the step that armed it disarms
+    /// (`specs/tui.md`).
+    pub fn disarm_cross(&mut self) {
+        self.armed_cross = None;
+    }
+
+    /// Whether the traversal keys act at all: a live selection holds the cursor still, since a
+    /// jump would silently drop the selection under it (`specs/tui.md`).
+    fn can_traverse(&self) -> bool {
+        self.plugin_config().is_some() && self.select_anchor.is_none()
+    }
+
+    /// The open file's row, the origin of every traversal the diff drives. Falls back to the
+    /// cursor when the open file has no visible row, as a file opened from a collapsed
+    /// directory does.
+    fn open_file_row(&self) -> usize {
+        self.diff_path
+            .as_deref()
+            .and_then(|path| self.file_row_of_path(path))
+            .unwrap_or(self.file_cursor)
+    }
+
+    /// The visible-row index of the nearest file row past `row`, in `forward`'s direction.
+    /// Directory rows are skipped. `None` when no file lies that way, which is how both
+    /// traversals clamp at the changeset's ends.
+    fn file_row_from(&self, row: usize, forward: bool) -> Option<usize> {
+        let is_file = |i: &usize| self.file_rows[*i].file_index().is_some();
+        if forward {
+            (row + 1..self.file_rows.len()).find(is_file)
+        } else {
+            (0..row).rev().find(is_file)
+        }
+    }
+
     /// Act on the file-list row at `index` (a mouse click): a file opens its diff, a
     /// directory toggles its expansion.
     pub fn select_file(&mut self, index: usize) -> Result<()> {
@@ -2197,6 +2377,14 @@ impl App {
             }
         }
 
+        // An armed crossing leads the bar: nothing else on screen says the next press leaves the
+        // file. The cursor's own action stays, demoted — commenting still works here
+        // (specs/tui.md).
+        if let Some(forward) = self.armed_cross() {
+            out[0].1 = Normal;
+            out.insert(0, (A::CrossFile { forward }, Primary));
+        }
+
         // Switching scope is always available while reviewing, so it shows in every context on
         // the file tabs — unless it's already the primary (the empty / no-diff states above).
         if !out.iter().any(|&(a, _)| a == A::Scope) {
@@ -2374,6 +2562,24 @@ fn offset_by(scroll: usize, delta: isize) -> usize {
 /// still yields to the first upward input; the result stops at the bottom edge.
 fn clamp_scroll(base: usize, delta: isize, max: usize) -> usize {
     base.min(max).saturating_add_signed(delta).min(max)
+}
+
+/// Whether `row` is one of a hunk's changed lines.
+fn is_change(row: &Row) -> bool {
+    matches!(row, Row::Deletion { .. } | Row::Insertion { .. })
+}
+
+/// The nearest hunk's first changed row in `forward`'s direction: strictly past `from` inside
+/// the open file, or from the far end (`None`) in a file being crossed into. A hunk starts at a
+/// change row whose predecessor is not one, since context lines or a fold always separate two
+/// hunks (specs/diff-view.md).
+fn hunk_row(rows: &[Row], from: Option<usize>, forward: bool) -> Option<usize> {
+    let starts_hunk = |&i: &usize| is_change(&rows[i]) && (i == 0 || !is_change(&rows[i - 1]));
+    if forward {
+        (from.map_or(0, |i| i + 1)..rows.len()).find(starts_hunk)
+    } else {
+        (0..from.unwrap_or(rows.len()).min(rows.len())).rev().find(starts_hunk)
+    }
 }
 
 /// Whether `path` names a markdown file: a `.md`/`.markdown` extension,

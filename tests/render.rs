@@ -394,6 +394,31 @@ fn on_changed_line(app: &mut App) {
 }
 
 #[test]
+fn the_footer_offers_the_armed_crossing_in_both_directions() {
+    // Two files, one hunk each, so a hunk step from either end has only a crossing left to offer.
+    let r = Repo::init();
+    r.write("a.rs", "one\ntwo\n");
+    r.write("z.rs", "one\ntwo\n");
+    r.commit_all("init");
+    r.write("a.rs", "one\nEDIT A\n");
+    r.write("z.rs", "one\nEDIT Z\n");
+    let mut app = App::new(r.path_buf(), Scope::Uncommitted, None);
+    app.reload().unwrap();
+    app.focus = Focus::Diff;
+
+    app.next_hunk(); // onto a.rs's only hunk
+    app.next_hunk(); // nothing below it: arms the crossing forward
+    let footer = footer_line(&render(&app));
+    assert!(footer.contains("] next file"), "the armed crossing leads the bar:\n{footer}");
+    assert!(footer.contains("c comment"), "and the line's own action stays:\n{footer}");
+
+    app.next_hunk(); // takes it
+    app.prev_hunk(); // nothing above z.rs's hunk: arms the crossing back
+    let footer = footer_line(&render(&app));
+    assert!(footer.contains("[ prev file"), "armed backward, the bar names `[`:\n{footer}");
+}
+
+#[test]
 fn the_footer_shows_the_action_for_the_context() {
     let mut app = edited_app();
     on_changed_line(&mut app);

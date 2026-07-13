@@ -9,6 +9,10 @@ use std::sync::LazyLock;
 pub enum Action {
     Down,
     Up,
+    NextHunk,
+    PrevHunk,
+    NextFile,
+    PrevFile,
     ScopeUncommitted,
     ScopeBranch,
     ScopeLastTurn,
@@ -35,9 +39,13 @@ pub enum Action {
 
 /// Every action with its config name and default keys — the single source the default keymap,
 /// the name lookup, and the config error message are built from.
-const ACTIONS: [(Action, &str, &[char]); 24] = [
+const ACTIONS: [(Action, &str, &[char]); 28] = [
     (Action::Down, "down", &['j']),
     (Action::Up, "up", &['k']),
+    (Action::NextHunk, "next-hunk", &[']']),
+    (Action::PrevHunk, "prev-hunk", &['[']),
+    (Action::NextFile, "next-file", &['f']),
+    (Action::PrevFile, "prev-file", &['F']),
     (Action::ScopeUncommitted, "scope-uncommitted", &['u']),
     (Action::ScopeBranch, "scope-branch", &['b']),
     (Action::ScopeLastTurn, "scope-last-turn", &['t']),
@@ -46,8 +54,10 @@ const ACTIONS: [(Action, &str, &[char]); 24] = [
     (Action::TabPr, "tab-pr", &['3']),
     (Action::Wrap, "wrap", &['w']),
     (Action::Preview, "preview", &['m']),
-    (Action::ListWider, "list-wider", &[']']),
-    (Action::ListNarrower, "list-narrower", &['[']),
+    // The key points where the divider goes: `<` moves it left, which widens the file list on
+    // the right; `>` moves it right, which narrows it.
+    (Action::ListWider, "list-wider", &['<']),
+    (Action::ListNarrower, "list-narrower", &['>']),
     (Action::Select, "select", &['v']),
     (Action::Comment, "comment", &['c']),
     (Action::Edit, "edit", &['e']),

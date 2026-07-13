@@ -854,6 +854,13 @@ pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> 
         _ => None,
     };
 
+    // An armed crossing waits for a repeat of the hunk step that armed it. Every other key drops
+    // it, and still does its own work (`specs/tui.md`). The steps themselves settle their arm in
+    // `step_hunk`, which is what makes the other direction disarm too.
+    if !matches!(action, Some(K::NextHunk | K::PrevHunk)) {
+        app.disarm_cross();
+    }
+
     // The read-only PR tab: navigate the snapshot and open links; authoring actions are inert.
     if app.tab == crate::app::Tab::Pr {
         match (action, key.code) {
@@ -897,6 +904,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> 
             K::TabPr => app.set_tab(crate::app::Tab::Pr)?,
             K::Down => app.move_cursor(1)?,
             K::Up => app.move_cursor(-1)?,
+            K::NextHunk => app.next_hunk(),
+            K::PrevHunk => app.prev_hunk(),
+            K::NextFile => app.next_file(),
+            K::PrevFile => app.prev_file(),
             K::Wrap => app.toggle_wrap(),
             K::Preview => app.toggle_preview(),
             // `list-wider` widens the file list, `list-narrower` narrows it (widening the diff).
@@ -950,7 +961,8 @@ pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> 
 
 /// Map one mouse event onto `App`. Header hit-testing uses `keymap` — the keymap of the frame
 /// on screen — so a config swap at the click boundary cannot shift the spans under the pointer.
-fn handle_mouse(
+/// Public for the dispatch tests, like [`handle_key`]; the event loop is the runtime caller.
+pub fn handle_mouse(
     app: &mut App,
     m: MouseEvent,
     area: Rect,
@@ -962,6 +974,13 @@ fn handle_mouse(
     // wheel would drive the panes drawn underneath it.
     if app.composing() || app.mode == Mode::List {
         return Ok(());
+    }
+    // A mouse gesture is one of the "any other input" that drops an armed crossing: the reviewer
+    // who reaches for the mouse has left the file's edge behind (`specs/tui.md`). Pointer motion
+    // is not a gesture — capture reports every move over the pane, and a pointer resting on the
+    // sidebar would otherwise disarm the crossing without the reviewer touching anything.
+    if !matches!(m.kind, MouseEventKind::Moved) {
+        app.disarm_cross();
     }
     // The read-only PR tab: click a tab or the open button, click a row to read it, wheel the
     // navigator (right) to move, wheel the read pane (left) to scroll.

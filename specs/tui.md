@@ -51,6 +51,8 @@ The keymap is rebindable per action through `[keybindings]` in the plugin config
 | action                                                   | does                                        | keys                                        | mouse                         |
 | -------------------------------------------------------- | ------------------------------------------- | ------------------------------------------- | ----------------------------- |
 | `down` / `up`                                            | move the cursor in the focused pane         | `j` / `k` / `↓` / `↑`                       | click a row                   |
+| `next-hunk` / `prev-hunk`                                | jump to the next / previous hunk            | `]` / `[`                                   | —                             |
+| `next-file` / `prev-file`                                | jump to the next / previous file            | `f` / `F`                                   | —                             |
 | —                                                        | collapse / expand a directory               | `←` / `→`                                   | click the directory row       |
 | —                                                        | switch focus between list and diff          | `tab`                                       | click a pane                  |
 | —                                                        | move a page                                 | `PageUp` / `PageDown` / `ctrl+u` / `ctrl+d` | —                             |
@@ -62,7 +64,7 @@ The keymap is rebindable per action through `[keybindings]` in the plugin config
 | —                                                        | open a link in rendered markdown            | —                                           | click the link                |
 | `wrap`                                                   | toggle line wrap                            | `w`                                         | —                             |
 | `preview`                                                | toggle the markdown preview                 | `m`                                         | —                             |
-| `list-wider` / `list-narrower`                           | resize the panes                            | `]` / `[`                                   | drag the divider              |
+| `list-wider` / `list-narrower`                           | move the divider left / right               | `<` / `>`                                   | drag the divider              |
 | `select`                                                 | select a line range, removed lines included | `v` then move                               | click-drag in the diff        |
 | —                                                        | clear the selection                         | `esc`                                       | —                             |
 | `comment`                                                | comment on the selection                    | `c`, type, `enter`                          | after a drag-select           |
@@ -77,6 +79,32 @@ The keymap is rebindable per action through `[keybindings]` in the plugin config
 | `quit`                                                   | quit                                        | `q`                                         | —                             |
 
 Writing a comment: select a range or land on a line, press `c`, type into the inline box, `enter` saves and `esc` cancels. A saved comment renders as a read-only card spliced under its line, titled with its location, so written feedback stays on screen. `e` reopens the card as an edit box in place, hiding the card while editing. `d` deletes it. A successful send reports a transient `sent N comments` status that fades.
+
+### Changeset traversal
+
+`next-hunk` / `prev-hunk` step the diff cursor between changes, from either pane. A step lands on the first row of a run of changed rows. A context line or a fold ends a run, so two edits three lines apart are two stops.
+
+- Each press jumps to the nearest run past the cursor: `next-hunk` below, `prev-hunk` above.
+- With no run left that way, the first press arms a crossing and holds the cursor still. The next press the same way opens the adjacent file on its nearest run. A notice diff, which has no runs at all, arms on the first press like any other file.
+- The armed crossing leads the footer, keyed to the step that armed it. It is the one movement key the footer names.
+- Any other input drops the arm and still does its own work. A background poll keeps it, unless it changes the open file.
+- A crossing arms only when a file to cross to exists. At the changeset's ends nothing is offered and nothing moves.
+- A file with no changed rows is crossed over, notice diffs (`binary`, `too_large`) included.
+- The steps are inert in `All files` and in the markdown preview, which paint no changed rows.
+
+`next-file` / `prev-file` skip a file per press, from either pane, and never arm:
+
+- In the diff, each press opens the next or previous file, cursor on its first row. Focus stays on the diff.
+- In the file list, each press moves the cursor to the nearest file row, skipping directories.
+- The skips land on every file, notice diffs included. From a preview, the opened file starts in source (`diff-view.md`).
+
+The steps and the skips share the rest:
+
+- Adjacency is the list's visible order, so a collapsed subtree is skipped.
+- Opening a file this way moves the list selection onto it.
+- With no target in the pressed direction, a press does nothing.
+- Both are inert while a line selection is live and while the comments list is open.
+- The `PR` tab has neither.
 
 ### Footer
 
@@ -98,21 +126,23 @@ The bar fills by priority until the width runs out, and a trailing `…` marks a
 
 The actions follow the cursor:
 
-| cursor on                                | primary          | also                    |
-| ---------------------------------------- | ---------------- | ----------------------- |
-| a diff line                              | `c comment`      | `v select`              |
-| a line of a markdown file that previews  | `c comment`      | `v select · m preview`  |
-| a live selection                         | `c comment`      | `esc clear`             |
-| a commented line                         | `e edit`         | `d delete · n/N jump`   |
-| a fold                                   | `→ expand fold`  | —                       |
-| an open markdown preview                 | `m source`       | —                       |
-| a file (file list)                       | `⇥ diff`         | —                       |
-| a collapsed directory                    | `→ expand`       | —                       |
-| an expanded directory                    | `← collapse`     | —                       |
-| nothing to review (awaiting turn)        | `u/b/t scope`    | `r refresh`             |
+| cursor on                                | primary                        | also                    |
+| ---------------------------------------- | ------------------------------ | ----------------------- |
+| an armed crossing                        | `] next file` / `[ prev file`  | the cursor's own actions, demoted |
+| a diff line                              | `c comment`                    | `v select`              |
+| a line of a markdown file that previews  | `c comment`                    | `v select · m preview`  |
+| a live selection                         | `c comment`                    | `esc clear`             |
+| a commented line                         | `e edit`                       | `d delete · n/N jump`   |
+| a fold                                   | `→ expand fold`                | —                       |
+| an open markdown preview                 | `m source`                     | —                       |
+| a file (file list)                       | `⇥ diff`                       | —                       |
+| a collapsed directory                    | `→ expand`                     | —                       |
+| an expanded directory                    | `← collapse`                   | —                       |
+| nothing to review (awaiting turn)        | `u/b/t scope`                  | `r refresh`             |
 
+- An armed crossing outranks the cursor's own action, since only the footer says the next press leaves the file.
 - `u/b/t scope` shows in every `Changes` and `All files` context, except where it is itself the primary.
-- Movement keys are never shown.
+- Movement keys are never shown. The armed crossing is the one exception.
 - The comment editor and the comments list show their own actions.
 - The changed-file count and line totals live in the header. The footer carries only the comment count, inside `s send N`.
 - On `PR` the bar leads with the PR's state, then `o open ↗`, then orientation.
@@ -216,6 +246,7 @@ A plain-text field that edits at the caret, not only at the end. An empty box sh
 - No jump from a PR comment's anchor to the code tabs.
 - No text selection, cut/copy, undo/redo, markdown rendering, or click-to-place-caret in the comment editor.
 - No modifier, named-key, or sequence notation in the keymap. Single characters are the v1 surface.
+- No `down` / `up` crossing at a file's edges. The line cursor clamps there.
 
 ## Related specs
 
