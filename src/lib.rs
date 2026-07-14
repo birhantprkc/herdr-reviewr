@@ -128,7 +128,7 @@ const STATUS_TTL: Duration = Duration::from_secs(4);
 /// While the `PR` tab is active, refetch GitHub at least this often — a fallback for forge-side
 /// changes with no local signal (a reviewer's comment). Local pushes and `gh` PR actions refresh
 /// sooner, on the agent's turn-end, so this cadence is the slow safety net (specs/forge-host.md).
-const PR_POLL: Duration = Duration::from_secs(60);
+const PR_POLL: Duration = Duration::from_mins(1);
 const PR_LOADING_DELAY: Duration = Duration::from_millis(150);
 
 #[derive(Debug)]

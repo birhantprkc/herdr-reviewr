@@ -154,10 +154,9 @@ fn edited_app() -> App {
     r.write("hello.rs", "alpha\nbeta\n");
     r.commit_all("init");
     r.write("hello.rs", "alpha\nBETA\n");
-    let app = app_on(&r);
     // The repo is only needed through reload(); rendering reads cached state, so
     // `r` can drop here and clean up its tempdir.
-    app
+    app_on(&r)
 }
 
 #[test]
