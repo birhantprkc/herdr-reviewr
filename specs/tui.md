@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-06-23
-Last edited: 2026-07-13
+Last edited: 2026-07-14
 ---
 
 # TUI
@@ -27,11 +27,35 @@ The terminal interface: the layout, the keyboard and mouse, and how the view sta
 ```
 
 - The header shows the three tabs with the active one highlighted, the active scope, the changed-file count with the scope's `+added −removed` line totals, and a clickable `Send` button with the comment count. The totals drop a zero side and vanish when nothing changed, like a file row's stats (`file-list.md`).
-- The left pane is the selected file's diff (`diff-view.md`). The right pane is the file navigator (`file-list.md`).
+- The read pane shows the selected file's diff or content (`diff-view.md`). The navigator pane shows the active tab's choices.
 - The comment input opens inline, directly under the last line of the selection. It pushes the diff below it down and grows as you type. It is never a footer band.
 - The footer is a live action bar.
 - The active tab sets both panes: diff and changed files in `Changes`, content and repo tree in `All files`, checks and comments in `PR`.
 - The review loop is the same in `Changes` and `All files`. `PR` is a read-only mirror. Comments are one set across the authoring tabs and export together.
+
+The navigator has one global position across all tabs.
+
+| position | layout                                      |
+| -------- | ------------------------------------------- |
+| `right`  | read pane left, navigator right (default)   |
+| `left`   | navigator left, read pane right             |
+| `top`    | navigator above the read pane               |
+| `bottom` | read pane above the navigator               |
+
+The position derives the split direction. Left and right split columns. Top and bottom split rows.
+
+| positions       | default navigator share | allowed share |
+| --------------- | ----------------------- | ------------- |
+| `left`, `right` | 32% of the body width   | 15–60%        |
+| `top`, `bottom` | 25% of the body height  | 15–50%        |
+
+The side and stacked shares are separate session values. Switching position restores the share for that split direction. Restarting reviewr restores both defaults.
+
+Dragging the divider changes the active split direction's share. A resize never crosses that direction's allowed range.
+
+When the split axis has at least six cells, each pane keeps at least three cells along that axis: two border cells and one interior cell. Below six cells, the body divides as evenly as possible. The navigator position does not change, and drawing and hit-testing stay inside the allocated rectangles.
+
+Every layout change preserves the focused pane and each pane's cursor or selection identity. Scroll stays where it is valid in the new viewport and otherwise clamps. Both remembered shares persist.
 
 ## Behavior
 
@@ -64,7 +88,8 @@ The keymap is rebindable per action through `[keybindings]` in the plugin config
 | —                                                        | open a link in rendered markdown            | —                                           | click the link                |
 | `wrap`                                                   | toggle line wrap                            | `w`                                         | —                             |
 | `preview`                                                | toggle the markdown preview                 | `m`                                         | —                             |
-| `list-wider` / `list-narrower`                           | move the divider left / right               | `<` / `>`                                   | drag the divider              |
+| `navigator-position`                                     | move the navigator clockwise                | `p`                                         | —                             |
+| `navigator-grow` / `navigator-shrink`                    | grow / shrink the navigator                 | `<` / `>`                                   | drag the divider              |
 | `select`                                                 | select a line range, removed lines included | `v` then move                               | click-drag in the diff        |
 | —                                                        | clear the selection                         | `esc`                                       | —                             |
 | `comment`                                                | comment on the selection                    | `c`, type, `enter`                          | after a drag-select           |
@@ -77,6 +102,14 @@ The keymap is rebindable per action through `[keybindings]` in the plugin config
 | `open-pr`                                                | open the PR in the browser (`PR` tab)       | `o`                                         | click the status chip         |
 | `refresh`                                                | refresh now                                 | `r`                                         | —                             |
 | `quit`                                                   | quit                                        | `q`                                         | —                             |
+
+`navigator-position` cycles `right` → `bottom` → `left` → `top` → `right`.
+
+`navigator-grow` and `navigator-shrink` change the active share by four percentage points. The allowed range clamps every change.
+
+These three navigator actions work from either main pane on every tab. While the comment editor is open, their printable characters are text. In the comments list they are inert. Those local modes omit the navigator actions from the footer.
+
+A divider drag belongs to the navigator position and split axis at mouse-down. A keypress, terminal resize, or config-driven layout change cancels it. After cancellation, drag events are consumed until mouse-up rather than becoming a selection in the read pane.
 
 Writing a comment: select a range or land on a line, press `c`, type into the inline box, `enter` saves and `esc` cancels. A saved comment renders as a read-only card spliced under its line, titled with its location, so written feedback stays on screen. `e` reopens the card as an edit box in place, hiding the card while editing. `d` deletes it. A successful send reports a transient `sent N comments` status that fades.
 
@@ -111,18 +144,18 @@ The steps and the skips share the rest:
 The footer is a live action bar. It shows the actions available right now, the most likely one highlighted, and drops the least relevant when the line fills. It never lists a key that would not work in the current state.
 
 ```
- c comment · v select lines                          │ ⇥ files · 1·2·3 · q
+ c comment · v select lines                 │ ⇥ files · p position · 1·2·3 · q
 ```
 
 The bar fills by priority until the width runs out, and a trailing `…` marks anything clipped:
 
-| slot        | content                                                             |
-| ----------- | -------------------------------------------------------------------- |
-| primary     | the most likely next step, in a bright accent, always shown           |
-| send        | `s send N`, present once any comment is written, just below the primary |
-| actions     | what else works here, in normal text                                  |
-| orientation | dim, stable: the pane toggle, the tab digits, quit; dropped first     |
-| status      | a transient message (`comment added`) that fades, never replacing actions |
+| slot       | content                                                                        |
+| ---------- | ------------------------------------------------------------------------------ |
+| primary    | the most likely next step, in a bright accent, always shown                    |
+| send       | `s send N`, present once any comment is written, just below the primary        |
+| actions    | what else works here, in normal text                                           |
+| navigation | dim, stable: pane toggle, navigator position, tab digits, quit; dropped first |
+| status     | a transient message (`comment added`) that fades, never replacing actions      |
 
 The actions follow the cursor:
 
@@ -145,18 +178,18 @@ The actions follow the cursor:
 - Movement keys are never shown. The armed crossing is the one exception.
 - The comment editor and the comments list show their own actions.
 - The changed-file count and line totals live in the header. The footer carries only the comment count, inside `s send N`.
-- On `PR` the bar leads with the PR's state, then `o open ↗`, then orientation.
+- On `PR` the bar leads with the PR's state, then `o open ↗`, then navigation.
 
 ### Tabs
 
-- Each tab owns its state: the open file or card, scroll, cursor, expansions, the preview choice. Nothing carries between tabs.
+- Each tab owns its content state: the open file or card, scroll, cursor, expansions, and preview choice. Nothing carries between tabs.
 - Switching away and back restores the tab exactly.
 - A first visit opens the tab's first file or card. A collapsed tree with the cursor on a directory opens nothing until a pick.
-- A tab switch keeps the focused side. An empty left pane focuses the tree.
+- A tab switch keeps the focused pane. An empty read pane focuses the navigator.
 
 ### PR tab
 
-A read-only mirror of the pull request in the same two-pane frame: the right pane navigates checks and comments, the left pane reads the selected comment, the header carries the PR's identity and state. It reads GitHub through `forge-host.md` and writes nothing. Its only outward action opens a link in the browser.
+A read-only mirror of the pull request in the same two-pane frame. The navigator shows checks and selects the description or a comment. The read pane shows that selection. The header carries the PR's identity and state. It reads GitHub through `forge-host.md` and writes nothing. Its only outward action opens a link in the browser.
 
 ```
  1 Changes  2 All files  3 PR    Deep research: GPT-5.5/5.4-mini upgrade…  deep-research  merged #226 ↗
@@ -174,19 +207,20 @@ A read-only mirror of the pull request in the same two-pane frame: the right pan
 │                                                       ││ @claude manager.py:39    2h  │
 │                                                       ││ @claude parse.py:187 outdated│
 ╰───────────────────────────────────────────────────────╯╰─────────────────────────────╯
- ⚠ conflicts with main · ⇡ 2 unpushed · ✗ 1 failing · 5 comments   o open ↗   │ 1·2·3 · r · q
+ ⚠ conflicts with main · ⇡ 2 unpushed · ✗ 1 failing · 5 comments   o open ↗   │ p position · 1·2·3 · r · q
 ```
 
 - The header right-anchors a clickable `status #226 ↗` chip, status colored by lifecycle: `open` green, `draft` yellow, `merged` mauve, `closed` red. The PR title sits to its left, truncated to fit.
 - Between title and chip sits the resolved head branch (`head_ref`, `forge-host.md`), dim, prefixed `⑂ ` when the head lives in a fork. On a narrow bar the branch drops first.
 - The footer leads with merge, sync, checks, and comment counts. Merge and sync show only while the PR is open. A capped surface appends `+more on GitHub ↗` (`forge-host.md`).
-- The right pane, titled `Checks & comments`, shows a status-only checks section above the comments list. The cursor walks the description row and the comments.
+- The navigator, titled `Checks & comments`, shows a status-only checks section above the comments list. The cursor walks the description row and the comments.
 - Comments list newest first, each row `@author anchor age`, with `outdated` or `resolved` markers where GitHub receded the thread.
 - A non-empty PR description pins a `description` row at the top of the navigator, above the checks. An emptied description vanishes like a comment: the cursor clamps, the read pane resets.
-- The left pane reads the selected comment: a finding shows its `snippet` then the body, a review or plain comment shows its prose, the description row shows the PR description.
+- The read pane shows the selected comment: a finding shows its `snippet` then the body, a review or plain comment shows its prose, the description row shows the PR description.
 - Bodies render as markdown (`markdown.md`). A finding's `snippet` stays plain `+`/`−`-colored lines.
 - A human author is emphasized over the bots.
-- `j`/`k` or a click selects a comment. `PageUp`/`PageDown` and the wheel scroll the read pane, stopping with the last line at the pane's bottom edge. `o` or the chip opens the PR in the browser.
+- `j`/`k` or a click selects a description or comment and reveals it in the navigator viewport. Checks are not selectable.
+- The wheel over the navigator scrolls its viewport without changing the selection. `PageUp`/`PageDown` scroll the focused pane. The wheel over the read pane scrolls the read pane. Both panes stop with their last line at the bottom edge. `o` or the chip opens the PR in the browser.
 - A body taller than the read pane shows a scrollbar on the pane's right border. One that fits shows none.
 - The authoring keys (`s`, `c`, `v`, `d`, `e`) do nothing here.
 - A merged or closed PR shows the same mirror, read-only.
@@ -227,7 +261,7 @@ A plain-text field that edits at the caret, not only at the end. An empty box sh
 - While a comment is being composed, the input and its diff are frozen. The file list still updates.
 - `r` forces an immediate reload.
 - The `PR` tab fetches on open, on entering the tab, on `r`, and on the agent's turn-end while active, with a slow fallback timer. Its cadence is separate from the worktree poll.
-- A PR refetch keeps your place: the cursor follows the selected comment by identity, the read-pane scroll holds. A vanished comment clamps the cursor and resets the read pane.
+- A PR refetch keeps your place: the cursor follows the selected comment by identity, and both pane scroll positions hold. A vanished comment clamps the cursor and resets the read pane.
 - Refresh uses no herdr events. The same poll samples the agent's status for the `last-turn` baseline (`herdr-host.md`).
 - In `last-turn` scope, before a turn start is observed, `Changes` shows `waiting for the agent's next turn`, never a stale or whole-worktree diff. `All files` keeps its content.
 
@@ -247,6 +281,10 @@ A plain-text field that edits at the caret, not only at the end. An empty box sh
 - No text selection, cut/copy, undo/redo, markdown rendering, or click-to-place-caret in the comment editor.
 - No modifier, named-key, or sequence notation in the keymap. Single characters are the v1 surface.
 - No `down` / `up` crossing at a file's edges. The line cursor clamps there.
+- No per-tab navigator position. One position applies to every tab.
+- No automatic position or content-sized navigator. Layout changes only through config, `p`, resize keys, or dragging.
+- No hidden navigator. Both panes remain present.
+- No multi-file review stream. Each read pane shows one selected item.
 
 ## Related specs
 

@@ -60,16 +60,55 @@ impl Config {
 /// sets no `base_branches` (`specs/review-model.md`).
 pub const DEFAULT_BASE_BRANCHES: [&str; 4] = ["origin/main", "origin/master", "main", "master"];
 
-const PLUGIN_CONFIG_KEYS: [&str; 8] = [
+const PLUGIN_CONFIG_KEYS: [&str; 9] = [
     "theme",
     "base_branches",
     "default_scope",
+    "navigator_position",
     "toggle_placement",
     "toggle_direction",
     "auto_open",
     "github_host",
     "keybindings",
 ];
+
+/// Where the navigator sits around the read pane.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NavigatorPosition {
+    #[default]
+    Right,
+    Bottom,
+    Left,
+    Top,
+}
+
+impl NavigatorPosition {
+    /// The config-file spelling used in normalized output.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Right => "right",
+            Self::Bottom => "bottom",
+            Self::Left => "left",
+            Self::Top => "top",
+        }
+    }
+
+    /// The `p` action's clockwise sequence around the read pane.
+    #[must_use]
+    pub fn clockwise(self) -> Self {
+        match self {
+            Self::Right => Self::Bottom,
+            Self::Bottom => Self::Left,
+            Self::Left => Self::Top,
+            Self::Top => Self::Right,
+        }
+    }
+
+    /// Whether this position divides body rows instead of columns.
+    pub fn stacked(self) -> bool {
+        matches!(self, Self::Top | Self::Bottom)
+    }
+}
 
 /// Where the toggle action opens the sidebar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -113,6 +152,7 @@ pub struct PluginConfig {
     theme: String,
     base_branches: Vec<String>,
     default_scope: crate::model::Scope,
+    navigator_position: NavigatorPosition,
     toggle_placement: TogglePlacement,
     toggle_direction: ToggleDirection,
     auto_open: bool,
@@ -126,6 +166,7 @@ impl Default for PluginConfig {
             theme: crate::theme::DEFAULT.to_owned(),
             base_branches: DEFAULT_BASE_BRANCHES.iter().map(|s| (*s).to_owned()).collect(),
             default_scope: crate::model::Scope::Uncommitted,
+            navigator_position: NavigatorPosition::Right,
             toggle_placement: TogglePlacement::Split,
             toggle_direction: ToggleDirection::Right,
             auto_open: true,
@@ -148,6 +189,10 @@ impl PluginConfig {
     /// switches a running sidebar's scope (specs/review-model.md).
     pub fn default_scope(&self) -> crate::model::Scope {
         self.default_scope
+    }
+
+    pub fn navigator_position(&self) -> NavigatorPosition {
+        self.navigator_position
     }
 
     pub fn toggle_placement(&self) -> TogglePlacement {
@@ -186,6 +231,7 @@ impl PluginConfig {
             "theme": self.theme,
             "base_branches": self.base_branches,
             "default_scope": self.default_scope.name(),
+            "navigator_position": self.navigator_position.as_str(),
             "toggle_placement": self.toggle_placement.as_str(),
             "toggle_direction": self.toggle_direction.as_str(),
             "auto_open": self.auto_open,
@@ -311,6 +357,26 @@ fn parse_plugin_config(path: &Path) -> Result<PluginConfig, PluginConfigError> {
             }
         };
     }
+    if let Some(value) = table.get("navigator_position") {
+        config.navigator_position = match string_value(
+            path,
+            "navigator_position",
+            value,
+            "one of right, bottom, left, top",
+        )? {
+            "right" => NavigatorPosition::Right,
+            "bottom" => NavigatorPosition::Bottom,
+            "left" => NavigatorPosition::Left,
+            "top" => NavigatorPosition::Top,
+            _ => {
+                return Err(value_error(
+                    path,
+                    "navigator_position",
+                    "one of right, bottom, left, top",
+                ));
+            }
+        };
+    }
     if let Some(value) = table.get("toggle_placement") {
         config.toggle_placement = match string_value(
             path,
@@ -371,14 +437,26 @@ fn parse_keybindings(
         return Err(value_error(path, "keybindings", "a table of action bindings"));
     };
     let mut overrides = Vec::with_capacity(entries.len());
+    let mut names_by_action = Vec::with_capacity(entries.len());
     for (name, keys) in entries {
-        let Some(action) = Action::by_name(name) else {
+        let Some(action) = Action::by_config_name(name) else {
             return Err(unknown_key_error(
                 path,
                 &format!("keybindings.{name}"),
                 &Action::names().collect::<Vec<_>>().join(", "),
             ));
         };
+        if let Some((_, first_name)) =
+            names_by_action.iter().find(|(bound, _): &&(Action, &str)| *bound == action)
+        {
+            return Err(PluginConfigError::new(
+                path,
+                format!(
+                    "invalid value for `keybindings`: `{first_name}` and `{name}` name the same action"
+                ),
+            ));
+        }
+        names_by_action.push((action, name.as_str()));
         let entry_key = format!("keybindings.{name}");
         let expected = "a non-empty array of one-character keys, printable and not whitespace";
         let Some(values) = keys.as_array() else {
@@ -478,7 +556,7 @@ pub fn print_plugin_config() -> Result<(), PluginConfigError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, PluginConfig, ToggleDirection, TogglePlacement};
+    use super::{Config, NavigatorPosition, PluginConfig, ToggleDirection, TogglePlacement};
     use crate::model::Scope;
     use std::time::Duration;
 
@@ -521,6 +599,7 @@ mod tests {
         assert_eq!(config.theme(), "gruvbox");
         assert_eq!(config.base_branches(), PluginConfig::default().base_branches());
         assert_eq!(config.default_scope(), Scope::Uncommitted);
+        assert_eq!(config.navigator_position(), NavigatorPosition::Right);
         assert_eq!(config.toggle_placement(), TogglePlacement::Split);
         assert_eq!(config.toggle_direction(), ToggleDirection::Right);
         assert!(config.auto_open());
@@ -536,6 +615,7 @@ mod tests {
                 "theme = \"tokyo-night\"\n",
                 "base_branches = [\"origin/dev\", \"main\"]\n",
                 "default_scope = \"last-turn\"\n",
+                "navigator_position = \"bottom\"\n",
                 "toggle_placement = \"overlay\"\n",
                 "toggle_direction = \"down\"\n",
                 "auto_open = false\n",
@@ -547,6 +627,7 @@ mod tests {
         assert_eq!(config.theme(), "tokyo-night");
         assert_eq!(config.base_branches(), ["origin/dev", "main"]);
         assert_eq!(config.default_scope(), Scope::LastTurn);
+        assert_eq!(config.navigator_position(), NavigatorPosition::Bottom);
         assert_eq!(config.toggle_placement(), TogglePlacement::Overlay);
         assert_eq!(config.toggle_direction(), ToggleDirection::Down);
         assert!(!config.auto_open());
@@ -580,6 +661,7 @@ mod tests {
             ("base_branches = [\"main\", 1]\n", "`base_branches`"),
             ("default_scope = \"weekly\"\n", "`default_scope`"),
             ("default_scope = \"last turn\"\n", "`default_scope`"),
+            ("navigator_position = \"center\"\n", "`navigator_position`"),
             ("toggle_placement = \"left\"\n", "`toggle_placement`"),
             ("toggle_direction = \"left\"\n", "`toggle_direction`"),
             ("auto_open = \"yes\"\n", "`auto_open`"),
@@ -614,6 +696,40 @@ mod tests {
         assert_eq!(keymap.action_for('s'), None, "a binding replaces its action's defaults");
         assert_eq!(keymap.action_for('S'), None);
         assert_eq!(keymap.action_for('v'), Some(Action::Select), "unbound actions keep theirs");
+    }
+
+    #[test]
+    fn legacy_navigator_actions_resolve_to_canonical_actions() {
+        use crate::keymap::Action;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[keybindings]\nlist-wider = [\"g\"]\nlist-narrower = [\"h\"]\n")
+            .unwrap();
+        let config = super::plugin_config_in(dir.path()).unwrap();
+        assert_eq!(config.keymap().action_for('g'), Some(Action::NavigatorGrow));
+        assert_eq!(config.keymap().action_for('h'), Some(Action::NavigatorShrink));
+        let json = config.to_json();
+        let bindings = json["keybindings"].as_object().unwrap();
+        assert!(bindings.contains_key("navigator-grow"));
+        assert!(bindings.contains_key("navigator-shrink"));
+        assert!(!bindings.contains_key("list-wider"));
+        assert!(!bindings.contains_key("list-narrower"));
+
+        std::fs::write(&path, "[keybindings]\nnavigator-grow = [\"g\"]\nlist-wider = [\"h\"]\n")
+            .unwrap();
+        let error = super::plugin_config_in(dir.path()).unwrap_err().to_string();
+        assert!(error.contains("same action"), "{error}");
+        assert!(error.contains("navigator-grow") && error.contains("list-wider"), "{error}");
+    }
+
+    #[test]
+    fn a_new_default_collision_invalidates_the_resolved_keymap() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.toml"), "[keybindings]\npreview = [\"p\"]\n")
+            .unwrap();
+        let error = super::plugin_config_in(dir.path()).unwrap_err().to_string();
+        assert!(error.contains("`preview`") && error.contains("`navigator-position`"), "{error}");
+        assert!(error.contains("'p'"), "{error}");
     }
 
     #[test]
@@ -679,6 +795,7 @@ mod tests {
         let object = value.as_object().unwrap();
         assert_eq!(object.len(), super::PLUGIN_CONFIG_KEYS.len(), "one JSON key per config key");
         assert_eq!(object["default_scope"], "uncommitted");
+        assert_eq!(object["navigator_position"], "right");
         assert_eq!(object["toggle_placement"], "split");
         assert_eq!(object["toggle_direction"], "right");
         assert_eq!(object["auto_open"], true);

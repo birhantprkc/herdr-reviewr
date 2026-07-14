@@ -21,11 +21,22 @@ use crate::model::{Comment, CommentStore, Scope, Side};
 use crate::theme::{self, Palette};
 use crate::turn::{Status, TurnTracker};
 
-/// The file-list pane's default width and resize bounds, as a percent of the body. The
-/// bounds keep both panes usable however the reviewer drags the divider.
-const DEFAULT_LIST_PCT: u16 = 32;
-const MIN_LIST_PCT: u16 = 15;
-const MAX_LIST_PCT: u16 = 60;
+/// Navigator shares and bounds, as percentages of the body's split axis.
+const DEFAULT_SIDE_PCT: u16 = 32;
+const DEFAULT_STACK_PCT: u16 = 25;
+const MIN_NAVIGATOR_PCT: u16 = 15;
+const MAX_SIDE_PCT: u16 = 60;
+const MAX_STACK_PCT: u16 = 50;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum DividerDrag {
+    #[default]
+    Idle,
+    Active {
+        position: crate::config::NavigatorPosition,
+    },
+    Cancelled,
+}
 
 /// Which pane has the keyboard.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -58,7 +69,7 @@ impl Tab {
     }
 }
 
-/// The inactive tab's saved navigation and left-pane state, swapped in on a tab switch so
+/// The inactive tab's saved navigator and read-pane state, swapped in on a tab switch so
 /// each tab keeps its own selection and scroll (specs/tui.md).
 #[derive(Debug, Default)]
 struct TabStash {
@@ -125,6 +136,7 @@ pub enum FooterAction {
     /// Toggle the markdown preview; the label names the destination view (`m preview`
     /// on source, `m source` in the preview).
     Preview,
+    NavigatorPosition,
     Scope,
     Send,
     List,
@@ -149,7 +161,7 @@ pub enum Tier {
 }
 
 /// The full state of the review session.
-// The several bools (wrap, reveal_files, reveal_diff, resizing, should_quit) are independent
+// The several bools (wrap, reveal_files, reveal_diff, should_quit, and refresh flags) are independent
 // toggles, not a state machine in disguise, so the excessive-bools lint does not apply.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug)]
@@ -244,12 +256,11 @@ pub struct App {
     /// The PR read pane's maximum useful scroll, noted the same way for
     /// [`Self::pr_scroll_read`].
     pr_read_max_scroll: std::cell::Cell<usize>,
-    /// The file-list pane's width as a percent of the body; the diff takes the rest. The
-    /// reviewer resizes it by dragging the divider or with `<` / `>`, which move the divider
-    /// the way the key points.
-    pub list_pct: u16,
-    /// Whether a mouse drag is currently moving the pane divider.
-    pub resizing: bool,
+    /// The global navigator placement and the separate shares remembered for each split axis.
+    pub navigator_position: crate::config::NavigatorPosition,
+    pub navigator_side_pct: u16,
+    pub navigator_stack_pct: u16,
+    divider_drag: DividerDrag,
     pub select_anchor: Option<usize>,
     pub store: CommentStore,
     pub list_cursor: usize,
@@ -269,6 +280,12 @@ pub struct App {
     pub(crate) pr_cursor: usize,
     /// Top visible line of the PR read pane, reset when the selected comment changes.
     pub(crate) pr_read_scroll: usize,
+    /// Top visible row of the PR navigator, independent of its selection.
+    pr_nav_scroll: std::cell::Cell<usize>,
+    /// The PR navigator's maximum useful scroll, noted by the renderer each frame.
+    pr_nav_max_scroll: std::cell::Cell<usize>,
+    /// A cursor move requests the smallest navigator scroll that reveals the selection.
+    reveal_pr_nav: std::cell::Cell<bool>,
     /// Set when the PR view needs a (re)fetch; the event loop services it after drawing, so a
     /// `loading` frame shows before the blocking `gh` calls run.
     pub pr_pending: bool,
@@ -364,8 +381,10 @@ impl App {
             painted_links: std::cell::RefCell::new(Vec::new()),
             painted_anchors: std::cell::RefCell::new(Vec::new()),
             pr_read_max_scroll: std::cell::Cell::new(usize::MAX),
-            list_pct: DEFAULT_LIST_PCT,
-            resizing: false,
+            navigator_position: crate::config::NavigatorPosition::Right,
+            navigator_side_pct: DEFAULT_SIDE_PCT,
+            navigator_stack_pct: DEFAULT_STACK_PCT,
+            divider_drag: DividerDrag::Idle,
             select_anchor: None,
             store: CommentStore::new(),
             list_cursor: 0,
@@ -379,6 +398,9 @@ impl App {
             pr_refreshing: false,
             pr_cursor: 0,
             pr_read_scroll: 0,
+            pr_nav_scroll: std::cell::Cell::new(0),
+            pr_nav_max_scroll: std::cell::Cell::new(usize::MAX),
+            reveal_pr_nav: std::cell::Cell::new(true),
             pr_pending: false,
             highlighter: Highlighter::new(theme.syntax),
             palette: theme.palette,
@@ -421,7 +443,14 @@ impl App {
 
     /// Apply one complete validated plugin configuration snapshot.
     pub fn set_plugin_config(&mut self, config: crate::config::PluginConfig) {
+        let previous_position =
+            self.plugin_config().map(crate::config::PluginConfig::navigator_position);
+        let next_position = config.navigator_position();
         self.config = PluginConfigState::Ready(config);
+        if previous_position != Some(next_position) {
+            self.cancel_divider_drag();
+            self.navigator_position = next_position;
+        }
         self.refresh_theme();
     }
 
@@ -435,6 +464,7 @@ impl App {
 
     /// Block the sidebar on one whole-file configuration failure.
     pub fn set_config_error(&mut self, error: String) {
+        self.cancel_divider_drag();
         self.config = PluginConfigState::Blocked { error };
         self.pr_pending = false;
     }
@@ -463,6 +493,8 @@ impl App {
     pub(crate) fn carry_authored_state_from(&mut self, old: &mut Self) {
         self.store = std::mem::take(&mut old.store);
         self.list_cursor = old.list_cursor;
+        self.navigator_side_pct = old.navigator_side_pct;
+        self.navigator_stack_pct = old.navigator_stack_pct;
         let old_mode = old.mode.clone();
         match old_mode {
             Mode::Normal => {}
@@ -494,7 +526,6 @@ impl App {
                 self.preview_scroll = old.preview_scroll;
                 self.preview_scrolled = old.preview_scrolled;
                 self.preview_text = std::mem::take(&mut old.preview_text);
-                self.list_pct = old.list_pct;
                 self.mode = old.mode.clone();
                 self.input = std::mem::take(&mut old.input);
                 self.caret = old.caret;
@@ -701,14 +732,14 @@ impl App {
                 self.reset_diff_view();
                 self.armed_cross = None;
             }
-            self.load_left();
+            self.load_read();
         }
         Ok(())
     }
 
-    /// Load the left pane for the active tab: the scope diff in `Changes`, the whole-file
+    /// Load the read pane for the active tab: the scope diff in `Changes`, the whole-file
     /// content in `All files`. Both flatten into `visible` and settle the cursor/scroll.
-    fn load_left(&mut self) {
+    fn load_read(&mut self) {
         let Some(entry) = self.shown_entry() else {
             self.diff = FileDiff::empty();
             self.diff_path = None;
@@ -719,13 +750,13 @@ impl App {
         self.open_path_in_tab(entry.path, entry.previous_path);
     }
 
-    /// Open `path` in the active tab's left pane: the scope diff in `Changes` (rename-aware via
+    /// Open `path` in the active tab's read pane: the scope diff in `Changes` (rename-aware via
     /// `previous_path`), the whole-file content in `All files`. The one place this dispatch lives,
     /// so opening a file from the tree and from a comment edit can't drift apart.
     fn open_path_in_tab(&mut self, path: String, previous_path: Option<String>) {
         match self.tab {
             Tab::AllFiles => self.set_file_view(path),
-            // `Changes` (the `PR` tab never opens a file in the left pane).
+            // `Changes` (the `PR` tab never opens a file in the read pane).
             _ => self.set_diff(path, previous_path),
         }
     }
@@ -755,11 +786,11 @@ impl App {
             self.preview_text.clear();
         }
         self.rebuild_visible();
-        self.settle_left();
+        self.settle_read();
     }
 
     /// Build the File view for `path`: its current worktree content as `Context` rows, no
-    /// folds. The `All files` left pane (specs/diff-view.md). Content is scope-independent.
+    /// folds. The `All files` read pane (specs/diff-view.md). Content is scope-independent.
     fn set_file_view(&mut self, path: String) {
         // Opening a different file starts in source; a same-file refresh keeps the
         // preview choice and its scroll (specs/diff-view.md).
@@ -792,13 +823,13 @@ impl App {
             diff
         };
         self.rebuild_visible();
-        self.settle_left();
+        self.settle_read();
     }
 
     /// Clamp the cursor, scroll, and selection to the rebuilt `visible`, keeping the reader's
     /// position. A shrunk view that forced the cursor to move reveals it; a poll that left it
     /// in range does not, so a wheel scroll survives.
-    fn settle_left(&mut self) {
+    fn settle_read(&mut self) {
         if self.visible.is_empty() {
             self.reset_diff_view();
             return;
@@ -988,7 +1019,7 @@ impl App {
     /// content over a rendered pane. `preview_text` is filled only for a markdown file whose
     /// source rows render, so a notice, a deleted file (empty new side), or a rename away from
     /// markdown empties it and makes the toggle inert. The `visible` guard is not redundant:
-    /// an emptied changeset clears `visible` through `load_left` without routing through
+    /// an emptied changeset clears `visible` through `load_read` without routing through
     /// `set_diff`, so a stale `preview_text` must not preview over a pane with no rows. The
     /// footer offers `m preview` exactly when this holds.
     #[must_use]
@@ -1105,6 +1136,27 @@ impl App {
         self.pr_read_max_scroll.set(max);
     }
 
+    /// Record the navigator's painted scroll bound for wheel and page input.
+    pub(crate) fn note_pr_nav_max_scroll(&self, max: usize) {
+        self.pr_nav_max_scroll.set(max);
+    }
+
+    /// The first painted row in the PR navigator.
+    #[must_use]
+    pub(crate) fn pr_nav_scroll(&self) -> usize {
+        self.pr_nav_scroll.get()
+    }
+
+    /// Set the bounded first row chosen by the renderer.
+    pub(crate) fn set_pr_nav_scroll(&self, scroll: usize) {
+        self.pr_nav_scroll.set(scroll);
+    }
+
+    /// Consume the request to reveal the selected PR row on this frame.
+    pub(crate) fn take_pr_nav_reveal(&self) -> bool {
+        self.reveal_pr_nav.replace(false)
+    }
+
     /// Note the diff pane's inner width; the renderer calls this each paint, and the
     /// toggle's position mapping renders at this width.
     pub fn note_diff_width(&self, width: usize) {
@@ -1182,22 +1234,99 @@ impl App {
         self.markdown_cache.borrow_mut().get(text, width, &self.highlighter, &self.palette)
     }
 
-    /// Widen (`+`) or narrow (`-`) the file-list pane by `delta` percent, clamped so neither
-    /// pane collapses. Bound to `]` / `[`.
-    pub fn resize_list(&mut self, delta: i16) {
-        let next = (self.list_pct as i16 + delta).clamp(MIN_LIST_PCT as i16, MAX_LIST_PCT as i16);
-        self.list_pct = next as u16;
+    /// The navigator share remembered for the active side or stacked axis.
+    #[must_use]
+    pub fn navigator_share(&self) -> u16 {
+        if self.navigator_position.stacked() {
+            self.navigator_stack_pct
+        } else {
+            self.navigator_side_pct
+        }
     }
 
-    /// Set the file-list width so the divider sits at body column `x` (a mouse drag). `x` is
-    /// measured from the body's left edge; the list spans from there to the right edge.
-    pub fn drag_divider(&mut self, body_width: u16, x: u16) {
-        if body_width == 0 {
+    /// Move clockwise and cancel any drag captured under the previous geometry.
+    pub fn cycle_navigator_position(&mut self) {
+        self.cancel_divider_drag();
+        self.navigator_position = self.navigator_position.clockwise();
+    }
+
+    /// Grow or shrink the navigator by `delta` percentage points on the active split axis.
+    pub fn resize_navigator(&mut self, delta: i16) {
+        let next = (self.navigator_share() as i16).saturating_add(delta).max(0) as u16;
+        self.set_navigator_share(next);
+    }
+
+    /// Capture a divider gesture for the current position; cancelled capture waits for mouse-up.
+    pub fn start_divider_drag(&mut self) {
+        if self.divider_drag != DividerDrag::Cancelled {
+            self.divider_drag = DividerDrag::Active { position: self.navigator_position };
+        }
+    }
+
+    /// Cancel movement while retaining capture so later drag events cannot become a selection.
+    pub fn cancel_divider_drag(&mut self) {
+        if matches!(self.divider_drag, DividerDrag::Active { .. }) {
+            self.divider_drag = DividerDrag::Cancelled;
+        }
+    }
+
+    /// Release divider capture on mouse-up.
+    pub fn finish_divider_drag(&mut self) {
+        self.divider_drag = DividerDrag::Idle;
+    }
+
+    /// Whether a divider gesture still owns drag and mouse-up events.
+    #[must_use]
+    pub fn divider_drag_active(&self) -> bool {
+        matches!(self.divider_drag, DividerDrag::Active { .. })
+    }
+
+    /// Whether captured drag events are being consumed without resizing.
+    #[must_use]
+    pub fn divider_drag_cancelled(&self) -> bool {
+        self.divider_drag == DividerDrag::Cancelled
+    }
+
+    /// Whether the current gesture still owns drag and mouse-up events in either state.
+    #[must_use]
+    pub fn divider_drag_captured(&self) -> bool {
+        self.divider_drag_active() || self.divider_drag_cancelled()
+    }
+
+    /// Set the active share from the captured split axis, cancelling if the position changed.
+    pub fn drag_divider(&mut self, axis_len: u16, offset: u16) {
+        let DividerDrag::Active { position } = self.divider_drag else {
+            return;
+        };
+        if position != self.navigator_position {
+            self.divider_drag = DividerDrag::Cancelled;
             return;
         }
-        let list_cols = body_width.saturating_sub(x.min(body_width));
-        let pct = (u32::from(list_cols) * 100 / u32::from(body_width)) as u16;
-        self.list_pct = pct.clamp(MIN_LIST_PCT, MAX_LIST_PCT);
+        if axis_len == 0 {
+            return;
+        }
+        let offset = offset.min(axis_len);
+        let navigator_len = match self.navigator_position {
+            crate::config::NavigatorPosition::Left | crate::config::NavigatorPosition::Top => {
+                offset
+            }
+            crate::config::NavigatorPosition::Right | crate::config::NavigatorPosition::Bottom => {
+                axis_len.saturating_sub(offset)
+            }
+        };
+        let pct = (u32::from(navigator_len) * 100 / u32::from(axis_len)) as u16;
+        self.set_navigator_share(pct);
+    }
+
+    /// Clamp and store one share through the active axis's single bounds/ownership contract.
+    fn set_navigator_share(&mut self, share: u16) {
+        let max = if self.navigator_position.stacked() { MAX_STACK_PCT } else { MAX_SIDE_PCT };
+        let clamped = share.clamp(MIN_NAVIGATOR_PCT, max);
+        if self.navigator_position.stacked() {
+            self.navigator_stack_pct = clamped;
+        } else {
+            self.navigator_side_pct = clamped;
+        }
     }
 
     // --- Scroll model (shared by both panes) ---------------------------------------
@@ -1284,7 +1413,7 @@ impl App {
         Ok(())
     }
 
-    /// Switch to `tab`, saving the active tab's navigation and left-pane state and restoring the
+    /// Switch to `tab`, saving the active tab's navigator and read-pane state and restoring the
     /// target's, then reloading it against the current worktree. Each tab keeps its own opened
     /// file and scroll, so returning to a tab lands exactly where you left it (specs/tui.md). A
     /// no-op on the active tab or while composing; focus stays on the same side.
@@ -1308,7 +1437,7 @@ impl App {
             self.active_file_tab = tab;
         }
         self.reload()?;
-        // An empty left pane — a first visit landing on a collapsed tree, or an open file gone
+        // An empty read pane — a first visit landing on a collapsed tree, or an open file gone
         // empty — focuses the tree, so the cursor keys aren't trapped on a pane with nothing to
         // move (specs/tui.md).
         if self.visible.is_empty() {
@@ -1327,6 +1456,8 @@ impl App {
         self.pr_refreshing = false;
         self.pr_cursor = 0;
         self.pr_read_scroll = 0;
+        self.pr_nav_scroll.set(0);
+        self.reveal_pr_nav.set(true);
     }
 
     /// Apply a snapshot fetched off-thread (`forge::fetch` runs on a worker so the UI never
@@ -1463,6 +1594,16 @@ impl App {
     pub(crate) fn pr_select(&mut self, i: usize) {
         self.pr_cursor = i;
         self.pr_read_scroll = 0;
+        self.reveal_pr_nav.set(true);
+    }
+
+    pub(crate) fn pr_scroll_nav(&mut self, delta: isize) {
+        self.reveal_pr_nav.set(false);
+        self.pr_nav_scroll.set(clamp_scroll(
+            self.pr_nav_scroll.get(),
+            delta,
+            self.pr_nav_max_scroll.get(),
+        ));
     }
 
     /// Scroll the read pane by `delta` lines (the wheel and `PageUp`/`PageDown`), stopping
@@ -1556,7 +1697,7 @@ impl App {
             && Some(self.entries[i].path.as_str()) != self.diff_path.as_deref()
         {
             self.reset_diff_view();
-            self.load_left();
+            self.load_read();
         }
     }
 
@@ -2324,6 +2465,7 @@ impl App {
             if self.pr_snapshot().is_some() {
                 out.push((A::OpenPr, Primary));
             }
+            out.push((A::NavigatorPosition, Orientation));
             out.push((A::Tabs, Orientation));
             out.push((A::Refresh, Orientation));
             out.push((A::Quit, Orientation));
@@ -2402,6 +2544,7 @@ impl App {
         if !pane_is_primary && !self.file_rows.is_empty() {
             out.push((A::TogglePane, Orientation));
         }
+        out.push((A::NavigatorPosition, Orientation));
         out.push((A::Tabs, Orientation));
         out.push((A::Quit, Orientation));
         out
@@ -2634,6 +2777,7 @@ fn anchor(selected: &[Row]) -> Option<(Side, u32, u32, String)> {
 #[cfg(test)]
 mod tests {
     use super::{App, Mode};
+    use crate::config::NavigatorPosition;
     use crate::model::{Comment, Scope, Side};
     use std::path::PathBuf;
 
@@ -2713,6 +2857,25 @@ mod tests {
         assert_eq!(recovered.diff_cursor, 8);
         assert_eq!(recovered.diff_scroll, 5);
         assert_eq!(recovered.input, "unsent");
+    }
+
+    #[test]
+    fn config_recovery_keeps_both_shares_and_reapplies_the_configured_position() {
+        let mut old = App::blocked(PathBuf::from("."), Scope::Uncommitted, None);
+        old.navigator_position = NavigatorPosition::Top;
+        old.navigator_side_pct = 41;
+        old.navigator_stack_pct = 37;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.toml"), "navigator_position = \"left\"\n").unwrap();
+        let config = crate::config::plugin_config_in(dir.path()).unwrap();
+        let mut recovered = App::new(PathBuf::from("."), Scope::Uncommitted, None);
+        recovered.set_plugin_config(config);
+        recovered.carry_authored_state_from(&mut old);
+
+        assert_eq!(recovered.navigator_position, NavigatorPosition::Left);
+        assert_eq!(recovered.navigator_side_pct, 41);
+        assert_eq!(recovered.navigator_stack_pct, 37);
     }
 
     #[test]

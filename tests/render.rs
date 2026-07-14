@@ -5,11 +5,15 @@ mod common;
 
 use common::{Repo, app_on};
 use herdr_reviewr::app::{App, Focus, Tab};
+use herdr_reviewr::config::NavigatorPosition;
+use herdr_reviewr::keymap::Keymap;
 use herdr_reviewr::model::Scope;
 use herdr_reviewr::ui::{self, HeaderHit};
+use herdr_reviewr::{handle_key, handle_mouse};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 
 fn dump(buffer: &Buffer) -> String {
@@ -168,7 +172,7 @@ fn the_file_list_renders_as_a_directory_tree() {
     r.write("Cargo.toml", "[package]\nname='z'\n");
     let app = app_on(&r);
 
-    // Scan only the file-list pane (the right third) so the diff header — which does show
+    // Scan only the default-right navigator so the diff header — which does show
     // the open file's full path — doesn't confuse the assertions.
     let files_pane = right_column(&render(&app), 70);
     assert!(files_pane.contains("src/"), "the directory groups its files: {files_pane:?}");
@@ -668,27 +672,197 @@ fn header_clicks_map_to_scope_and_send() {
 fn file_and_diff_clicks_map_to_row_indices() {
     let app = edited_app();
     // Right pane: the first file row maps to index 0; clicking past the list misses.
-    assert_eq!(ui::hit_file(AREA, app.list_pct, 120, 2, app.file_rows.len(), 0), Some(0));
-    assert_eq!(ui::hit_file(AREA, app.list_pct, 120, 9, app.file_rows.len(), 0), None);
+    assert_eq!(ui::hit_file(AREA, &app, 120, 2, app.file_rows.len(), 0), Some(0));
+    assert_eq!(ui::hit_file(AREA, &app, 120, 9, app.file_rows.len(), 0), None);
     // With the list scrolled down, the top visible row maps to that scrolled-to index.
-    assert_eq!(ui::hit_file(AREA, app.list_pct, 120, 2, 50, 7), Some(7));
-    assert_eq!(ui::hit_file(AREA, app.list_pct, 120, 3, 50, 7), Some(8));
-    // The wheel routes by pointer: a column in the right pane is "in" the file list,
-    // one in the left (diff) pane is not.
-    assert!(ui::in_files_pane(AREA, app.list_pct, 120, 3));
-    assert!(!ui::in_files_pane(AREA, app.list_pct, 10, 3));
+    assert_eq!(ui::hit_file(AREA, &app, 120, 2, 50, 7), Some(7));
+    assert_eq!(ui::hit_file(AREA, &app, 120, 3, 50, 7), Some(8));
+    // The wheel routes by pointer: a column in the navigator is "in" the file list,
+    // one in the read pane is not.
+    assert!(ui::in_files_pane(AREA, &app, 120, 3));
+    assert!(!ui::in_files_pane(AREA, &app, 10, 3));
     // Left pane: diff rows map top-down to diff-line indices.
     assert!(app.visible.len() > 1);
     let heights = ui::diff_row_heights(&app, AREA);
-    assert_eq!(ui::hit_diff(AREA, app.list_pct, 10, 2, &heights, 0), Some(0));
-    assert_eq!(ui::hit_diff(AREA, app.list_pct, 10, 3, &heights, 0), Some(1));
+    assert_eq!(ui::hit_diff(AREA, &app, 10, 2, &heights, 0), Some(0));
+    assert_eq!(ui::hit_diff(AREA, &app, 10, 3, &heights, 0), Some(1));
     // With a nonzero scroll and wrapped (multi-row) lines, the click must skip the
     // scrolled-off rows and account for each visible row's display height. Rows are
     // 2 tall each; diff_scroll=1 puts row index 1 at the top of the pane (inner.y == 2).
     let tall = [2usize, 2, 2, 2];
-    assert_eq!(ui::hit_diff(AREA, app.list_pct, 10, 2, &tall, 1), Some(1)); // top visible row
-    assert_eq!(ui::hit_diff(AREA, app.list_pct, 10, 3, &tall, 1), Some(1)); // its second display row
-    assert_eq!(ui::hit_diff(AREA, app.list_pct, 10, 4, &tall, 1), Some(2)); // next logical row
+    assert_eq!(ui::hit_diff(AREA, &app, 10, 2, &tall, 1), Some(1)); // top visible row
+    assert_eq!(ui::hit_diff(AREA, &app, 10, 3, &tall, 1), Some(1)); // its second display row
+    assert_eq!(ui::hit_diff(AREA, &app, 10, 4, &tall, 1), Some(2)); // next logical row
+}
+
+#[test]
+fn navigator_layout_rects_cover_every_position_and_tiny_axis() {
+    let mut app = edited_app();
+    let body = ui::body_rect(AREA);
+
+    for position in [
+        NavigatorPosition::Right,
+        NavigatorPosition::Bottom,
+        NavigatorPosition::Left,
+        NavigatorPosition::Top,
+    ] {
+        app.navigator_position = position;
+        let _ = render_size(&app, AREA.width, AREA.height);
+        let app_ref = &app;
+        let files: Vec<(u16, u16)> = (body.y..body.y + body.height)
+            .flat_map(|row| {
+                (body.x..body.x + body.width)
+                    .filter(move |&col| ui::in_files_pane(AREA, app_ref, col, row))
+                    .map(move |col| (col, row))
+            })
+            .collect();
+        let diff: Vec<(u16, u16)> = (body.y..body.y + body.height)
+            .flat_map(|row| {
+                (body.x..body.x + body.width)
+                    .filter(move |&col| ui::in_diff_pane(AREA, app_ref, col, row))
+                    .map(move |col| (col, row))
+            })
+            .collect();
+        let files_x = (
+            files.iter().map(|&(x, _)| x).min().unwrap(),
+            files.iter().map(|&(x, _)| x).max().unwrap(),
+        );
+        let files_y = (
+            files.iter().map(|&(_, y)| y).min().unwrap(),
+            files.iter().map(|&(_, y)| y).max().unwrap(),
+        );
+        let diff_x = (
+            diff.iter().map(|&(x, _)| x).min().unwrap(),
+            diff.iter().map(|&(x, _)| x).max().unwrap(),
+        );
+        let diff_y = (
+            diff.iter().map(|&(_, y)| y).min().unwrap(),
+            diff.iter().map(|&(_, y)| y).max().unwrap(),
+        );
+        assert_eq!(files.len() + diff.len(), usize::from(body.width * body.height));
+        assert!(!files.is_empty() && !diff.is_empty());
+        assert!(
+            (body.y..body.y + body.height).any(|row| {
+                (body.x..body.x + body.width).any(|col| ui::hit_divider(AREA, &app, col, row))
+            }),
+            "divider is hittable for {position:?}"
+        );
+        match position {
+            NavigatorPosition::Right => {
+                assert!(files.iter().map(|(x, _)| x).min() > diff.iter().map(|(x, _)| x).min());
+                assert_eq!(files.len() / usize::from(body.height), 44);
+                assert!(!ui::hit_divider(AREA, &app, files_x.0 + 1, body.y + 4));
+                assert!(!ui::hit_divider(AREA, &app, diff_x.1 - 1, body.y + 4));
+            }
+            NavigatorPosition::Left => {
+                assert!(files.iter().map(|(x, _)| x).min() < diff.iter().map(|(x, _)| x).min());
+                assert_eq!(files.len() / usize::from(body.height), 44);
+                assert!(!ui::hit_divider(AREA, &app, files_x.1 - 1, body.y + 4));
+                assert!(!ui::hit_divider(AREA, &app, diff_x.0 + 1, body.y + 4));
+            }
+            NavigatorPosition::Bottom => {
+                assert!(files.iter().map(|(_, y)| y).min() > diff.iter().map(|(_, y)| y).min());
+                assert_eq!(files.len() / usize::from(body.width), 9);
+                assert!(!ui::hit_divider(AREA, &app, body.x + 4, files_y.0 + 1));
+                assert!(!ui::hit_divider(AREA, &app, body.x + 4, diff_y.1 - 1));
+            }
+            NavigatorPosition::Top => {
+                assert!(files.iter().map(|(_, y)| y).min() < diff.iter().map(|(_, y)| y).min());
+                assert_eq!(files.len() / usize::from(body.width), 9);
+                assert!(!ui::hit_divider(AREA, &app, body.x + 4, files_y.1 - 1));
+                assert!(!ui::hit_divider(AREA, &app, body.x + 4, diff_y.0 + 1));
+            }
+        }
+    }
+
+    app.navigator_position = NavigatorPosition::Right;
+    let six = Rect::new(0, 0, 6, 10);
+    let row = ui::body_rect(six).y;
+    assert_eq!((0..6).filter(|&col| ui::in_files_pane(six, &app, col, row)).count(), 3);
+    assert_eq!((0..6).filter(|&col| ui::in_diff_pane(six, &app, col, row)).count(), 3);
+
+    let five = Rect::new(0, 0, 5, 10);
+    let row = ui::body_rect(five).y;
+    assert_eq!((0..5).filter(|&col| ui::in_files_pane(five, &app, col, row)).count(), 2);
+    assert_eq!((0..5).filter(|&col| ui::in_diff_pane(five, &app, col, row)).count(), 3);
+
+    app.navigator_position = NavigatorPosition::Top;
+    let eight = Rect::new(0, 0, 10, 10); // body height 8
+    let col = ui::body_rect(eight).x;
+    assert_eq!((1..9).filter(|&row| ui::in_files_pane(eight, &app, col, row)).count(), 3);
+    assert_eq!((1..9).filter(|&row| ui::in_diff_pane(eight, &app, col, row)).count(), 5);
+
+    let seven = Rect::new(0, 0, 10, 7); // body height 5: navigator gets floor(5 / 2)
+    let col = ui::body_rect(seven).x;
+    assert_eq!((1..6).filter(|&row| ui::in_files_pane(seven, &app, col, row)).count(), 2);
+    assert_eq!((1..6).filter(|&row| ui::in_diff_pane(seven, &app, col, row)).count(), 3);
+}
+
+#[test]
+fn pr_focus_border_tracks_tab_between_navigator_and_read_pane() {
+    let mut app = edited_app();
+    app.set_tab(Tab::Pr).unwrap();
+    app.focus = Focus::Files;
+    let body = ui::body_rect(AREA);
+    let nav_x = (body.x..body.x + body.width)
+        .find(|&x| ui::in_files_pane(AREA, &app, x, body.y + 4))
+        .unwrap();
+    let read_x = (body.x..body.x + body.width)
+        .find(|&x| ui::in_diff_pane(AREA, &app, x, body.y + 4))
+        .unwrap();
+    let (lavender, surface2) = (app.palette().lavender, app.palette().surface2);
+
+    let focused_nav = render_buffer(&app);
+    assert_eq!(focused_nav.cell((nav_x, body.y + 4)).unwrap().fg, lavender);
+    assert_eq!(focused_nav.cell((read_x, body.y + 4)).unwrap().fg, surface2);
+
+    handle_key(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), AREA, &Keymap::default())
+        .unwrap();
+    let focused_read = render_buffer(&app);
+    assert_eq!(focused_read.cell((nav_x, body.y + 4)).unwrap().fg, surface2);
+    assert_eq!(focused_read.cell((read_x, body.y + 4)).unwrap().fg, lavender);
+}
+
+#[test]
+fn a_zero_height_pr_navigator_does_not_consume_selection_reveal() {
+    use herdr_reviewr::forge::{Comment, PrSnapshot, PrView};
+    let r = Repo::init();
+    r.write("x.rs", "y\n");
+    r.commit_all("init");
+    let mut app = app_on(&r);
+    app.set_tab(Tab::Pr).unwrap();
+    app.navigator_position = NavigatorPosition::Top;
+    let comments = (0..30)
+        .map(|i| Comment { author: format!("author-{i:02}"), ..common::comment() })
+        .collect();
+    app.pr = PrView::Pr(Box::new(PrSnapshot { comments, ..common::pr_snapshot() }));
+    app.pr_move(10);
+
+    let _ = render_size(&app, 80, 3); // the top navigator has no inner viewport
+    let useful = dump(&render_size(&app, 80, 40));
+
+    assert!(useful.contains("@author-10"), "the pending reveal survives the tiny frame:\n{useful}");
+}
+
+#[test]
+fn a_loading_pr_navigator_does_not_consume_selection_reveal() {
+    use herdr_reviewr::forge::{Check, CheckStatus, Comment, PrSnapshot, PrView};
+    let r = Repo::init();
+    r.write("x.rs", "y\n");
+    r.commit_all("init");
+    let mut app = app_on(&r);
+    app.set_tab(Tab::Pr).unwrap();
+    app.clear_pr();
+    let _ = render(&app); // a useful viewport, but no selected row yet
+
+    let checks = (0..20)
+        .map(|i| Check { name: format!("check-{i:02}"), status: CheckStatus::Success })
+        .collect();
+    let comments = vec![Comment { author: "selected".into(), ..common::comment() }];
+    app.apply_pr(PrView::Pr(Box::new(PrSnapshot { checks, comments, ..common::pr_snapshot() })));
+    let populated = render(&app);
+
+    assert!(populated.contains("@selected"), "the first selectable row is revealed:\n{populated}");
 }
 
 #[test]
@@ -818,7 +992,7 @@ fn all_files_empty_pane_reads_select_a_file() {
     app.set_tab(Tab::AllFiles).unwrap(); // clean repo: no seed; cursor rests on collapsed src/
 
     let out = render(&app);
-    assert!(out.contains("select a file to read"), "the empty All files left pane copy:\n{out}");
+    assert!(out.contains("select a file to read"), "the empty All files read-pane copy:\n{out}");
     assert!(!out.contains("no diff"), "no diff vocabulary in the content browser:\n{out}");
 }
 
@@ -850,12 +1024,12 @@ fn rebound_app(keybindings: &str) -> App {
 
 #[test]
 fn hints_show_the_first_bound_key() {
-    let app = rebound_app("comment = [\"ㅊ\", \"c\"]\ntab-pr = [\"p\"]\n");
+    let app = rebound_app("comment = [\"ㅊ\", \"c\"]\ntab-pr = [\"z\"]\n");
     let out = render(&app);
     let footer = footer_line(&out);
     // A wide hint key spans two buffer cells, so the dump carries a placeholder space after it.
     assert!(footer.contains("ㅊ  comment"), "the hint is the first bound key:\n{footer}");
-    assert!(out.contains("p PR"), "the header tab hint follows its binding:\n{out}");
+    assert!(out.contains("z PR"), "the header tab hint follows its binding:\n{out}");
     assert!(!out.contains("3 PR"), "the replaced digit is gone:\n{out}");
 }
 
@@ -1019,6 +1193,123 @@ fn pr_nav_clicks_map_the_description_and_comment_rows() {
     assert_eq!(ui::pr_nav_hit(area, &app, x, 8), Some(1), "first comment maps past the offset");
     assert_eq!(ui::pr_nav_hit(area, &app, x, 9), Some(2), "second comment follows");
     assert_eq!(ui::pr_nav_hit(area, &app, x, 10), None, "past the last comment is dead");
+}
+
+#[test]
+fn pr_navigator_scroll_is_independent_and_preserved() {
+    use herdr_reviewr::forge::{Check, CheckStatus, Comment, PrSnapshot, PrView};
+    let r = Repo::init();
+    r.write("x.rs", "y\n");
+    r.commit_all("init");
+    let mut app = app_on(&r);
+    app.set_tab(Tab::Pr).unwrap();
+    app.navigator_position = NavigatorPosition::Bottom;
+    let checks: Vec<Check> = (0..14)
+        .map(|i| Check { name: format!("check-{i:02}"), status: CheckStatus::Success })
+        .collect();
+    let comments: Vec<Comment> = (0..8)
+        .map(|i| Comment {
+            author: format!("author-{i:02}"),
+            body: (0..50).map(|line| format!("line-{line:02}")).collect::<Vec<_>>().join("  \n"),
+            ..common::comment()
+        })
+        .collect();
+    let snapshot = || PrSnapshot {
+        checks: checks.clone(),
+        comments: comments.clone(),
+        ..common::pr_snapshot()
+    };
+    app.pr = PrView::Pr(Box::new(snapshot()));
+
+    let selected = app.pr_selected_comment().map(|c| c.author.clone());
+    let area = Rect::new(0, 0, 140, 40);
+    let body = ui::body_rect(area);
+    let (column, row) = (body.y..body.y + body.height)
+        .flat_map(|row| (body.x..body.x + body.width).map(move |column| (column, row)))
+        .find(|&(column, row)| ui::in_files_pane(area, &app, column, row))
+        .unwrap();
+    let keymap = Keymap::default();
+    let _ = render(&app); // establishes the navigator's scroll bound
+    for _ in 0..10 {
+        handle_mouse(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            },
+            area,
+            &[],
+            &keymap,
+        )
+        .unwrap();
+    }
+    let before = render(&app);
+    assert!(before.contains("check-00"));
+    assert!(!before.contains("check-13"));
+    for _ in 0..5 {
+        handle_mouse(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            },
+            area,
+            &[],
+            &keymap,
+        )
+        .unwrap();
+    }
+    let scrolled = render(&app);
+    assert!(scrolled.contains("@author-00"), "the wheel exposes overflowed comments:\n{scrolled}");
+    assert_eq!(app.pr_selected_comment().map(|c| c.author.clone()), selected);
+
+    let (clicked_row, clicked_author) = scrolled
+        .lines()
+        .enumerate()
+        .find_map(|(row, line)| {
+            comments
+                .iter()
+                .find(|comment| line.contains(&format!("@{}", comment.author)))
+                .map(|comment| (row as u16, comment.author.clone()))
+        })
+        .expect("a scrolled comment row is painted");
+    handle_mouse(
+        &mut app,
+        MouseEvent {
+            kind: MouseEventKind::Down(ratatui::crossterm::event::MouseButton::Left),
+            column: body.x + 2,
+            row: clicked_row,
+            modifiers: KeyModifiers::NONE,
+        },
+        area,
+        &[],
+        &keymap,
+    )
+    .unwrap();
+    assert_eq!(app.pr_selected_comment().map(|c| c.author.as_str()), Some(clicked_author.as_str()));
+
+    app.apply_pr(PrView::Pr(Box::new(snapshot())));
+    let refetched = render(&app);
+    assert!(refetched.contains("@author-00"), "a refetch preserves navigator scroll:\n{refetched}");
+
+    app.focus = Focus::Files;
+    handle_key(&mut app, KeyEvent::from(KeyCode::PageUp), area, &keymap).unwrap();
+    let paged = render(&app);
+    assert!(paged.contains("check-00"), "page keys scroll the focused navigator:\n{paged}");
+    assert_eq!(app.pr_selected_comment().map(|c| c.author.as_str()), Some(clicked_author.as_str()));
+
+    handle_key(&mut app, KeyEvent::from(KeyCode::Tab), area, &keymap).unwrap();
+    let nav_before_read_page = render(&app);
+    assert!(nav_before_read_page.contains("line-00"));
+    handle_key(&mut app, KeyEvent::from(KeyCode::PageDown), area, &keymap).unwrap();
+    let read_paged = render(&app);
+    assert!(!read_paged.contains("line-00"), "the focused read pane leaves its first line");
+    assert!(read_paged.contains("line-20"), "PageDown advances the PR read body:\n{read_paged}");
+    assert!(read_paged.contains("check-00"), "read paging leaves navigator paging unchanged");
 }
 
 #[test]

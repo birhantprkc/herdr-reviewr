@@ -8,12 +8,15 @@ use std::cell::RefCell;
 use anyhow::{Result, bail};
 use common::{Repo, app_on, typed};
 use herdr_reviewr::app::{App, Focus, FooterAction, Mode, Tier};
+use herdr_reviewr::config::NavigatorPosition;
 use herdr_reviewr::export::ExportTarget;
 use herdr_reviewr::keymap::{Action, Keymap};
 use herdr_reviewr::model::{Scope, Side};
 use herdr_reviewr::turn::Status;
 use herdr_reviewr::{handle_key, handle_mouse};
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+use ratatui::crossterm::event::{
+    KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use ratatui::layout::Rect;
 
 /// An export target that records what it was handed and can be made to fail.
@@ -659,6 +662,10 @@ fn comment_on(app: &mut App, marker: char, text: &str) {
     app.focus = Focus::Diff;
     app.diff_cursor = row_with(app, marker);
     app.start_comment();
+    assert!(
+        !app.footer_actions().iter().any(|&(a, _)| a == FooterAction::NavigatorPosition),
+        "the composer owns its footer"
+    );
     for ch in text.chars() {
         app.input_push(ch);
     }
@@ -1226,25 +1233,237 @@ fn arrows_collapse_and_expand_a_folder() {
 }
 
 #[test]
-fn the_pane_divider_resizes_and_clamps() {
+fn divider_drag_math_and_keyboard_clamps_follow_all_four_positions() {
     let r = edited_repo();
     let mut app = app_on(&r);
-    let start = app.list_pct;
-    app.resize_list(4);
-    assert_eq!(app.list_pct, start + 4, "[ / ] step the divider");
-    // Clamps: never collapses either pane however far it is pushed.
-    for _ in 0..50 {
-        app.resize_list(4);
-    }
-    assert!(app.list_pct <= 60, "the file list never swallows the diff");
-    for _ in 0..50 {
-        app.resize_list(-4);
-    }
-    assert!(app.list_pct >= 15, "the diff never swallows the file list");
+    let area = Rect::new(0, 0, 100, 102); // a 100-cell split axis in either direction
+    let body = herdr_reviewr::ui::body_rect(area);
+    let heights = vec![1usize; app.visible.len()];
+    let keymap = Keymap::default();
+    let event = |kind, column, row| MouseEvent { kind, column, row, modifiers: KeyModifiers::NONE };
 
-    // A drag sets the width from the divider's body column.
-    app.drag_divider(100, 70); // list spans columns 70..100 → 30%
-    assert_eq!(app.list_pct, 30);
+    for (position, target_column, target_row) in [
+        (NavigatorPosition::Right, body.x + 60, body.y + 50),
+        (NavigatorPosition::Left, body.x + 40, body.y + 50),
+        (NavigatorPosition::Bottom, body.x + 50, body.y + 60),
+        (NavigatorPosition::Top, body.x + 50, body.y + 40),
+    ] {
+        app.navigator_position = position;
+        app.navigator_side_pct = 32;
+        app.navigator_stack_pct = 25;
+        let divider = (body.y..body.y + body.height)
+            .flat_map(|row| (body.x..body.x + body.width).map(move |column| (column, row)))
+            .find(|&(column, row)| herdr_reviewr::ui::hit_divider(area, &app, column, row))
+            .unwrap();
+        handle_mouse(
+            &mut app,
+            event(MouseEventKind::Down(MouseButton::Left), divider.0, divider.1),
+            area,
+            &heights,
+            &keymap,
+        )
+        .unwrap();
+        handle_mouse(
+            &mut app,
+            event(MouseEventKind::Drag(MouseButton::Left), target_column, target_row),
+            area,
+            &heights,
+            &keymap,
+        )
+        .unwrap();
+        handle_mouse(
+            &mut app,
+            event(MouseEventKind::Up(MouseButton::Left), target_column, target_row),
+            area,
+            &heights,
+            &keymap,
+        )
+        .unwrap();
+        assert_eq!(app.navigator_share(), 40, "event-level drag math for {position:?}");
+        assert!(!app.divider_drag_active());
+        assert!(!app.divider_drag_cancelled(), "mouse-up releases capture for {position:?}");
+        if position.stacked() {
+            assert_eq!(app.navigator_side_pct, 32, "stacked drag leaves side share alone");
+        } else {
+            assert_eq!(app.navigator_stack_pct, 25, "side drag leaves stacked share alone");
+        }
+
+        for _ in 0..20 {
+            app.resize_navigator(4);
+        }
+        assert_eq!(
+            app.navigator_share(),
+            if position.stacked() { 50 } else { 60 },
+            "maximum for {position:?}"
+        );
+        for _ in 0..20 {
+            app.resize_navigator(-4);
+        }
+        assert_eq!(app.navigator_share(), 15, "minimum for {position:?}");
+    }
+
+    // Even direct state mutation cannot reinterpret a captured drag on another axis.
+    app.navigator_position = NavigatorPosition::Right;
+    app.navigator_side_pct = 32;
+    app.navigator_stack_pct = 25;
+    app.start_divider_drag();
+    app.navigator_position = NavigatorPosition::Bottom;
+    app.drag_divider(100, 60);
+    assert_eq!(app.navigator_side_pct, 32);
+    assert_eq!(app.navigator_stack_pct, 25);
+    assert!(app.divider_drag_cancelled());
+}
+
+#[test]
+fn navigator_actions_cycle_remember_shares_and_respect_modes() {
+    let r = edited_repo();
+    let mut app = app_on(&r);
+    let keymap = Keymap::default();
+    app.focus = Focus::Diff;
+    app.diff_cursor = row_with(&app, '+');
+    app.diff_scroll = 1;
+    let cursor = app.diff_cursor;
+
+    press(&mut app, &keymap, KeyCode::Char('p'));
+    assert_eq!(app.navigator_position, NavigatorPosition::Bottom);
+    assert_eq!(app.focus, Focus::Diff);
+    assert_eq!(app.diff_cursor, cursor);
+    assert_eq!(app.diff_scroll, 1);
+
+    press(&mut app, &keymap, KeyCode::Char('<'));
+    assert_eq!(app.navigator_stack_pct, 29);
+    press(&mut app, &keymap, KeyCode::Char('p'));
+    assert_eq!(app.navigator_position, NavigatorPosition::Left);
+    assert_eq!(app.navigator_side_pct, 32, "switching axis restores the side share");
+    press(&mut app, &keymap, KeyCode::Char('<'));
+    assert_eq!(app.navigator_side_pct, 36);
+    press(&mut app, &keymap, KeyCode::Char('p'));
+    assert_eq!(app.navigator_position, NavigatorPosition::Top);
+    assert_eq!(app.navigator_stack_pct, 29, "the stacked share is remembered");
+    press(&mut app, &keymap, KeyCode::Char('p'));
+    assert_eq!(app.navigator_position, NavigatorPosition::Right);
+    assert_eq!(app.navigator_side_pct, 36, "the side share is remembered");
+
+    app.start_comment();
+    press(&mut app, &keymap, KeyCode::Char('p'));
+    assert_eq!(app.input, "p", "the position key is text in the composer");
+    assert_eq!(app.navigator_position, NavigatorPosition::Right);
+    app.cancel_comment();
+
+    app.mode = Mode::List;
+    assert!(
+        !app.footer_actions().iter().any(|&(a, _)| a == FooterAction::NavigatorPosition),
+        "the comments list owns its footer"
+    );
+    press(&mut app, &keymap, KeyCode::Char('p'));
+    assert_eq!(app.navigator_position, NavigatorPosition::Right, "the action is inert in list");
+    app.mode = Mode::Normal;
+    app.set_tab(herdr_reviewr::app::Tab::Pr).unwrap();
+    press(&mut app, &keymap, KeyCode::Char('p'));
+    assert_eq!(app.navigator_position, NavigatorPosition::Bottom, "the action works on PR");
+    assert!(
+        app.footer_actions().iter().any(|&(a, _)| a == FooterAction::NavigatorPosition),
+        "the PR footer exposes the position action"
+    );
+}
+
+#[test]
+fn divider_drag_cancels_until_mouse_up() {
+    let r = edited_repo();
+    let mut app = app_on(&r);
+    let keymap = Keymap::default();
+    let area = Rect::new(0, 0, 120, 40);
+    let body = herdr_reviewr::ui::body_rect(area);
+    let row = body.y + body.height / 2;
+    let divider = (body.x..body.x + body.width)
+        .find(|&col| herdr_reviewr::ui::hit_divider(area, &app, col, row))
+        .unwrap();
+    let heights = vec![1usize; app.visible.len()];
+    let event = |kind, column, row| MouseEvent { kind, column, row, modifiers: KeyModifiers::NONE };
+
+    handle_mouse(
+        &mut app,
+        event(MouseEventKind::Down(MouseButton::Left), divider, row),
+        area,
+        &heights,
+        &keymap,
+    )
+    .unwrap();
+    handle_mouse(
+        &mut app,
+        event(MouseEventKind::Drag(MouseButton::Left), 70, row),
+        area,
+        &heights,
+        &keymap,
+    )
+    .unwrap();
+    let resized = app.navigator_side_pct;
+    assert_ne!(resized, 32);
+
+    press(&mut app, &keymap, KeyCode::Tab);
+    assert!(app.divider_drag_cancelled());
+    handle_mouse(
+        &mut app,
+        event(MouseEventKind::Drag(MouseButton::Left), 10, body.y + 2),
+        area,
+        &heights,
+        &keymap,
+    )
+    .unwrap();
+    assert_eq!(app.navigator_side_pct, resized);
+    assert_eq!(app.select_anchor, None, "a cancelled resize never becomes a selection");
+
+    handle_mouse(
+        &mut app,
+        event(MouseEventKind::Up(MouseButton::Left), 10, body.y + 2),
+        area,
+        &heights,
+        &keymap,
+    )
+    .unwrap();
+    assert!(!app.divider_drag_cancelled());
+
+    // Opening a modal is a keypress cancellation; its mouse-up must still release capture.
+    app.focus = Focus::Diff;
+    app.diff_cursor = row_with(&app, '+');
+    app.start_divider_drag();
+    press(&mut app, &keymap, KeyCode::Char('c'));
+    assert!(app.composing());
+    assert!(app.divider_drag_cancelled());
+    handle_mouse(
+        &mut app,
+        event(MouseEventKind::Up(MouseButton::Left), divider, row),
+        area,
+        &heights,
+        &keymap,
+    )
+    .unwrap();
+    assert!(!app.divider_drag_cancelled());
+}
+
+#[test]
+fn navigator_config_changes_override_only_when_the_config_value_changes() {
+    let r = edited_repo();
+    let mut app = app_on(&r);
+    let default = herdr_reviewr::config::PluginConfig::default();
+    app.set_plugin_config(default.clone());
+    app.cycle_navigator_position();
+    assert_eq!(app.navigator_position, NavigatorPosition::Bottom);
+
+    app.set_plugin_config(default);
+    assert_eq!(
+        app.navigator_position,
+        NavigatorPosition::Bottom,
+        "an unchanged config preserves the session override"
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("config.toml"), "navigator_position = \"left\"\n").unwrap();
+    let changed = herdr_reviewr::config::plugin_config_in(dir.path()).unwrap();
+    app.start_divider_drag();
+    app.set_plugin_config(changed);
+    assert_eq!(app.navigator_position, NavigatorPosition::Left);
+    assert!(app.divider_drag_cancelled(), "a config layout change cancels the old gesture");
 }
 
 #[test]
@@ -2095,7 +2314,7 @@ fn switching_to_an_empty_file_view_focuses_the_tree() {
     app.focus = Focus::Diff; // reader is in the diff pane on the deletion
     app.set_tab(Tab::AllFiles).unwrap();
     assert!(app.visible.is_empty(), "the deleted file's content view is empty");
-    assert_eq!(app.focus, Focus::Files, "an empty left pane focuses the tree, not traps the keys");
+    assert_eq!(app.focus, Focus::Files, "an empty read pane focuses the tree, not traps the keys");
 }
 
 #[test]
@@ -2398,11 +2617,11 @@ fn the_traversal_keys_dispatch_and_rebind() {
 
     // `]` and `[` no longer resize. The divider follows the key: `<` moves it left, widening
     // the file list on the right, and `>` moves it back.
-    let start = app.list_pct;
+    let start = app.navigator_side_pct;
     press(&mut app, &keymap, KeyCode::Char('<'));
-    assert!(app.list_pct > start, "`<` moves the divider left, widening the file list");
+    assert!(app.navigator_side_pct > start, "`<` grows the navigator");
     press(&mut app, &keymap, KeyCode::Char('>'));
-    assert_eq!(app.list_pct, start, "`>` moves it back right");
+    assert_eq!(app.navigator_side_pct, start, "`>` shrinks it again");
 
     // Every traversal action is rebindable, like the rest of the keymap.
     let rebound = Keymap::resolve(&[(Action::NextFile, vec!['ㅁ'])]).unwrap();

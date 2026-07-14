@@ -72,10 +72,10 @@ See [Auto-open and layout plugins](#auto-open-and-layout-plugins) for the layout
 
 The core loop takes five keys. Open the sidebar next to your agent and:
 
-1. **Pick a file.** The agent's changed files are in the right pane. `j` / `k` moves the cursor.
-   The diff opens on the left as you go. Or press `]` to walk the changes hunk by hunk, file
-   after file.
-2. **Focus the diff.** Press `Tab` to move from the file list into the diff.
+1. **Pick a file.** The agent's changed files are in the navigator (on the right by default).
+   `j` / `k` moves the cursor. The diff opens in the read pane as you go. Or press `]` to walk
+   the changes hunk by hunk, file after file.
+2. **Focus the diff.** Press `Tab` to move from the navigator into the read pane.
 3. **Select the lines.** Press `v`, then `j` / `k` to extend the selection (or click-drag).
 4. **Comment.** Press `c`, type your note, `Enter` to save. It stays on screen as a card under
    the line.
@@ -101,11 +101,12 @@ several keys at once ([Keybindings](#keybindings)).
 | `f` `F` | Jump to the next / previous file |
 | `PageUp` `PageDown` | Move a page |
 | `Ctrl+U` `Ctrl+D` | Move a half-page |
-| `Tab` | Switch focus between the file list and the diff |
+| `Tab` | Switch focus between the navigator and read pane |
 | `→` `←` | Expand or collapse a directory or fold, or scroll the diff sideways |
 | `w` | Toggle line wrap |
 | `m` | Toggle the markdown preview of a `.md` file (Changes or All files) |
-| `<` `>` | Move the pane divider left / right |
+| `p` | Move the navigator clockwise: right / bottom / left / top |
+| `<` `>` | Grow / shrink the navigator |
 | `r` | Refresh now |
 | `q` | Quit |
 
@@ -138,7 +139,7 @@ Plus the usual caret moves: arrows, `Home` / `End`, `Ctrl+A` / `Ctrl+E`, word-ju
 | Key | Action |
 | --- | --- |
 | `j` `k` | Move through the description and comments |
-| `PageUp` `PageDown` | Scroll the read pane |
+| `PageUp` `PageDown` | Scroll the focused pane |
 | `o` | Open the PR in your browser |
 | `r` | Refresh |
 
@@ -151,7 +152,7 @@ click (`http`/`https` only), and an anchor link (`#section`) jumps to its headin
 - **Changes** — the changed files for the active scope, with `+/-` stats per file and their
   totals in the header. Pick a file to read its syntax-highlighted diff. This is where you review and comment. On a `.md` file, `m` opens a
   rendered preview of it. Press `m` again to return to the diff where you left off.
-- **All files** — the whole worktree tree, not only what changed. The diff pane renders any
+- **All files** — the whole worktree tree, not only what changed. The read pane renders any
   file's current content. Git-ignored paths show too, dimmed. A directory ignored as a whole
   (`target/`, `node_modules/`) is one collapsed row that loads its contents only when you expand
   it. You can comment here as well. On a `.md` file, `m` flips between the source and a rendered
@@ -204,12 +205,13 @@ Create the file if it does not exist yet. herdr hands this directory to the plug
 reviewr's file, not herdr's. Settings added to herdr's own `~/.config/herdr/config.toml` never
 reach reviewr.
 
-The file accepts these eight keys:
+The file accepts these nine keys:
 
 ```toml
 theme = "tokyo-night"
 base_branches = ["origin/develop", "origin/main", "main", "master"]
 default_scope = "branch"
+navigator_position = "right"
 toggle_placement = "overlay"
 toggle_direction = "down"
 auto_open = false
@@ -247,6 +249,19 @@ on a dark terminal reads poorly, and so does the reverse. Available:
 
 Names match herdr's where both ship a palette. An unknown config name is an error. The standalone
 `--theme` development flag retains its older fallback to `catppuccin`.
+
+### Navigator position
+
+The navigator starts on the right. Set `navigator_position` to `right`, `bottom`, `left`, or
+`top`, or press `p` to cycle clockwise during a session:
+
+```toml
+navigator_position = "bottom"
+```
+
+Side layouts start at 32% of the body width and clamp to 15–60%. Stacked layouts start at 25%
+of the body height and clamp to 15–50%. reviewr remembers one session size for side layouts and
+another for stacked layouts. Press `<` to grow the navigator, `>` to shrink it, or drag the divider.
 
 ### Base branch
 
@@ -297,7 +312,8 @@ The action names and their defaults:
 | `tab-changes` / `tab-all-files` / `tab-pr` | `1` / `2` / `3` |
 | `wrap` | `w` |
 | `preview` | `m` |
-| `list-wider` / `list-narrower` | `<` / `>` |
+| `navigator-position` | `p` |
+| `navigator-grow` / `navigator-shrink` | `<` / `>` |
 | `select` | `v` |
 | `comment` | `c` |
 | `edit` / `delete` | `e` / `d` |
@@ -313,6 +329,9 @@ A key is one character, and any printable character works. The arrows, `Tab`, `E
 and the page keys are fixed and always work. Keys still type normally in the comment box. Two
 actions can never share a key. A collision makes the whole file invalid, and the error names
 both actions, so a typo can't silently shadow another shortcut.
+
+`list-wider` and `list-narrower` remain accepted aliases for `navigator-grow` and
+`navigator-shrink`; normalized config output uses the canonical names.
 
 ### GitHub hosts
 

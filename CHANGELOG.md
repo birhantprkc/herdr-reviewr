@@ -4,6 +4,24 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.17.0] — 2026-07-14
+
+### Added
+- **Four-way navigator placement.** The navigator can sit on the right, bottom, left, or top of
+  every tab. Press `p` to cycle clockwise, or set `navigator_position` in plugin config. Side and
+  stacked layouts remember separate sizes, with `<` / `>` and divider dragging available on both
+  axes. (#16)
+- **Independent PR navigator scrolling.** The checks and comments viewport scrolls without moving
+  its selection. `Tab` changes pane focus, and page keys scroll the focused PR pane.
+
+### Changed
+- **Navigator resize actions have position-neutral names.** Config uses `navigator-grow` and
+  `navigator-shrink`; `list-wider` and `list-narrower` remain accepted aliases.
+- **Breaking: `p` is a new default key.** A custom binding that already uses `p` now collides with
+  `navigator-position` and must be moved before the config becomes valid again.
+
 ## [0.16.1] — 2026-07-13
 
 ### Fixed

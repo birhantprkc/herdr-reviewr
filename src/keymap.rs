@@ -21,8 +21,9 @@ pub enum Action {
     TabPr,
     Wrap,
     Preview,
-    ListWider,
-    ListNarrower,
+    NavigatorPosition,
+    NavigatorGrow,
+    NavigatorShrink,
     Select,
     Comment,
     Edit,
@@ -39,7 +40,7 @@ pub enum Action {
 
 /// Every action with its config name and default keys — the single source the default keymap,
 /// the name lookup, and the config error message are built from.
-const ACTIONS: [(Action, &str, &[char]); 28] = [
+const ACTIONS: [(Action, &str, &[char]); 29] = [
     (Action::Down, "down", &['j']),
     (Action::Up, "up", &['k']),
     (Action::NextHunk, "next-hunk", &[']']),
@@ -54,10 +55,9 @@ const ACTIONS: [(Action, &str, &[char]); 28] = [
     (Action::TabPr, "tab-pr", &['3']),
     (Action::Wrap, "wrap", &['w']),
     (Action::Preview, "preview", &['m']),
-    // The key points where the divider goes: `<` moves it left, which widens the file list on
-    // the right; `>` moves it right, which narrows it.
-    (Action::ListWider, "list-wider", &['<']),
-    (Action::ListNarrower, "list-narrower", &['>']),
+    (Action::NavigatorPosition, "navigator-position", &['p']),
+    (Action::NavigatorGrow, "navigator-grow", &['<']),
+    (Action::NavigatorShrink, "navigator-shrink", &['>']),
     (Action::Select, "select", &['v']),
     (Action::Comment, "comment", &['c']),
     (Action::Edit, "edit", &['e']),
@@ -81,6 +81,15 @@ impl Action {
     /// The action named `name` in `[keybindings]`, if any.
     pub fn by_name(name: &str) -> Option<Self> {
         ACTIONS.iter().find(|(_, n, _)| *n == name).map(|(action, ..)| *action)
+    }
+
+    /// The canonical or legacy config name for one action.
+    pub fn by_config_name(name: &str) -> Option<Self> {
+        match name {
+            "list-wider" => Some(Self::NavigatorGrow),
+            "list-narrower" => Some(Self::NavigatorShrink),
+            _ => Self::by_name(name),
+        }
     }
 
     /// Every action name, in keymap-table order, for the unknown-action error message.
@@ -184,9 +193,12 @@ mod tests {
         assert_eq!(keymap.action_for('c'), Some(Action::Comment));
         assert_eq!(keymap.action_for('S'), Some(Action::Send));
         assert_eq!(keymap.action_for('m'), Some(Action::Preview));
+        assert_eq!(keymap.action_for('p'), Some(Action::NavigatorPosition));
         assert_eq!(keymap.action_for('x'), None);
         assert_eq!(keymap.hint(Action::Send), 's');
         assert_eq!(keymap.hint(Action::TabPr), '3');
+        assert_eq!(Action::by_config_name("list-wider"), Some(Action::NavigatorGrow));
+        assert_eq!(Action::by_config_name("list-narrower"), Some(Action::NavigatorShrink));
     }
 
     #[test]

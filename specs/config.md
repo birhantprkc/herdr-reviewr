@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-07-10
-Last edited: 2026-07-13
+Last edited: 2026-07-14
 ---
 
 # Configuration
@@ -16,6 +16,7 @@ The plugin config is one typed value. A valid file may set any subset of the sup
 theme = "tokyo-night"
 base_branches = ["origin/develop", "origin/main", "main", "master"]
 default_scope = "branch"
+navigator_position = "bottom"
 toggle_placement = "overlay"
 toggle_direction = "down"
 auto_open = false
@@ -26,16 +27,17 @@ comment = ["c", "ㅊ"]
 select  = ["v", "ㅍ"]
 ```
 
-| key                | value                                                                        |
-| ------------------ | ---------------------------------------------------------------------------- |
-| `theme`            | one name from the theme set in `theme.md`                                    |
-| `base_branches`    | non-empty array of non-empty ref names                                       |
-| `default_scope`    | `uncommitted`, `branch`, or `last-turn`                                      |
-| `toggle_placement` | `split`, `overlay`, `zoomed`, or `tab`                                       |
-| `toggle_direction` | `right` or `down`                                                            |
-| `auto_open`        | boolean                                                                      |
-| `github_host`      | bare hostname outside the `github.com` and `github.com-*` namespace          |
-| `keybindings`      | table of actions from the keymap in `tui.md`, each a non-empty array of keys |
+| key                  | value                                                                        |
+| -------------------- | ---------------------------------------------------------------------------- |
+| `theme`              | one name from the theme set in `theme.md`                                    |
+| `base_branches`      | non-empty array of non-empty ref names                                       |
+| `default_scope`      | `uncommitted`, `branch`, or `last-turn`                                      |
+| `navigator_position` | `right` (default), `left`, `top`, or `bottom`                                |
+| `toggle_placement`   | `split`, `overlay`, `zoomed`, or `tab`                                       |
+| `toggle_direction`   | `right` or `down`                                                            |
+| `auto_open`          | boolean                                                                      |
+| `github_host`        | bare hostname outside the `github.com` and `github.com-*` namespace          |
+| `keybindings`        | table of actions from the keymap in `tui.md`, each a non-empty array of keys |
 
 ## Behavior
 
@@ -46,7 +48,7 @@ select  = ["v", "ㅍ"]
 | C3 | An unknown key makes the whole file invalid.                                            |
 | C4 | An invalid value makes the whole file invalid.                                          |
 | C5 | An invalid file applies none of its keys.                                               |
-| C6 | Every sidebar, action, and event validates the whole file before doing its normal work. |
+| C6 | Every sidebar frame, manual action, and plugin event validates the whole file first.   |
 | C7 | An entrypoint that observes an invalid file performs none of its normal work.           |
 | C8 | One operation or refresh uses one validated config snapshot.                            |
 
@@ -62,6 +64,8 @@ An error names the config path and the read, syntax, key, or value failure. It s
 
 The sidebar reads the file at startup and on every refresh. While blocked, it starts no new review work and performs the config reads needed to detect a fix.
 
+`navigator_position` sets the position at startup and after config recovery. The `navigator-position` action may change it for the current session. A later valid config snapshot replaces the session position only when its `navigator_position` differs from the previous valid snapshot. An unchanged reread or an edit to another config key preserves the session position. Recovery reapplies the configured position and preserves both session navigator shares.
+
 The `PR` tab's fetch is not a config read. It runs under the sidebar's current snapshot (→ C8).
 
 `--resolve-plugin-config` prints the validated config as JSON, every key included, the keymap resolved.
@@ -76,6 +80,12 @@ Config writers must build a complete file beside `config.toml`, then replace it 
 
 `[keybindings]` rebinds the character shortcuts. The resolved keymap is the default keymap with each bound action's characters replaced by its binding.
 
+`list-wider` and `list-narrower` remain accepted aliases for `navigator-grow` and `navigator-shrink`. A config that names an action and its alias is invalid as a duplicate action. Resolved config output uses the canonical names.
+
+An existing custom binding does not displace a newly added default. If an upgrade creates a collision in the resolved keymap, the config is invalid under K2. The error names both actions and the shared character.
+
+The sidebar validates before drawing each frame. That frame and the next input event use the resulting config and layout snapshot. A file change after drawing affects the following frame.
+
 | #  | Always true                                                          |
 | -- | -------------------------------------------------------------------- |
 | K1 | A key is one codepoint, printable and not whitespace.                |
@@ -84,7 +94,7 @@ Config writers must build a complete file beside `config.toml`, then replace it 
 
 An unknown action name is an unknown key (→ C3). A K1 or K2 violation is an invalid value (→ C4). A collision error names each action involved.
 
-The frame on screen and the keys it answers use one snapshot (→ C8). A blocked sidebar answers only the default `quit` key.
+A blocked sidebar answers only the default `quit` key.
 
 ## Traces
 

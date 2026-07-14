@@ -172,6 +172,44 @@ struct ActiveFetch {
     cancelled: Arc<AtomicBool>,
 }
 
+/// The config and layout that produced the visible frame. Input dispatches only while these
+/// values still match, so a late observation can never reinterpret painted keys or geometry.
+#[derive(Debug)]
+struct PaintedFrameSnapshot {
+    plugin_config: Option<PluginConfig>,
+    config_error: Option<String>,
+    navigator_position: crate::config::NavigatorPosition,
+    navigator_side_pct: u16,
+    navigator_stack_pct: u16,
+}
+
+impl PaintedFrameSnapshot {
+    fn capture(app: &App) -> Self {
+        Self {
+            plugin_config: app.plugin_config().cloned(),
+            config_error: app.config_error().map(str::to_owned),
+            navigator_position: app.navigator_position,
+            navigator_side_pct: app.navigator_side_pct,
+            navigator_stack_pct: app.navigator_stack_pct,
+        }
+    }
+
+    fn still_current(&self, app: &App) -> bool {
+        self.plugin_config.as_ref() == app.plugin_config()
+            && self.config_error.as_deref() == app.config_error()
+            && self.navigator_position == app.navigator_position
+            && self.navigator_side_pct == app.navigator_side_pct
+            && self.navigator_stack_pct == app.navigator_stack_pct
+    }
+
+    fn keymap(&self) -> &Keymap {
+        match &self.plugin_config {
+            Some(config) => config.keymap(),
+            None => keymap::default_keymap(),
+        }
+    }
+}
+
 impl PrCoordinator {
     fn new(ready: bool) -> Self {
         Self {
@@ -325,8 +363,6 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
     let (pr_tx, pr_rx) = mpsc::channel::<TaggedPr>();
     let mut pr = PrCoordinator::new(app.plugin_config().is_some());
     let mut config_epoch = 0_u64;
-    let mut validate_before_draw = true;
-    let mut frame_keymap = app.keymap().clone();
     let mut status_at = Instant::now();
     let mut last_status = String::new();
     // Fetch the PR snapshot as soon as the panel opens, not on first switching to the tab, so the
@@ -355,20 +391,16 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
             }
         }
 
-        // Revalidate after synchronous work before its result may paint. Worker completions,
-        // input dispatch, and the ordinary poll each validate at their own boundary below, so a
-        // slow `gh` request does not turn the 100 ms completion wake-up into repeated TOML I/O.
-        if validate_before_draw {
-            reconcile_plugin_config(
-                app,
-                cfg,
-                &mut config_epoch,
-                &recovery_tx,
-                &mut recovery_inflight,
-                &mut pr,
-            );
-            validate_before_draw = false;
-        }
+        // Every frame starts from one complete validated config snapshot. Input below uses the
+        // keymap and geometry this draw paints; later observations continue before another input.
+        reconcile_plugin_config(
+            app,
+            cfg,
+            &mut config_epoch,
+            &recovery_tx,
+            &mut recovery_inflight,
+            &mut pr,
+        );
         if pr.wait_started.is_some_and(|started| started.elapsed() >= PR_LOADING_DELAY) {
             app.set_pr_refreshing(true);
             pr.wait_started = None;
@@ -390,9 +422,9 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
         // keep revealing so the anchored line stays above the growing box.
         let size = terminal.size()?;
         let area = Rect::new(0, 0, size.width, size.height);
-        let viewport = ui::diff_viewport_height(area, app.list_pct);
+        let viewport = ui::diff_viewport_height(area, app);
         let effective = if app.composing() {
-            let box_h = ui::composer_height(app, ui::diff_inner_width(area, app.list_pct));
+            let box_h = ui::composer_height(app, ui::diff_inner_width(area, app));
             viewport.saturating_sub(box_h).max(1)
         } else {
             viewport
@@ -402,17 +434,13 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
             app.reveal_diff_cursor(&heights, effective);
         }
         app.bound_diff_scroll(&heights, effective);
-        let file_vp = ui::file_viewport_height(area, app.list_pct);
+        let file_vp = ui::file_viewport_height(area, app);
         if std::mem::take(&mut app.reveal_files) {
             app.reveal_file_cursor(file_vp);
         }
         app.bound_file_scroll(file_vp);
+        let painted_frame = PaintedFrameSnapshot::capture(app);
         terminal.draw(|f| ui::render(f, app))?;
-        // Input dispatches under the keymap this frame rendered its hints from, so a config swap
-        // between the draw and the press or click cannot fire a different action than the frame
-        // advertised (`specs/config.md`: the frame on screen and the keys it answers use one
-        // snapshot).
-        frame_keymap.clone_from(app.keymap());
         // A fetch completion waits for a fresh local-input probe before it may paint.
         if let Ok(completion) = pr_rx.try_recv() {
             let tag = (completion.generation, completion.config_epoch);
@@ -436,6 +464,9 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
                 }
                 pr.probe_pending = true;
             }
+            if config_gate != ConfigGate::Unchanged {
+                continue;
+            }
         }
 
         // A probe result is the authority for the current input. Input changes blank the old PR;
@@ -453,6 +484,7 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
                 &mut recovery_inflight,
                 &mut pr,
             );
+            let mut repaint = false;
             if !config_gate.pr_unchanged() || epoch != config_epoch {
                 if config_gate == ConfigGate::Unchanged && epoch != config_epoch {
                     pr.config_changed(app.tab == crate::app::Tab::Pr);
@@ -461,30 +493,10 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
                 pr.discard_probe_result = false;
                 pr.probe_pending = true;
             } else {
-                match result {
-                    Err(error) => {
-                        app.apply_pr(crate::forge::PrView::Error(error));
-                        pr.wait_started = None;
-                    }
-                    Ok(input) => {
-                        match pr.refresh.observed(
-                            input,
-                            config_epoch,
-                            app.tab == crate::app::Tab::Pr,
-                        ) {
-                            Some(PrEffect::Clear) => {
-                                app.clear_pr();
-                                pr.wait_started =
-                                    (app.tab == crate::app::Tab::Pr).then(Instant::now);
-                            }
-                            Some(PrEffect::Apply(view)) => {
-                                app.apply_pr(view);
-                                pr.wait_started = None;
-                            }
-                            None => {}
-                        }
-                    }
-                }
+                repaint = apply_pr_probe_result(app, &mut pr, result, config_epoch);
+            }
+            if config_gate != ConfigGate::Unchanged || repaint {
+                continue;
             }
         }
 
@@ -544,34 +556,19 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
             timeout = timeout.min(PR_LOADING_DELAY.saturating_sub(started.elapsed()));
         }
         if event::poll(timeout)? {
-            match event::read()? {
+            if !painted_frame.still_current(app) {
+                continue;
+            }
+            let event = event::read()?;
+            if app.config_error().is_some() {
+                handle_blocked_event(app, &event);
+                continue;
+            }
+            match event {
                 Event::Key(k) if k.kind == KeyEventKind::Press => {
-                    if app.config_error().is_some() {
-                        // A blocked sidebar answers only the default `quit` key, derived from
-                        // the default keymap so a changed default can't strand the error screen
-                        // (`specs/config.md`).
-                        if let KeyCode::Char(c) = k.code
-                            && keymap::default_keymap().action_for(c) == Some(keymap::Action::Quit)
-                        {
-                            app.should_quit = true;
-                        }
-                        continue;
-                    }
-                    let config_gate = reconcile_plugin_config(
-                        app,
-                        cfg,
-                        &mut config_epoch,
-                        &recovery_tx,
-                        &mut recovery_inflight,
-                        &mut pr,
-                    );
-                    if !config_gate.ready() {
-                        continue;
-                    }
-                    if let Err(e) = handle_key(app, k, area, &frame_keymap) {
+                    if let Err(e) = handle_key(app, k, area, painted_frame.keymap()) {
                         app.status = format!("error: {e}");
                     }
-                    validate_before_draw = true;
                     logln!(
                         "key {:?}{} -> mode={:?} focus={:?} scope={:?} file={}/{} diff_cursor={} scroll={} comments={}",
                         k.code,
@@ -591,23 +588,11 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
                     );
                 }
                 Event::Mouse(m) => {
-                    let config_gate = reconcile_plugin_config(
-                        app,
-                        cfg,
-                        &mut config_epoch,
-                        &recovery_tx,
-                        &mut recovery_inflight,
-                        &mut pr,
-                    );
-                    if !config_gate.ready() {
-                        continue;
-                    }
                     // Reuse this frame's `area` and `heights` (computed above for the scroll
                     // settle) so a drag-select doesn't re-measure the whole diff per motion.
-                    if let Err(e) = handle_mouse(app, m, area, &heights, &frame_keymap) {
+                    if let Err(e) = handle_mouse(app, m, area, &heights, painted_frame.keymap()) {
                         app.status = format!("error: {e}");
                     }
-                    validate_before_draw = true;
                     logln!(
                         "mouse {:?} col={} row={} -> focus={:?} file={} diff_cursor={} scroll={} anchor={:?}",
                         m.kind,
@@ -622,20 +607,11 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
                 }
                 // Bracketed paste: insert at the caret while composing, ignored otherwise.
                 Event::Paste(text) => {
-                    let config_gate = reconcile_plugin_config(
-                        app,
-                        cfg,
-                        &mut config_epoch,
-                        &recovery_tx,
-                        &mut recovery_inflight,
-                        &mut pr,
-                    );
-                    if !config_gate.ready() {
-                        continue;
-                    }
                     app.input_paste(&text);
-                    validate_before_draw = true;
                     logln!("paste {} chars -> composing={}", text.len(), app.composing());
+                }
+                Event::Resize(_, _) => {
+                    handle_resize(app);
                 }
                 _ => {}
             }
@@ -668,7 +644,6 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
             {
                 app.status = format!("refresh failed: {e}");
             }
-            validate_before_draw = true;
             logln!(
                 "poll files={} composing={} diff_cursor={} scroll={}",
                 app.entries.len(),
@@ -680,6 +655,58 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
         }
     }
     Ok(())
+}
+
+/// A blocked frame accepts no normal input. Quit remains available, and terminal/pointer cleanup
+/// may release state that was captured before the config became invalid.
+fn handle_blocked_event(app: &mut App, event: &Event) {
+    match event {
+        Event::Key(k) if k.kind == KeyEventKind::Press => {
+            if let KeyCode::Char(c) = k.code
+                && keymap::default_keymap().action_for(c) == Some(keymap::Action::Quit)
+            {
+                app.should_quit = true;
+            }
+        }
+        Event::Mouse(MouseEvent { kind: MouseEventKind::Up(MouseButton::Left), .. })
+            if app.divider_drag_captured() =>
+        {
+            app.finish_divider_drag();
+        }
+        Event::Resize(_, _) => handle_resize(app),
+        _ => {}
+    }
+}
+
+/// Apply a verified PR probe result and report whether the painted model changed. The event loop
+/// must repaint before accepting input whenever this returns true.
+fn apply_pr_probe_result(
+    app: &mut App,
+    pr: &mut PrCoordinator,
+    result: Result<crate::forge::PrFetchInput, String>,
+    config_epoch: u64,
+) -> bool {
+    match result {
+        Err(error) => {
+            app.apply_pr(crate::forge::PrView::Error(error));
+            pr.wait_started = None;
+            true
+        }
+        Ok(input) => match pr.refresh.observed(input, config_epoch, app.tab == crate::app::Tab::Pr)
+        {
+            Some(PrEffect::Clear) => {
+                app.clear_pr();
+                pr.wait_started = (app.tab == crate::app::Tab::Pr).then(Instant::now);
+                true
+            }
+            Some(PrEffect::Apply(view)) => {
+                app.apply_pr(view);
+                pr.wait_started = None;
+                true
+            }
+            None => false,
+        },
+    }
 }
 
 fn reconcile_plugin_config(
@@ -801,16 +828,15 @@ pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> 
     };
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
-    // A keypress ends any in-progress divider drag, so opening a modal mid-drag (which makes
-    // the mouse handler ignore the releasing Up) can't strand `resizing` true.
-    app.resizing = false;
+    // A keypress cancels the gesture but keeps consuming its drag events until mouse-up.
+    app.cancel_divider_drag();
 
     if app.composing() {
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         let alt_or_shift = key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT);
         let word = alt || ctrl; // word-jump on Alt/Ctrl + arrow (terminal-dependent)
         // The wrapped width of the box, for vertical (wrapped-row) caret movement.
-        let cw = ui::composer_content_width(ui::diff_inner_width(area, app.list_pct));
+        let cw = ui::composer_content_width(ui::diff_inner_width(area, app));
         match key.code {
             Esc => app.cancel_comment(),
             // Alt/Shift+Enter (and Ctrl+J) insert a newline; plain Enter submits.
@@ -869,9 +895,14 @@ pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> 
             (Some(K::TabChanges), _) => app.set_tab(crate::app::Tab::Changes)?,
             (Some(K::TabAllFiles), _) => app.set_tab(crate::app::Tab::AllFiles)?,
             (Some(K::OpenPr), _) => app.pr_open(),
+            (Some(K::NavigatorPosition), _) => app.cycle_navigator_position(),
+            (Some(K::NavigatorGrow), _) => app.resize_navigator(4),
+            (Some(K::NavigatorShrink), _) => app.resize_navigator(-4),
             (Some(K::Down), _) => app.pr_move(1),
             (Some(K::Up), _) => app.pr_move(-1),
-            // The navigator is short; the read pane is what overflows, so the page keys scroll it.
+            (_, Tab) => app.toggle_focus(),
+            (_, PageDown) if app.focus == Focus::Files => app.pr_scroll_nav(PAGE),
+            (_, PageUp) if app.focus == Focus::Files => app.pr_scroll_nav(-PAGE),
             (_, PageDown) => app.pr_scroll_read(PAGE),
             (_, PageUp) => app.pr_scroll_read(-PAGE),
             _ => {}
@@ -910,9 +941,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> 
             K::PrevFile => app.prev_file(),
             K::Wrap => app.toggle_wrap(),
             K::Preview => app.toggle_preview(),
-            // `list-wider` widens the file list, `list-narrower` narrows it (widening the diff).
-            K::ListWider => app.resize_list(4),
-            K::ListNarrower => app.resize_list(-4),
+            K::NavigatorPosition => app.cycle_navigator_position(),
+            K::NavigatorGrow => app.resize_navigator(4),
+            K::NavigatorShrink => app.resize_navigator(-4),
             K::ScopeUncommitted => app.set_scope(Scope::Uncommitted)?,
             K::ScopeBranch => app.set_scope(Scope::Branch)?,
             K::ScopeLastTurn => app.set_scope(Scope::LastTurn)?,
@@ -948,7 +979,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> 
         Left if app.on_folder() => app.collapse_dir(),
         Right if app.on_fold() => {
             let heights = ui::diff_row_heights(app, area);
-            app.expand_fold(&heights, ui::diff_viewport_height(area, app.list_pct));
+            app.expand_fold(&heights, ui::diff_viewport_height(area, app));
         }
         Right => app.scroll_h(8),
         Left => app.scroll_h(-8),
@@ -957,6 +988,11 @@ pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> 
         _ => {}
     }
     Ok(())
+}
+
+/// Cancel pointer state whose coordinates belonged to the old terminal geometry.
+fn handle_resize(app: &mut App) {
+    app.cancel_divider_drag();
 }
 
 /// Map one mouse event onto `App`. Header hit-testing uses `keymap` — the keymap of the frame
@@ -969,10 +1005,18 @@ pub fn handle_mouse(
     heights: &[usize],
     keymap: &Keymap,
 ) -> Result<()> {
-    // A modal (the comment composer or the comments-list overlay) captures the screen and is
-    // keyboard-driven, so the mouse is inert while one is open — otherwise clicks and the
-    // wheel would drive the panes drawn underneath it.
+    // A modal captures new mouse gestures, but a divider gesture cancelled by the key that
+    // opened it still owns its remaining drag and mouse-up events.
     if app.composing() || app.mode == Mode::List {
+        match m.kind {
+            MouseEventKind::Drag(MouseButton::Left) if app.divider_drag_captured() => {
+                return Ok(());
+            }
+            MouseEventKind::Up(MouseButton::Left) if app.divider_drag_captured() => {
+                app.finish_divider_drag();
+            }
+            _ => {}
+        }
         return Ok(());
     }
     // A mouse gesture is one of the "any other input" that drops an armed crossing: the reviewer
@@ -982,12 +1026,39 @@ pub fn handle_mouse(
     if !matches!(m.kind, MouseEventKind::Moved) {
         app.disarm_cross();
     }
-    // The read-only PR tab: click a tab or the open button, click a row to read it, wheel the
-    // navigator (right) to move, wheel the read pane (left) to scroll.
+
+    // Divider gestures are common to every tab. A cancelled drag remains consumed until its
+    // mouse-up, so rotating or reconfiguring the layout cannot turn it into a line selection.
+    match m.kind {
+        MouseEventKind::Down(MouseButton::Left) if ui::hit_divider(area, app, m.column, m.row) => {
+            app.start_divider_drag();
+            return Ok(());
+        }
+        MouseEventKind::Drag(MouseButton::Left) if app.divider_drag_active() => {
+            let body = ui::body_rect(area);
+            let (axis_len, offset) = if app.navigator_position.stacked() {
+                (body.height, m.row.saturating_sub(body.y))
+            } else {
+                (body.width, m.column.saturating_sub(body.x))
+            };
+            app.drag_divider(axis_len, offset);
+            return Ok(());
+        }
+        MouseEventKind::Drag(MouseButton::Left) if app.divider_drag_cancelled() => return Ok(()),
+        MouseEventKind::Up(MouseButton::Left) if app.divider_drag_captured() => {
+            app.finish_divider_drag();
+            return Ok(());
+        }
+        _ => {}
+    }
+
+    // The read-only PR tab: click a tab or the open button, click a row to read it, and wheel
+    // either pane without moving the selection.
     if app.tab == crate::app::Tab::Pr {
         match m.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 if let Some(url) = app.painted_link_at(m.column, m.row) {
+                    app.focus = Focus::Diff;
                     // A link click resolves against the painted frame (specs/markdown.md).
                     app.open_link(&url);
                 } else if let Some(ui::HeaderHit::Tab(tab)) =
@@ -996,17 +1067,20 @@ pub fn handle_mouse(
                     app.set_tab(tab)?;
                 } else if ui::hit_pr_open(area, app, m.column, m.row) {
                     app.pr_open();
-                } else if let Some(i) = ui::pr_nav_hit(area, app, m.column, m.row) {
-                    app.pr_select(i);
+                } else if ui::in_files_pane(area, app, m.column, m.row) {
+                    app.focus = Focus::Files;
+                    if let Some(i) = ui::pr_nav_hit(area, app, m.column, m.row) {
+                        app.pr_select(i);
+                    }
+                } else if ui::in_diff_pane(area, app, m.column, m.row) {
+                    app.focus = Focus::Diff;
                 }
             }
-            MouseEventKind::ScrollDown
-                if ui::in_files_pane(area, app.list_pct, m.column, m.row) =>
-            {
-                app.pr_move(3);
+            MouseEventKind::ScrollDown if ui::in_files_pane(area, app, m.column, m.row) => {
+                app.pr_scroll_nav(3);
             }
-            MouseEventKind::ScrollUp if ui::in_files_pane(area, app.list_pct, m.column, m.row) => {
-                app.pr_move(-3);
+            MouseEventKind::ScrollUp if ui::in_files_pane(area, app, m.column, m.row) => {
+                app.pr_scroll_nav(-3);
             }
             MouseEventKind::ScrollDown => app.pr_scroll_read(3),
             MouseEventKind::ScrollUp => app.pr_scroll_read(-3),
@@ -1016,23 +1090,15 @@ pub fn handle_mouse(
     }
     match m.kind {
         MouseEventKind::Down(MouseButton::Left) => {
-            // The divider is checked first: a grab there starts a resize, not a selection.
-            if ui::hit_divider(area, app.list_pct, m.column, m.row) {
-                app.resizing = true;
-            } else if let Some(hit) = ui::hit_header(area, app, keymap, m.column, m.row) {
+            if let Some(hit) = ui::hit_header(area, app, keymap, m.column, m.row) {
                 match hit {
                     ui::HeaderHit::Tab(tab) => app.set_tab(tab)?,
                     ui::HeaderHit::Scope => app.set_scope(app.scope.cycle())?,
                     ui::HeaderHit::Send => app.export(&Agent),
                 }
-            } else if let Some(i) = ui::hit_file(
-                area,
-                app.list_pct,
-                m.column,
-                m.row,
-                app.file_rows.len(),
-                app.file_scroll,
-            ) {
+            } else if let Some(i) =
+                ui::hit_file(area, app, m.column, m.row, app.file_rows.len(), app.file_scroll)
+            {
                 app.select_file(i)?;
             } else if let Some(url) = app.painted_link_at(m.column, m.row) {
                 // A link click resolves against the painted frame (specs/markdown.md).
@@ -1041,39 +1107,35 @@ pub fn handle_mouse(
                 // The preview has no cursor or selection: a click in the pane only
                 // focuses it. The pane-rect test, not the source-row hit test — the
                 // rendered preview can be taller than the source has rows.
-                if ui::in_diff_pane(area, app.list_pct, m.column, m.row) {
+                if ui::in_diff_pane(area, app, m.column, m.row) {
                     app.focus = Focus::Diff;
                 }
             } else if let Some(i) =
-                ui::hit_diff(area, app.list_pct, m.column, m.row, heights, app.diff_scroll)
+                ui::hit_diff(area, app, m.column, m.row, heights, app.diff_scroll)
             {
                 app.focus = Focus::Diff;
                 app.diff_cursor = i;
                 app.select_anchor = None;
                 // A click on a fold marker expands it, keeping the viewport still.
-                app.expand_fold(heights, ui::diff_viewport_height(area, app.list_pct));
+                app.expand_fold(heights, ui::diff_viewport_height(area, app));
             }
         }
         MouseEventKind::Drag(MouseButton::Left) => {
-            if app.resizing {
-                let body = ui::body_rect(area);
-                app.drag_divider(body.width, m.column.saturating_sub(body.x));
-            } else if app.preview_active() {
+            if app.preview_active() {
                 // No drag-selection in the read-only preview.
             } else if let Some(i) =
-                ui::hit_diff(area, app.list_pct, m.column, m.row, heights, app.diff_scroll)
+                ui::hit_diff(area, app, m.column, m.row, heights, app.diff_scroll)
             {
                 app.drag_select_to(i);
             }
         }
-        MouseEventKind::Up(MouseButton::Left) => app.resizing = false,
         // The wheel scrolls the viewport of whichever pane it is over — never the cursor, so
         // a comment is never anchored to a wheeled-past line. Horizontal scroll is
         // keyboard-only (`←`/`→`), since multiplexers don't reliably deliver h-wheel events.
-        MouseEventKind::ScrollDown if ui::in_files_pane(area, app.list_pct, m.column, m.row) => {
+        MouseEventKind::ScrollDown if ui::in_files_pane(area, app, m.column, m.row) => {
             app.wheel_files(3);
         }
-        MouseEventKind::ScrollUp if ui::in_files_pane(area, app.list_pct, m.column, m.row) => {
+        MouseEventKind::ScrollUp if ui::in_files_pane(area, app, m.column, m.row) => {
             app.wheel_files(-3);
         }
         MouseEventKind::ScrollDown => app.wheel_diff(3),
@@ -1086,14 +1148,18 @@ pub fn handle_mouse(
 #[cfg(test)]
 mod refresh_tests {
     use super::{
-        ActiveFetch, PrCoordinator, PrEffect, PrRefresh, TaggedPr, apply_plugin_config_observation,
-        ready_app,
+        ActiveFetch, PaintedFrameSnapshot, PrCoordinator, PrEffect, PrRefresh, TaggedPr,
+        apply_plugin_config_observation, apply_pr_probe_result, handle_blocked_event,
+        handle_resize, ready_app,
     };
     use crate::app::App;
     use crate::config::{Config, plugin_config_in};
     use crate::forge::{PrFetchInput, PrView};
     use crate::git::OriginIdentity;
     use crate::model::Scope;
+    use ratatui::crossterm::event::{
+        Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
@@ -1105,6 +1171,102 @@ mod refresh_tests {
             head_oid: Some(head.to_string()),
             candidates: vec!["feature".to_string()],
         }
+    }
+
+    #[test]
+    fn terminal_resize_cancels_the_active_divider_coordinates() {
+        let mut app = App::new(std::path::PathBuf::from("."), Scope::Uncommitted, None);
+        app.start_divider_drag();
+
+        handle_resize(&mut app);
+
+        assert!(app.divider_drag_cancelled());
+    }
+
+    #[test]
+    fn a_probe_that_changes_pr_rows_requires_a_repaint_before_input() {
+        let mut app = App::new(std::path::PathBuf::from("."), Scope::Uncommitted, None);
+        let mut coordinator = PrCoordinator::new(true);
+        coordinator.refresh.current_input = Some(input("old"));
+
+        assert!(apply_pr_probe_result(&mut app, &mut coordinator, Ok(input("new")), 0));
+        assert!(matches!(app.pr, PrView::Pending));
+
+        assert!(!apply_pr_probe_result(&mut app, &mut coordinator, Ok(input("new")), 0));
+    }
+
+    #[test]
+    fn a_config_layout_change_invalidates_the_painted_frame_before_input() {
+        let repo = tempfile::tempdir().unwrap();
+        let config_dir = tempfile::tempdir().unwrap();
+        let path = config_dir.path().join("config.toml");
+        std::fs::write(&path, "navigator_position = \"right\"\n").unwrap();
+        let cfg = Config::parse([repo.path().display().to_string()]);
+        let mut app = App::new(repo.path().to_path_buf(), Scope::Uncommitted, None);
+        app.set_plugin_config(plugin_config_in(config_dir.path()).unwrap());
+        let painted = PaintedFrameSnapshot::capture(&app);
+        let (tx, _rx) = mpsc::channel();
+        let mut epoch = 0;
+        let mut recovery_inflight = false;
+
+        std::fs::write(&path, "navigator_position = \"bottom\"\n").unwrap();
+        assert!(apply_plugin_config_observation(
+            &mut app,
+            &cfg,
+            &mut epoch,
+            &tx,
+            &mut recovery_inflight,
+            plugin_config_in(config_dir.path()),
+        ));
+        assert!(!painted.still_current(&app), "input must wait for the bottom layout to paint");
+
+        let repainted = PaintedFrameSnapshot::capture(&app);
+        assert!(apply_plugin_config_observation(
+            &mut app,
+            &cfg,
+            &mut epoch,
+            &tx,
+            &mut recovery_inflight,
+            plugin_config_in(config_dir.path()),
+        ));
+        assert!(repainted.still_current(&app), "an unchanged observation keeps the frame valid");
+    }
+
+    #[test]
+    fn blocked_frames_ignore_normal_events_but_keep_quit_and_capture_cleanup() {
+        let mut app = App::new(std::path::PathBuf::from("."), Scope::Uncommitted, None);
+        app.mode = crate::app::Mode::Composing { editing: None };
+        app.input = "draft".to_string();
+        app.start_divider_drag();
+        app.set_config_error("invalid config".to_string());
+        assert!(app.divider_drag_cancelled());
+
+        handle_blocked_event(&mut app, &Event::Paste(" hidden paste".to_string()));
+        handle_blocked_event(
+            &mut app,
+            &Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 0,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+        assert_eq!(app.input, "draft");
+        assert!(!app.should_quit);
+
+        handle_blocked_event(
+            &mut app,
+            &Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Up(MouseButton::Left),
+                column: 0,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+        assert!(!app.divider_drag_cancelled());
+
+        handle_blocked_event(&mut app, &Event::Key(KeyEvent::from(KeyCode::Char('q'))));
+        assert!(app.should_quit);
     }
 
     #[test]

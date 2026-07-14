@@ -1,7 +1,7 @@
 //! Rendering the Changes view: tab bar, file list, diff, comment box, list, status.
 //!
-//! See `specs/tui.md`. The layout is a header tab bar, a body split into the diff
-//! (left) and the file list (right), and a status bar. While composing, the comment
+//! See `specs/tui.md`. The layout is a header tab bar, a body split into the read pane
+//! and navigator, and a status bar. While composing, the comment
 //! box is spliced inline into the diff under the selected line; the comments-list
 //! overlay is drawn on top when open. Rendering reads `App` only; all state changes
 //! live in `app.rs`.
@@ -19,6 +19,7 @@ use ratatui::widgets::{
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{App, Focus, FooterAction, Mode, Tab, Tier};
+use crate::config::NavigatorPosition;
 use crate::diff::{FileDiff, FileState, Row};
 use crate::file_list::{Annotation, RowKind};
 use crate::forge;
@@ -37,7 +38,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         );
         return;
     }
-    let p = panes(area, app.list_pct);
+    let p = panes(area, app);
 
     if app.tab == Tab::Pr {
         render_pr_header(frame, app, p.tab);
@@ -64,8 +65,8 @@ fn vrows(area: Rect) -> Rc<[Rect]> {
     Layout::vertical([Constraint::Length(1), Constraint::Min(3), Constraint::Length(1)]).split(area)
 }
 
-/// The frame's layout rects: the diff pane, the file pane, and the whole body band. One
-/// place computes the vertical bands and the horizontal split, so every geometry helper and
+/// The frame's layout rects: the read pane, the navigator, and the whole body band. One
+/// place computes the vertical bands and the active split, so every geometry helper and
 /// the renderer agree by construction (a layout change can't desync hit-testing from paint).
 struct Panes {
     tab: Rect,
@@ -75,15 +76,40 @@ struct Panes {
     status: Rect,
 }
 
-fn panes(area: Rect, list_pct: u16) -> Panes {
+fn panes(area: Rect, app: &App) -> Panes {
     let rows = vrows(area);
     let body = rows[1];
-    let split = Layout::horizontal([
-        Constraint::Percentage(100 - list_pct),
-        Constraint::Percentage(list_pct),
-    ])
-    .split(body);
-    Panes { tab: rows[0], diff: split[0], files: split[1], body, status: rows[2] }
+    let (diff, files) = split_body(body, app.navigator_position, app.navigator_share());
+    Panes { tab: rows[0], diff, files, body, status: rows[2] }
+}
+
+fn split_body(body: Rect, position: NavigatorPosition, share: u16) -> (Rect, Rect) {
+    let axis_len = if position.stacked() { body.height } else { body.width };
+    let mut navigator_len = (u32::from(axis_len) * u32::from(share) / 100) as u16;
+    if axis_len >= 6 {
+        navigator_len = navigator_len.clamp(3, axis_len - 3);
+    } else {
+        navigator_len = axis_len / 2;
+    }
+    let read_len = axis_len - navigator_len;
+    match position {
+        NavigatorPosition::Right => (
+            Rect::new(body.x, body.y, read_len, body.height),
+            Rect::new(body.x + read_len, body.y, navigator_len, body.height),
+        ),
+        NavigatorPosition::Left => (
+            Rect::new(body.x + navigator_len, body.y, read_len, body.height),
+            Rect::new(body.x, body.y, navigator_len, body.height),
+        ),
+        NavigatorPosition::Bottom => (
+            Rect::new(body.x, body.y, body.width, read_len),
+            Rect::new(body.x, body.y + read_len, body.width, navigator_len),
+        ),
+        NavigatorPosition::Top => (
+            Rect::new(body.x, body.y + navigator_len, body.width, read_len),
+            Rect::new(body.x, body.y, body.width, navigator_len),
+        ),
+    }
 }
 
 /// The whole body band (between the tab bar and status bar), for divider hit-testing.
@@ -94,11 +120,23 @@ pub fn body_rect(area: Rect) -> Rect {
 
 /// Whether `(col, row)` lands on the draggable divider between the two panes.
 #[must_use]
-pub fn hit_divider(area: Rect, list_pct: u16, col: u16, row: u16) -> bool {
-    let p = panes(area, list_pct);
-    let in_body = row >= p.body.y && row < p.body.y + p.body.height;
-    // A 3-column grab zone straddling the abutting pane borders.
-    in_body && col + 1 >= p.files.x && col <= p.files.x + 1
+pub fn hit_divider(area: Rect, app: &App, col: u16, row: u16) -> bool {
+    let p = panes(area, app);
+    match app.navigator_position {
+        NavigatorPosition::Left => {
+            contains(p.body, col, row) && at_seam(col, p.files.x + p.files.width)
+        }
+        NavigatorPosition::Right => contains(p.body, col, row) && at_seam(col, p.files.x),
+        NavigatorPosition::Top => {
+            contains(p.body, col, row) && at_seam(row, p.files.y + p.files.height)
+        }
+        NavigatorPosition::Bottom => contains(p.body, col, row) && at_seam(row, p.files.y),
+    }
+}
+
+/// The two adjacent pane-border cells around a split boundary.
+fn at_seam(coordinate: u16, boundary: u16) -> bool {
+    coordinate == boundary || coordinate.checked_add(1) == Some(boundary)
 }
 
 /// The file-row index a click at `(col, row)` lands on, or `None` if outside the list.
@@ -106,13 +144,13 @@ pub fn hit_divider(area: Rect, list_pct: u16, col: u16, row: u16) -> bool {
 #[must_use]
 pub fn hit_file(
     area: Rect,
-    list_pct: u16,
+    app: &App,
     col: u16,
     row: u16,
     n_files: usize,
     file_scroll: usize,
 ) -> Option<usize> {
-    let inner = inner_rect(panes(area, list_pct).files);
+    let inner = inner_rect(panes(area, app).files);
     if !contains(inner, col, row) {
         return None;
     }
@@ -122,21 +160,21 @@ pub fn hit_file(
 
 /// The number of file rows visible in the file pane, used to clamp the file-list scroll.
 #[must_use]
-pub fn file_viewport_height(area: Rect, list_pct: u16) -> usize {
-    inner_rect(panes(area, list_pct).files).height as usize
+pub fn file_viewport_height(area: Rect, app: &App) -> usize {
+    inner_rect(panes(area, app).files).height as usize
 }
 
 /// Whether `(col, row)` falls in the file pane, so the wheel scrolls the list it is over.
 #[must_use]
-pub fn in_files_pane(area: Rect, list_pct: u16, col: u16, row: u16) -> bool {
-    contains(panes(area, list_pct).files, col, row)
+pub fn in_files_pane(area: Rect, app: &App, col: u16, row: u16) -> bool {
+    contains(panes(area, app).files, col, row)
 }
 
 /// Whether `(col, row)` falls in the diff pane — the markdown preview's click target,
 /// whose rendered geometry the source-row hit test cannot describe.
 #[must_use]
-pub fn in_diff_pane(area: Rect, list_pct: u16, col: u16, row: u16) -> bool {
-    contains(panes(area, list_pct).diff, col, row)
+pub fn in_diff_pane(area: Rect, app: &App, col: u16, row: u16) -> bool {
+    contains(panes(area, app).diff, col, row)
 }
 
 /// The logical diff-row index a click at `(col, row)` lands on, or `None` if outside the
@@ -145,13 +183,13 @@ pub fn in_diff_pane(area: Rect, list_pct: u16, col: u16, row: u16) -> bool {
 #[must_use]
 pub fn hit_diff(
     area: Rect,
-    list_pct: u16,
+    app: &App,
     col: u16,
     row: u16,
     heights: &[usize],
     diff_scroll: usize,
 ) -> Option<usize> {
-    let inner = inner_rect(panes(area, list_pct).diff);
+    let inner = inner_rect(panes(area, app).diff);
     if !contains(inner, col, row) {
         return None;
     }
@@ -168,14 +206,14 @@ pub fn hit_diff(
 
 /// The number of diff rows visible in the diff pane, used to clamp the scroll.
 #[must_use]
-pub fn diff_viewport_height(area: Rect, list_pct: u16) -> usize {
-    inner_rect(panes(area, list_pct).diff).height as usize
+pub fn diff_viewport_height(area: Rect, app: &App) -> usize {
+    inner_rect(panes(area, app).diff).height as usize
 }
 
 /// The display height (rows on screen) of each visible logical diff row, honoring wrap.
 #[must_use]
 pub fn diff_row_heights(app: &App, area: Rect) -> Vec<usize> {
-    let width = inner_rect(panes(area, app.list_pct).diff).width as usize;
+    let width = inner_rect(panes(area, app).diff).width as usize;
     let gutter_w = gutter_for(&app.diff);
     let p = app.palette();
     // A row's display height is its wrapped code lines plus any inline comment cards under
@@ -224,8 +262,8 @@ pub fn composer_content_width(width: usize) -> usize {
 /// The diff pane's inner content width for the full terminal `area`, so the event loop can
 /// reserve the comment box without a `Frame` (mirrors [`diff_viewport_height`]).
 #[must_use]
-pub fn diff_inner_width(area: Rect, list_pct: u16) -> usize {
-    inner_rect(panes(area, list_pct).diff).width as usize
+pub fn diff_inner_width(area: Rect, app: &App) -> usize {
+    inner_rect(panes(area, app).diff).width as usize
 }
 
 /// The comment box's display lines at `content_w`: each input line word-wrapped, with the
@@ -1166,6 +1204,7 @@ fn action_key_label(app: &App, action: FooterAction) -> (String, String) {
             return ("⇥".into(), if app.focus == Focus::Files { "diff" } else { "files" }.into());
         }
         A::Preview => (hint(K::Preview), if app.preview_active() { "source" } else { "preview" }),
+        A::NavigatorPosition => (hint(K::NavigatorPosition), "position"),
         A::Scope => (
             format!(
                 "{}/{}/{}",
@@ -1479,19 +1518,25 @@ fn checks_summary(s: &forge::PrSnapshot) -> String {
     }
 }
 
-/// The right navigator: the checks list above the newest-first comments list, with the cursor
+/// The PR navigator: the checks list above the newest-first comments list, with the cursor
 /// row filled and the view windowed to keep it on screen.
 fn render_pr_nav(frame: &mut Frame, app: &App, area: Rect) {
-    // The navigator over the PR's checks and comments. Identity lives in the header; the left
-    // pane reads the selected comment — so this pane names its contents, not "PR" again.
+    // Identity lives in the header; the read pane shows the selected comment, so the navigator
+    // names its contents rather than repeating "PR".
     let p = app.palette();
-    let block = bordered("Checks & comments", true, p);
+    let block = bordered("Checks & comments", app.focus == Focus::Files, p);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let width = inner.width as usize;
     let rows = pr_nav_rows(app, width, std::time::SystemTime::now());
     let viewport = inner.height as usize;
-    let scroll = pr_nav_scroll(&rows, app.pr_cursor, viewport);
+    // Transitional frames retain the request until both a viewport and its selected row exist.
+    let can_reveal = viewport > 0 && rows.iter().any(|row| row.cursor == Some(app.pr_cursor));
+    let reveal = can_reveal && app.take_pr_nav_reveal();
+    let (scroll, max_scroll) =
+        settle_pr_nav_scroll(&rows, app.pr_cursor, viewport, app.pr_nav_scroll(), reveal);
+    app.note_pr_nav_max_scroll(max_scroll);
+    app.set_pr_nav_scroll(scroll);
     let items: Vec<ListItem> = rows
         .into_iter()
         .skip(scroll)
@@ -1547,11 +1592,23 @@ fn pr_nav_rows(app: &App, width: usize, now: std::time::SystemTime) -> Vec<PrNav
     rows
 }
 
-fn pr_nav_scroll(rows: &[PrNavRow], cursor: usize, viewport: usize) -> usize {
-    rows.iter()
-        .position(|row| row.cursor == Some(cursor))
-        .unwrap_or(0)
-        .saturating_sub(viewport.saturating_sub(1))
+fn settle_pr_nav_scroll(
+    rows: &[PrNavRow],
+    cursor: usize,
+    viewport: usize,
+    current: usize,
+    reveal: bool,
+) -> (usize, usize) {
+    let max = rows.len().saturating_sub(viewport);
+    let mut scroll = current.min(max);
+    if reveal && let Some(target) = rows.iter().position(|row| row.cursor == Some(cursor)) {
+        if target < scroll {
+            scroll = target;
+        } else if target >= scroll.saturating_add(viewport) {
+            scroll = target.saturating_add(1).saturating_sub(viewport);
+        }
+    }
+    (scroll.min(max), max)
 }
 
 /// The `checks` section header with its rollup (`✗ 1 failing` / `✓ N passed` / `running`).
@@ -1657,8 +1714,7 @@ fn render_overflow_scrollbar(
     );
 }
 
-/// The left read pane: the selected comment's hunk (for a finding) then its body, a check's
-/// open hint, or the loading/degraded message.
+/// The PR read pane: the selected description or comment, or the loading/degraded message.
 fn render_pr_read(frame: &mut Frame, app: &App, area: Rect) {
     let p = app.palette();
     let selected = app.pr_selected_comment();
@@ -1672,7 +1728,7 @@ fn render_pr_read(frame: &mut Frame, app: &App, area: Rect) {
     if app.pr_refreshing() {
         title.push_str(" · refreshing…");
     }
-    let block = bordered(&title, false, p);
+    let block = bordered(&title, app.focus == Focus::Diff, p);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let width = inner.width as usize;
@@ -1800,16 +1856,15 @@ pub fn hit_pr_open(area: Rect, app: &App, col: u16, row: u16) -> bool {
 
 /// The cursor-row index a click at `(col, row)` lands on — the pinned description at the
 /// top, or a comment — or `None` (a check, header, or blank). Mirrors `render_pr_nav`'s
-/// row layout and cursor-windowed scroll.
+/// row layout and the scroll captured by the painted frame.
 #[must_use]
 pub fn pr_nav_hit(area: Rect, app: &App, col: u16, row: u16) -> Option<usize> {
-    let inner = inner_rect(panes(area, app.list_pct).files);
+    let inner = inner_rect(panes(area, app).files);
     if !contains(inner, col, row) {
         return None;
     }
     let rows = pr_nav_rows(app, inner.width as usize, std::time::SystemTime::now());
-    let viewport = inner.height as usize;
-    let scroll = pr_nav_scroll(&rows, app.pr_cursor, viewport);
+    let scroll = app.pr_nav_scroll();
     rows.get((row - inner.y) as usize + scroll)?.cursor
 }
 
