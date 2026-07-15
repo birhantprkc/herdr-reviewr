@@ -791,7 +791,13 @@ fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
             Paragraph::new(rendered.lines).scroll((saturating_row(scroll), 0)),
             inner,
         );
-        render_overflow_scrollbar(frame, area, max, scroll, p);
+        render_overflow_scrollbar(
+            frame,
+            area.inner(ratatui::layout::Margin { vertical: 1, horizontal: 0 }),
+            max,
+            scroll,
+            p,
+        );
         return;
     }
 
@@ -1685,13 +1691,13 @@ fn saturating_row(scroll: usize) -> u16 {
     u16::try_from(scroll).unwrap_or(u16::MAX)
 }
 
-/// A scrollbar over `area`'s right border when the content overflows the pane —
+/// A scrollbar in `track` when the content overflows the pane —
 /// rendered markdown has no line numbers, so this is its position feedback
 /// (`specs/diff-view.md`, `specs/tui.md`). `max` is the maximum useful scroll; zero
 /// (content fits) paints nothing.
 fn render_overflow_scrollbar(
     frame: &mut Frame,
-    area: Rect,
+    track: Rect,
     max: usize,
     scroll: usize,
     p: &Palette,
@@ -1709,7 +1715,7 @@ fn render_overflow_scrollbar(
             .track_symbol(None)
             .thumb_symbol("┃")
             .thumb_style(Style::default().fg(p.lavender)),
-        area.inner(ratatui::layout::Margin { vertical: 1, horizontal: 0 }),
+        track,
         &mut state,
     );
 }
@@ -1732,12 +1738,47 @@ fn render_pr_read(frame: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let width = inner.width as usize;
-    let mut lines: Vec<Line<'static>> = Vec::new();
-
-    if let Some(notice) = app.pr_notice() {
-        lines.push(Line::from(Span::styled(notice.to_owned(), Style::default().fg(p.yellow))));
-        lines.push(Line::raw(""));
+    let notice_lines =
+        app.pr_notice().map(|notice| wrap_text(notice, width.max(1))).unwrap_or_default();
+    // Keep one body row whenever the pane has room. If the remedy still cannot fit, retain its
+    // opening state and actionable tail; the middle detail is less useful than a visible recovery.
+    let notice_capacity = match inner.height {
+        0 => 0,
+        1 => 1,
+        height => height - 1,
+    } as usize;
+    let notice_lines = if notice_lines.len() <= notice_capacity {
+        notice_lines
+    } else if notice_capacity == 0 {
+        Vec::new()
+    } else if notice_capacity == 1 {
+        notice_lines.into_iter().rev().take(1).collect()
+    } else {
+        let tail = notice_lines.len() - (notice_capacity - 1);
+        std::iter::once(notice_lines[0].clone())
+            .chain(notice_lines.into_iter().skip(tail))
+            .collect()
+    };
+    let notice_height = notice_lines.len() as u16;
+    if notice_height > 0 {
+        let notice_area = Rect::new(inner.x, inner.y, inner.width, notice_height);
+        frame.render_widget(
+            Paragraph::new(
+                notice_lines
+                    .into_iter()
+                    .map(|line| Line::from(Span::styled(line, Style::default().fg(p.yellow))))
+                    .collect::<Vec<_>>(),
+            ),
+            notice_area,
+        );
     }
+    let body = Rect::new(
+        inner.x,
+        inner.y.saturating_add(notice_height),
+        inner.width,
+        inner.height.saturating_sub(notice_height),
+    );
+    let mut lines: Vec<Line<'static>> = Vec::new();
 
     // The markdown body's render metadata and its first display row, for hit-testing.
     let mut body_meta: Option<(usize, crate::markdown::Rendered)> = None;
@@ -1784,20 +1825,24 @@ fn render_pr_read(frame: &mut Frame, app: &App, area: Rect) {
 
     // Clamp in `usize` before the `u16` cast — a stale `pr_read_scroll` could otherwise
     // wrap below the clamp. Scrolling stops with the last line at the pane's bottom edge.
-    let max = lines.len().saturating_sub(inner.height as usize);
+    let max = lines.len().saturating_sub(body.height as usize);
     app.note_pr_read_max_scroll(max);
     let scroll = app.pr_read_scroll.min(max);
     if let Some((offset, rendered)) = &body_meta {
-        note_markdown_regions(app, rendered, inner, scroll, *offset);
+        note_markdown_regions(app, rendered, body, scroll, *offset);
     }
-    frame.render_widget(Paragraph::new(lines).scroll((saturating_row(scroll), 0)), inner);
-    render_overflow_scrollbar(frame, area, max, scroll, p);
+    frame.render_widget(Paragraph::new(lines).scroll((saturating_row(scroll), 0)), body);
+    render_overflow_scrollbar(
+        frame,
+        Rect::new(area.x, body.y, area.width, body.height),
+        max,
+        scroll,
+        p,
+    );
 }
 
-/// The one-line message for a loading or degraded PR view, each naming what unblocks it.
-/// The no-PR state names the candidate branches it queried, so a resolution that surprises
-/// is inspectable rather than silent (specs/forge-host.md). `refresh` is the active `refresh`
-/// binding's hint key.
+/// The one-line message for a loading, empty, or degraded PR view. `refresh` is the active
+/// `refresh` binding's hint key.
 fn pr_empty_msg(view: &forge::PrView, refresh: char) -> String {
     if let Some(message) = view.retry_remedy(refresh) {
         return message;
@@ -1805,37 +1850,26 @@ fn pr_empty_msg(view: &forge::PrView, refresh: char) -> String {
     match view {
         forge::PrView::Loading => "loading…".into(),
         forge::PrView::Pending | forge::PrView::Pr(_) => String::new(),
-        forge::PrView::NoPr(candidates) if candidates.is_empty() => {
-            "detached HEAD — check out a branch to resolve its PR".into()
-        }
-        forge::PrView::NoPr(candidates) => {
-            format!(
-                "no PR for {} yet — push and open one, then press {refresh}",
-                name_a_few(candidates)
-            )
-        }
+        forge::PrView::Detached => "No pull request found — HEAD is detached.".into(),
+        forge::PrView::NoPr => "No pull request yet. Ready to ship?".into(),
         forge::PrView::Ambiguous(n) => {
             format!("{n} open PRs back this branch — open one on GitHub")
         }
-        forge::PrView::NoGh | forge::PrView::NotAuthed(_) | forge::PrView::Error(_) => {
+        forge::PrView::NoGh
+        | forge::PrView::NotAuthed(_)
+        | forge::PrView::GitError(_)
+        | forge::PrView::Error(_) => {
             unreachable!("retry failures returned above")
         }
-        forge::PrView::NeedsGitHubOrigin => "the PR tab needs a supported GitHub origin".into(),
+        forge::PrView::NeedsGitHubRemote => {
+            "the PR tab needs a supported GitHub upstream or origin".into()
+        }
         forge::PrView::UnsupportedHost(host) => {
             format!("unsupported host {host} — Enterprise users can set `github_host`")
         }
         forge::PrView::MalformedOrigin(host) => {
             format!("malformed GitHub origin for {host} — expected owner/repository")
         }
-    }
-}
-
-/// Up to three names, then `+N more` — the queried candidates stay one readable line.
-fn name_a_few(names: &[String]) -> String {
-    let shown = names.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
-    match names.len() {
-        0..=3 => shown,
-        n => format!("{shown} +{} more", n - 3),
     }
 }
 
@@ -1855,7 +1889,6 @@ pub fn hit_pr_open(area: Rect, app: &App, col: u16, row: u16) -> bool {
 }
 
 /// The cursor-row index a click at `(col, row)` lands on — the pinned description at the
-/// top, or a comment — or `None` (a check, header, or blank). Mirrors `render_pr_nav`'s
 /// row layout and the scroll captured by the painted frame.
 #[must_use]
 pub fn pr_nav_hit(area: Rect, app: &App, col: u16, row: u16) -> Option<usize> {

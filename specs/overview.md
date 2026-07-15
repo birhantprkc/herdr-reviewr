@@ -1,7 +1,7 @@
 ---
-Status: Current
+Status: Draft
 Created: 2026-06-23
-Last edited: 2026-07-09
+Last edited: 2026-07-15
 ---
 
 # herdr-reviewr
@@ -26,6 +26,17 @@ Three tabs:
 | `Changes`   | the active scope's changed files, with a syntax-highlighted diff viewer |
 | `All files` | the whole repo tree, with a read-and-comment content viewer             |
 | `PR`        | a read-only mirror of the pull request: state, checks, comments         |
+
+## Voice
+
+reviewr is lightly empowering. Its copy leaves the reviewer feeling capable, in control, and ready
+to move the work forward.
+
+- Lead with the state. Keep expected states short and calm.
+- Offer one useful next step only when the user needs one.
+- In low-stakes moments, a restrained question or nudge may add warmth.
+- In failures, drop the personality. Say what happened and how to recover.
+- Never scold, hype, narrate the implementation, or turn an empty state into documentation.
 
 ## Scope
 

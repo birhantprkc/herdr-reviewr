@@ -412,11 +412,7 @@ fn parse_plugin_config(path: &Path) -> Result<PluginConfig, PluginConfigError> {
     if let Some(value) = table.get("github_host") {
         let host = string_value(path, "github_host", value, "a bare hostname outside github.com")?;
         if !valid_enterprise_host(host) {
-            return Err(value_error(
-                path,
-                "github_host",
-                "a bare hostname outside the github.com and github.com-* namespace",
-            ));
+            return Err(value_error(path, "github_host", "a bare hostname other than github.com"));
         }
         config.github_host = Some(host.to_ascii_lowercase());
     }
@@ -510,7 +506,12 @@ fn unknown_key_error(path: &Path, key: &str, options: &str) -> PluginConfigError
 
 fn valid_enterprise_host(host: &str) -> bool {
     let lower = host.to_ascii_lowercase();
-    if lower == "github.com" || lower.starts_with("github.com-") || host.len() > 253 {
+    lower != "github.com" && valid_host_syntax(host)
+}
+
+/// The bare ASCII DNS-name grammar shared by configured and selected canonical hosts.
+pub(crate) fn valid_host_syntax(host: &str) -> bool {
+    if host.len() > 253 {
         return false;
     }
     let mut labels = host.split('.').peekable();
@@ -667,7 +668,6 @@ mod tests {
             ("auto_open = \"yes\"\n", "`auto_open`"),
             ("github_host = \"https://github.example.com\"\n", "`github_host`"),
             ("github_host = \"github.com\"\n", "`github_host`"),
-            ("github_host = \"github.com-work\"\n", "`github_host`"),
         ];
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
@@ -677,6 +677,15 @@ mod tests {
             assert!(error.contains(key), "{text}: {error}");
             assert!(error.contains("expected"), "{text}: {error}");
         }
+    }
+
+    #[test]
+    fn github_host_accepts_a_literal_github_com_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.toml"), "github_host = \"github.com-work\"\n")
+            .unwrap();
+        let config = super::plugin_config_in(dir.path()).expect("valid literal Enterprise host");
+        assert_eq!(config.github_host(), Some("github.com-work"));
     }
 
     #[test]

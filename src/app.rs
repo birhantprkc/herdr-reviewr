@@ -1465,16 +1465,16 @@ impl App {
     /// note, so a failed poll never blanks a populated tab; the cursor clamps to the new rows.
     pub fn apply_pr(&mut self, view: forge::PrView) {
         self.pr_refreshing = false;
+        let retry = view.retry_remedy(self.keymap().hint(crate::keymap::Action::Refresh));
         let has_snapshot = matches!(
             self.pr,
-            forge::PrView::Pr(_) | forge::PrView::NoPr(_) | forge::PrView::Ambiguous(_)
+            forge::PrView::Pr(_)
+                | forge::PrView::NoPr
+                | forge::PrView::Detached
+                | forge::PrView::Ambiguous(_)
         );
-        if has_snapshot
-            && let Some(message) =
-                view.retry_remedy(self.keymap().hint(crate::keymap::Action::Refresh))
-        {
+        if has_snapshot && let Some(message) = retry {
             self.pr_notice = Some(message);
-            self.pr_read_scroll = 0;
             return;
         }
         self.pr_notice = None;

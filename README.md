@@ -157,8 +157,8 @@ click (`http`/`https` only), and an anchor link (`#section`) jumps to its headin
   (`target/`, `node_modules/`) is one collapsed row that loads its contents only when you expand
   it. You can comment here as well. On a `.md` file, `m` flips between the source and a rendered
   markdown preview. The preview is read-only, so commenting stays in the source view.
-- **PR** — a read-only mirror of the branch's open pull request, read from GitHub via `gh`. It
-  shows the PR's state (draft, open, merged, or closed, plus mergeability and unpushed-commit
+- **PR** — a read-only mirror of the branch's pull request, read from GitHub via `gh`. It shows the
+  PR's state (draft, open, merged, or closed, plus mergeability and unpushed-commit
   sync), its checks with a pass/fail rollup, and its comments. The PR description sits at the top
   of the list. Comments cover reviews, inline findings, and plain comments, newest first, with
   `resolved` and `outdated` markers. The description and every comment body render as styled
@@ -333,7 +333,13 @@ both actions, so a typo can't silently shadow another shortcut.
 `list-wider` and `list-narrower` remain accepted aliases for `navigator-grow` and
 `navigator-shrink`; normalized config output uses the canonical names.
 
-### GitHub hosts
+### GitHub repository and hosts
+
+If a remote literally named `upstream` has a supported GitHub `owner/repository` fetch URL, the PR
+tab reads that repository. An absent or unusable `upstream` identity falls back to `origin`; a Git
+read failure stays visible and never falls through. A standard fork clone — fork at `origin`, base
+repository at `upstream` — therefore works without setup. Both remotes use their primary fetch URL
+after Git's `url.*.insteadOf` rewrite; a separate push URL does not affect PR reads.
 
 GitHub.com works without configuration. To read pull requests from one GitHub Enterprise host,
 set its bare hostname:
@@ -342,14 +348,10 @@ set its bare hostname:
 github_host = "github.example.com"
 ```
 
-reviewr matches either that exact origin host or a trusted SSH alias beginning
-`github.example.com-`, such as `git@github.example.com-work:owner/repo.git`. The alias convention
-applies only to scp-style and `ssh://` origins. HTTPS hosts must match exactly. GitHub.com and
-its SSH aliases continue to work when Enterprise is configured.
-
-Host identity comes from origin's fetch URL after Git's `url.*.insteadOf` rewrite. A separate
-push URL does not change it. API calls name the canonical host on every request, so `GH_HOST`
-cannot redirect a fetch. Authenticate the Enterprise host with
+Host matching is exact. SSH aliases such as `github.com-work` and
+`github.example.com-work` are not inferred; use a canonical-host remote or a Git
+`url.*.insteadOf` rewrite. A literal Enterprise hostname that begins with `github.com-` is valid
+when configured exactly. `GH_HOST` cannot redirect a PR read. Authenticate Enterprise with
 `gh auth login --hostname github.example.com`.
 
 ### Sidebar placement
@@ -433,8 +435,12 @@ This is a focused, young tool. The known constraints:
   start. That is never lines the agent didn't write, but possibly more than one turn.
 
 **PR tab (GitHub)**
-- **GitHub-only and read-only** — needs an authenticated `gh` and a GitHub remote. Without either
-  it shows one line telling you what to fix, and Changes and All files keep working.
+- **GitHub-only and read-only** — needs an authenticated `gh` and a supported `upstream` or
+  `origin`. Without either it tells you what to fix, and Changes and All files keep working.
+- **One repository, never a cross-repository search** — a readable, supported `upstream` is
+  authoritative. When `upstream` is absent or does not identify a supported repository, reviewr
+  reads `origin`; a Git read failure stays visible and never falls through. Clones that target
+  different parent repositories stay separate.
 - **Mirrors only the branch's *open* PR** — a merged or closed PR shows as history. Each comment
   surface caps at one page (100 rows), with a `+more on GitHub ↗` marker when there is more.
 

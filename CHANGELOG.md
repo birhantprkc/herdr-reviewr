@@ -6,7 +6,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.18.0] — 2026-07-15
+
 ### Changed
+- **Fork pull requests resolve automatically.** A readable, supported `upstream` remote now selects
+  the base repository. An absent or unsupported `upstream` falls back to `origin`; a Git read failure
+  stays visible and never falls through. SSH host aliases are no longer inferred: GitHub.com and
+  configured Enterprise hosts must match exactly. Literal `github.com-*` Enterprise hostnames remain
+  valid when configured exactly. A Git failure before the target resolves replaces any snapshot
+  whose repository can no longer be proven. The ordinary empty state now says `No pull request yet.
+  Ready to ship?`. (#18; thanks @ubuntudroid for the report and original fix.)
 - **Rust 1.97 is now the minimum toolchain.** Local builds, Clippy, CI, and release builds use the
   same pinned compiler version.
 

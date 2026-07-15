@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-06-23
-Last edited: 2026-07-14
+Last edited: 2026-07-15
 ---
 
 # TUI
@@ -212,6 +212,7 @@ A read-only mirror of the pull request in the same two-pane frame. The navigator
 
 - The header right-anchors a clickable `status #226 ↗` chip, status colored by lifecycle: `open` green, `draft` yellow, `merged` mauve, `closed` red. The PR title sits to its left, truncated to fit.
 - Between title and chip sits the resolved head branch (`head_ref`, `forge-host.md`), dim, prefixed `⑂ ` when the head lives in a fork. On a narrow bar the branch drops first.
+- The ordinary no-PR body says only `No pull request yet. Ready to ship?` A detached HEAD says `No pull request found — HEAD is detached.`
 - The footer leads with merge, sync, checks, and comment counts. Merge and sync show only while the PR is open. A capped surface appends `+more on GitHub ↗` (`forge-host.md`).
 - The navigator, titled `Checks & comments`, shows a status-only checks section above the comments list. The cursor walks the description row and the comments.
 - Comments list newest first, each row `@author anchor age`, with `outdated` or `resolved` markers where GitHub receded the thread.
@@ -222,9 +223,11 @@ A read-only mirror of the pull request in the same two-pane frame. The navigator
 - `j`/`k` or a click selects a description or comment and reveals it in the navigator viewport. Checks are not selectable.
 - The wheel over the navigator scrolls its viewport without changing the selection. `PageUp`/`PageDown` scroll the focused pane. The wheel over the read pane scrolls the read pane. Both panes stop with their last line at the bottom edge. `o` or the chip opens the PR in the browser.
 - A body taller than the read pane shows a scrollbar on the pane's right border. One that fits shows none.
+- A retry notice for a preserved snapshot stays fixed above the read body, so it remains visible
+  without resetting the reader's scroll.
 - The authoring keys (`s`, `c`, `v`, `d`, `e`) do nothing here.
 - A merged or closed PR shows the same mirror, read-only.
-- No open PR, or no usable `gh`, shows the matching empty state from `forge-host.md`, naming the command that unblocks it.
+- No usable `gh` shows the matching failure state from `forge-host.md`, naming the command that unblocks it.
 
 ### Comment editor
 

@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-07-10
-Last edited: 2026-07-14
+Last edited: 2026-07-15
 ---
 
 # Configuration
@@ -36,7 +36,7 @@ select  = ["v", "ㅍ"]
 | `toggle_placement`   | `split`, `overlay`, `zoomed`, or `tab`                                       |
 | `toggle_direction`   | `right` or `down`                                                            |
 | `auto_open`          | boolean                                                                      |
-| `github_host`        | bare hostname outside the `github.com` and `github.com-*` namespace          |
+| `github_host`        | bare hostname other than `github.com`                                         |
 | `keybindings`        | table of actions from the keymap in `tui.md`, each a non-empty array of keys |
 
 ## Behavior

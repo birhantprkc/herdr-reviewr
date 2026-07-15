@@ -518,10 +518,20 @@ fn pr_header_names_the_resolved_branch_and_marks_a_fork() {
     let narrow = render_at(&app, 44).lines().next().unwrap().to_string();
     assert!(!narrow.contains("persiyanov/feature"), "branch drops when narrow:\n{narrow}");
     assert!(narrow.contains("#226"), "the chip survives a narrow bar:\n{narrow}");
+
+    let width = 80;
+    let area = Rect::new(0, 0, width, 12);
+    let header = render_at(&app, width).lines().next().unwrap().to_string();
+    let chip_start = header.find("open #226").unwrap() as u16;
+    let number = header.find("#226").unwrap() as u16;
+    assert!(ui::hit_pr_open(area, &app, chip_start, 0));
+    assert!(ui::hit_pr_open(area, &app, number, 0));
+    assert!(!ui::hit_pr_open(area, &app, chip_start - 1, 0));
+    assert!(!ui::hit_pr_open(area, &app, number, 1));
 }
 
 #[test]
-fn pr_empty_states_name_candidates_detachment_and_the_ambiguity_count() {
+fn pr_empty_states_are_calm_and_keep_the_ambiguity_count() {
     use herdr_reviewr::app::Tab;
     use herdr_reviewr::forge::PrView;
     let r = Repo::init();
@@ -529,20 +539,25 @@ fn pr_empty_states_name_candidates_detachment_and_the_ambiguity_count() {
     r.commit_all("init");
     let mut app = app_on(&r);
     app.set_tab(Tab::Pr).unwrap();
-    // The empty state names what was queried, so resolution is inspectable, never silent.
-    let names = ["alpha", "beta", "gamma", "delta", "epsilon"];
-    app.pr = PrView::NoPr(names.iter().map(|s| (*s).to_string()).collect());
+    app.pr = PrView::NoPr;
     let out = render(&app);
     assert!(
-        out.contains("no PR for alpha, beta, gamma +2 more yet"),
-        "candidates are named, capped at three:\n{out}"
+        out.contains("No pull request yet. Ready to ship?"),
+        "ordinary absence stays brief:\n{out}"
     );
-    app.pr = PrView::NoPr(Vec::new());
+    app.pr = PrView::Detached;
     let out = render(&app);
-    assert!(out.contains("detached HEAD"), "detached wording for no candidates:\n{out}");
+    assert!(
+        out.contains("No pull request found — HEAD is detached."),
+        "detached wording stays factual:\n{out}"
+    );
     app.pr = PrView::Ambiguous(3);
     let out = render(&app);
     assert!(out.contains("3 open PRs"), "the ambiguity count shows:\n{out}");
+    app.pr = PrView::GitError("git remote get-url upstream failed".to_string());
+    let out = render(&app);
+    assert!(out.contains("Git read failed"), "local failures stay factual:\n{out}");
+    assert!(!out.contains("GitHub unavailable"), "a local failure is not blamed on GitHub:\n{out}");
 }
 
 #[test]
@@ -1336,6 +1351,50 @@ fn the_refetch_indicator_lives_in_the_title_not_the_content() {
         before,
         "a refetch never shifts the content the reader is on"
     );
+}
+
+#[test]
+fn a_retry_notice_stays_visible_above_a_scrolled_pr_body() {
+    use herdr_reviewr::forge::{PrSnapshot, PrView};
+    let r = Repo::init();
+    r.write("x.rs", "y\n");
+    r.commit_all("init");
+    let mut app = app_on(&r);
+    app.set_tab(Tab::Pr).unwrap();
+    app.focus = Focus::Diff;
+    app.pr = PrView::Pr(Box::new(PrSnapshot {
+        body: (0..80).map(|line| format!("line-{line:02}")).collect::<Vec<_>>().join("  \n"),
+        ..common::pr_snapshot()
+    }));
+
+    let area = Rect::new(0, 0, 140, 40);
+    let _ = render(&app);
+    handle_key(&mut app, KeyEvent::from(KeyCode::PageDown), area, &Keymap::default()).unwrap();
+    let scrolled = render(&app);
+    assert!(!scrolled.contains("line-00"), "the setup scrolls away from the top");
+
+    app.apply_pr(PrView::GitError("git rev-parse HEAD failed".to_string()));
+    let failed = render(&app);
+    assert!(failed.contains("Git read failed"), "the recovery action remains visible:\n{failed}");
+    assert!(!failed.contains("line-00"), "showing the notice does not reset the reader");
+}
+
+#[test]
+fn a_short_narrow_pr_pane_keeps_the_retry_action_and_one_body_row() {
+    use herdr_reviewr::forge::{PrSnapshot, PrView};
+    let r = Repo::init();
+    r.write("x.rs", "y\n");
+    r.commit_all("init");
+    let mut app = app_on(&r);
+    app.set_tab(Tab::Pr).unwrap();
+    app.pr =
+        PrView::Pr(Box::new(PrSnapshot { body: "steady body".into(), ..common::pr_snapshot() }));
+    app.apply_pr(PrView::NotAuthed("github.example.com".to_string()));
+
+    let out = dump(&render_size(&app, 30, 7));
+    assert!(out.contains("not signed"), "the failure state remains visible:\n{out}");
+    assert!(out.contains("press r"), "the actionable tail remains visible:\n{out}");
+    assert!(out.contains("steady body"), "the preserved snapshot keeps one readable row:\n{out}");
 }
 
 #[test]

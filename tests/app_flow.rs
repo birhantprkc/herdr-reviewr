@@ -2550,11 +2550,12 @@ fn same_input_failure_preserves_any_visible_pr_snapshot_and_remedy() {
 
     let repo = Repo::init();
     let mut app = app_on(&repo);
-    app.apply_pr(PrView::NoPr(vec!["feature".to_string()]));
+    let no_pr = PrView::NoPr;
+    app.apply_pr(no_pr.clone());
 
     app.apply_pr(PrView::NotAuthed("github.example.com".to_string()));
 
-    assert_eq!(app.pr, PrView::NoPr(vec!["feature".to_string()]));
+    assert_eq!(app.pr, no_pr);
     assert_eq!(
         app.pr_notice(),
         Some("not signed in — run `gh auth login --hostname github.example.com`, then press r")
@@ -2707,7 +2708,7 @@ fn the_pr_remedy_names_the_rebound_refresh_key() {
     let repo = Repo::init();
     let mut app = app_on(&repo);
     app.set_plugin_config(config);
-    app.apply_pr(PrView::NoPr(vec!["feature".to_string()]));
+    app.apply_pr(PrView::NoPr);
 
     app.apply_pr(PrView::NotAuthed("github.example.com".to_string()));
 

@@ -84,20 +84,26 @@ pub fn run() -> Result<()> {
     // instead of the blank pane herdr leaves when the process blocks or exits before it renders
     // (issue #4). Paint the empty frame first; then the initial load, non-fatal — an error opens
     // the sidebar with the reason in the status line, the same contract as a failed poll refresh.
-    terminal.draw(|f| ui::render(f, &app))?;
+    if let Err(error) = terminal.draw(|f| ui::render(f, &app)) {
+        restore_terminal(kbd);
+        return Err(error.into());
+    }
     if initial_config.is_ok()
         && let Err(e) = app.reload()
     {
         logln!("startup reload failed: {e:#}");
         app.status = format!("load failed: {e}");
     }
-    let result = event_loop(&mut terminal, &mut app, &cfg);
+    event_loop(&mut terminal, &mut app, &cfg, kbd)
+}
+
+/// Leave the alternate screen and release terminal input modes before any bounded worker drain.
+fn restore_terminal(kbd: bool) {
     if kbd {
         let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
     }
     let _ = execute!(io::stdout(), DisableMouseCapture, DisableBracketedPaste);
     ratatui::restore();
-    result
 }
 
 /// Build a fresh working sidebar only after the plugin configuration has validated.
@@ -130,6 +136,7 @@ const STATUS_TTL: Duration = Duration::from_secs(4);
 /// sooner, on the agent's turn-end, so this cadence is the slow safety net (specs/forge-host.md).
 const PR_POLL: Duration = Duration::from_mins(1);
 const PR_LOADING_DELAY: Duration = Duration::from_millis(150);
+const PR_SHUTDOWN_GRACE: Duration = Duration::from_millis(500);
 
 #[derive(Debug)]
 struct TaggedPr {
@@ -156,13 +163,13 @@ struct PrRefresh {
     fetch_needed: bool,
 }
 
+/// Owns the active probe or fetch until its worker exits; start guards keep all PR work serialized.
 #[derive(Debug)]
 struct PrCoordinator {
     refresh: PrRefresh,
     wait_started: Option<Instant>,
     active_probe_epoch: Option<u64>,
     active_fetch: Option<ActiveFetch>,
-    discard_probe_result: bool,
     probe_pending: bool,
 }
 
@@ -217,7 +224,6 @@ impl PrCoordinator {
             wait_started: ready.then(Instant::now),
             active_probe_epoch: None,
             active_fetch: None,
-            discard_probe_result: false,
             probe_pending: ready,
         }
     }
@@ -226,7 +232,6 @@ impl PrCoordinator {
         self.refresh.invalidate();
         self.wait_started = None;
         self.cancel_fetch();
-        self.discard_probe_result = false;
         self.probe_pending = false;
     }
 
@@ -235,15 +240,13 @@ impl PrCoordinator {
         self.refresh.trigger();
         self.wait_started = Some(Instant::now());
         self.cancel_fetch();
-        self.discard_probe_result = false;
         self.probe_pending = true;
     }
 
     fn config_changed(&mut self, active: bool) {
         self.cancel_fetch();
-        self.discard_probe_result = false;
         self.refresh.config_changed(active);
-        self.probe_pending = true;
+        self.probe_pending = active;
     }
 
     fn cancel_fetch(&self) {
@@ -254,6 +257,56 @@ impl PrCoordinator {
 
     fn active_fetch_tag(&self) -> Option<(u64, u64)> {
         self.active_fetch.as_ref().map(|active| active.tag)
+    }
+
+    fn can_start_probe(&self, config_ready: bool) -> bool {
+        self.probe_pending
+            && self.active_probe_epoch.is_none()
+            && self.active_fetch.is_none()
+            && config_ready
+    }
+}
+
+impl Drop for PrCoordinator {
+    fn drop(&mut self) {
+        self.cancel_fetch();
+    }
+}
+
+/// Cancel the active GitHub fetch and briefly drain matching probe/fetch completions before exit.
+fn drain_pr_shutdown(
+    pr: &mut PrCoordinator,
+    probe_rx: &mpsc::Receiver<(
+        u64,
+        Result<crate::forge::PrFetchInput, crate::forge::PrInputError>,
+    )>,
+    pr_rx: &mpsc::Receiver<TaggedPr>,
+) {
+    pr.stop();
+    let deadline = Instant::now() + PR_SHUTDOWN_GRACE;
+    while (pr.active_probe_epoch.is_some() || pr.active_fetch.is_some())
+        && Instant::now() < deadline
+    {
+        if let Ok((epoch, _)) = probe_rx.try_recv()
+            && pr.active_probe_epoch == Some(epoch)
+        {
+            pr.active_probe_epoch = None;
+        }
+        if let Ok(completion) = pr_rx.try_recv() {
+            let tag = (completion.generation, completion.config_epoch);
+            if pr.active_fetch_tag() == Some(tag) {
+                pr.active_fetch = None;
+            }
+        }
+        if pr.active_probe_epoch.is_some() || pr.active_fetch.is_some() {
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+}
+
+fn schedule_poll_probe(pr: &mut PrCoordinator, tab: crate::app::Tab) {
+    if tab == crate::app::Tab::Pr {
+        pr.probe_pending = true;
     }
 }
 
@@ -301,14 +354,12 @@ impl PrRefresh {
         self.fetch_needed = active;
     }
 
-    fn completed(&mut self, completion: TaggedPr, epoch: u64, active: bool) -> bool {
+    fn completed(&mut self, completion: TaggedPr, epoch: u64, active: bool) {
         if completion.generation == self.generation && completion.config_epoch == epoch {
             self.pending = Some(completion);
-            true
         } else {
             self.pending = None;
             self.fetch_needed = self.fetch_needed || active;
-            false
         }
     }
 
@@ -340,6 +391,11 @@ impl PrRefresh {
         None
     }
 
+    fn probe_failed(&mut self, retry_pending: bool) {
+        self.pending = None;
+        self.fetch_needed = retry_pending;
+    }
+
     fn take_fetch(&mut self) -> Option<(u64, crate::forge::PrFetchInput)> {
         if !self.fetch_needed {
             return None;
@@ -351,13 +407,19 @@ impl PrRefresh {
 }
 
 /// Draw, then wait up to the poll deadline for input; refresh on each tick.
-fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Result<()> {
+fn event_loop(
+    terminal: &mut DefaultTerminal,
+    app: &mut App,
+    cfg: &Config,
+    kbd: bool,
+) -> Result<()> {
     let poll = cfg.poll;
     let mut last_poll = Instant::now();
     let mut last_pr_poll = Instant::now();
     // Local input probes and GitHub reads run on workers. A completed fetch is applied only after
     // a fresh probe proves its complete input still matches (`specs/forge-host.md`).
-    let (probe_tx, probe_rx) = mpsc::channel::<(u64, Result<crate::forge::PrFetchInput, String>)>();
+    let (probe_tx, probe_rx) =
+        mpsc::channel::<(u64, Result<crate::forge::PrFetchInput, crate::forge::PrInputError>)>();
     let (recovery_tx, recovery_rx) = mpsc::channel::<(u64, PluginConfig, App)>();
     let mut recovery_inflight = false;
     let (pr_tx, pr_rx) = mpsc::channel::<TaggedPr>();
@@ -368,87 +430,33 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
     // Fetch the PR snapshot as soon as the panel opens, not on first switching to the tab, so the
     // tab is already populated when the user gets there (specs/forge-host.md).
     app.pr_pending = false;
-    while !app.should_quit {
-        if let Ok((epoch, target, mut recovered)) = recovery_rx.try_recv() {
-            recovery_inflight = false;
-            if epoch == config_epoch {
-                match config::plugin_config() {
-                    Ok(current) if current == target => {
-                        recovered.carry_authored_state_from(app);
-                        *app = recovered;
-                        pr.recover();
-                    }
-                    Ok(_) => {}
-                    Err(error) => {
-                        let message = error.to_string();
-                        if app.config_error() != Some(message.as_str()) {
-                            config_epoch = config_epoch.wrapping_add(1);
+    let result: Result<()> = (|| {
+        while !app.should_quit {
+            if let Ok((epoch, target, mut recovered)) = recovery_rx.try_recv() {
+                recovery_inflight = false;
+                if epoch == config_epoch {
+                    match config::plugin_config() {
+                        Ok(current) if current == target => {
+                            recovered.carry_authored_state_from(app);
+                            *app = recovered;
+                            pr.recover();
                         }
-                        app.set_config_error(message);
-                        pr.stop();
+                        Ok(_) => {}
+                        Err(error) => {
+                            let message = error.to_string();
+                            if app.config_error() != Some(message.as_str()) {
+                                config_epoch = config_epoch.wrapping_add(1);
+                            }
+                            app.set_config_error(message);
+                            pr.stop();
+                        }
                     }
                 }
             }
-        }
 
-        // Every frame starts from one complete validated config snapshot. Input below uses the
-        // keymap and geometry this draw paints; later observations continue before another input.
-        reconcile_plugin_config(
-            app,
-            cfg,
-            &mut config_epoch,
-            &recovery_tx,
-            &mut recovery_inflight,
-            &mut pr,
-        );
-        if pr.wait_started.is_some_and(|started| started.elapsed() >= PR_LOADING_DELAY) {
-            app.set_pr_refreshing(true);
-            pr.wait_started = None;
-        }
-        // Expire a stale status line: restart the timer when the message changes, and clear
-        // it once it has lingered past the TTL, so a notification doesn't stay up forever.
-        if app.status != last_status {
-            last_status.clone_from(&app.status);
-            status_at = Instant::now();
-        }
-        if !app.status.is_empty() && status_at.elapsed() >= STATUS_TTL {
-            app.status.clear();
-            last_status.clear();
-        }
-        // Settle both panes' scroll for this frame's viewport before painting, so the
-        // diff window matches what mouse hit-testing will map against. Each pane reveals its
-        // cursor only when a navigation requested it (so the wheel can scroll freely), then
-        // bounds the offset every frame. While composing, reserve the inline box's rows and
-        // keep revealing so the anchored line stays above the growing box.
-        let size = terminal.size()?;
-        let area = Rect::new(0, 0, size.width, size.height);
-        let viewport = ui::diff_viewport_height(area, app);
-        let effective = if app.composing() {
-            let box_h = ui::composer_height(app, ui::diff_inner_width(area, app));
-            viewport.saturating_sub(box_h).max(1)
-        } else {
-            viewport
-        };
-        let heights = ui::diff_row_heights(app, area);
-        if std::mem::take(&mut app.reveal_diff) || app.composing() {
-            app.reveal_diff_cursor(&heights, effective);
-        }
-        app.bound_diff_scroll(&heights, effective);
-        let file_vp = ui::file_viewport_height(area, app);
-        if std::mem::take(&mut app.reveal_files) {
-            app.reveal_file_cursor(file_vp);
-        }
-        app.bound_file_scroll(file_vp);
-        let painted_frame = PaintedFrameSnapshot::capture(app);
-        terminal.draw(|f| ui::render(f, app))?;
-        // A fetch completion waits for a fresh local-input probe before it may paint.
-        if let Ok(completion) = pr_rx.try_recv() {
-            let tag = (completion.generation, completion.config_epoch);
-            if pr.active_fetch_tag() != Some(tag) {
-                continue;
-            }
-            pr.active_fetch = None;
-            let config_gate = reconcile_plugin_config(
+            // Every frame starts from one complete validated config snapshot. Input below uses the
+            // keymap and geometry this draw paints; later observations continue before another input.
+            reconcile_plugin_config(
                 app,
                 cfg,
                 &mut config_epoch,
@@ -456,205 +464,268 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
                 &mut recovery_inflight,
                 &mut pr,
             );
-            if config_gate.pr_unchanged() {
-                let accepted =
-                    pr.refresh.completed(completion, config_epoch, app.tab == crate::app::Tab::Pr);
-                if accepted && pr.active_probe_epoch.is_some() {
-                    pr.discard_probe_result = true;
-                }
-                pr.probe_pending = true;
+            if pr.wait_started.is_some_and(|started| started.elapsed() >= PR_LOADING_DELAY) {
+                app.set_pr_refreshing(true);
+                pr.wait_started = None;
             }
-            if config_gate != ConfigGate::Unchanged {
-                continue;
+            // Expire a stale status line: restart the timer when the message changes, and clear
+            // it once it has lingered past the TTL, so a notification doesn't stay up forever.
+            if app.status != last_status {
+                last_status.clone_from(&app.status);
+                status_at = Instant::now();
             }
-        }
-
-        // A probe result is the authority for the current input. Input changes blank the old PR;
-        // a fetch result paints only when this probe exactly matches its tagged input.
-        if let Ok((epoch, result)) = probe_rx.try_recv() {
-            if pr.active_probe_epoch != Some(epoch) {
-                continue;
+            if !app.status.is_empty() && status_at.elapsed() >= STATUS_TTL {
+                app.status.clear();
+                last_status.clear();
             }
-            pr.active_probe_epoch = None;
-            let config_gate = reconcile_plugin_config(
-                app,
-                cfg,
-                &mut config_epoch,
-                &recovery_tx,
-                &mut recovery_inflight,
-                &mut pr,
-            );
-            let mut repaint = false;
-            if !config_gate.pr_unchanged() || epoch != config_epoch {
-                if config_gate == ConfigGate::Unchanged && epoch != config_epoch {
-                    pr.config_changed(app.tab == crate::app::Tab::Pr);
-                }
-            } else if pr.discard_probe_result {
-                pr.discard_probe_result = false;
-                pr.probe_pending = true;
+            // Settle both panes' scroll for this frame's viewport before painting, so the
+            // diff window matches what mouse hit-testing will map against. Each pane reveals its
+            // cursor only when a navigation requested it (so the wheel can scroll freely), then
+            // bounds the offset every frame. While composing, reserve the inline box's rows and
+            // keep revealing so the anchored line stays above the growing box.
+            let size = terminal.size()?;
+            let area = Rect::new(0, 0, size.width, size.height);
+            let viewport = ui::diff_viewport_height(area, app);
+            let effective = if app.composing() {
+                let box_h = ui::composer_height(app, ui::diff_inner_width(area, app));
+                viewport.saturating_sub(box_h).max(1)
             } else {
-                repaint = apply_pr_probe_result(app, &mut pr, result, config_epoch);
+                viewport
+            };
+            let heights = ui::diff_row_heights(app, area);
+            if std::mem::take(&mut app.reveal_diff) || app.composing() {
+                app.reveal_diff_cursor(&heights, effective);
             }
-            if config_gate != ConfigGate::Unchanged || repaint {
-                continue;
+            app.bound_diff_scroll(&heights, effective);
+            let file_vp = ui::file_viewport_height(area, app);
+            if std::mem::take(&mut app.reveal_files) {
+                app.reveal_file_cursor(file_vp);
             }
-        }
+            app.bound_file_scroll(file_vp);
+            let painted_frame = PaintedFrameSnapshot::capture(app);
+            terminal.draw(|f| ui::render(f, app))?;
 
-        // Record refresh triggers even while a fetch is in flight; the generation makes the old
-        // completion superseded and a new fetch starts after it exits.
-        let fallback_poll = app.tab == crate::app::Tab::Pr && last_pr_poll.elapsed() >= PR_POLL;
-        if app.pr_pending || fallback_poll {
-            app.pr_pending = false;
-            last_pr_poll = Instant::now();
-            pr.refresh.trigger();
-            pr.wait_started.get_or_insert_with(Instant::now);
-            pr.probe_pending = true;
-        }
-
-        if pr.probe_pending && pr.active_probe_epoch.is_none() && app.plugin_config().is_some() {
-            pr.probe_pending = false;
-            let (tx, repo, base, plugin_config, epoch) = (
-                probe_tx.clone(),
-                app.repo.clone(),
-                app.base.clone(),
-                app.plugin_config().expect("config checked above").clone(),
-                config_epoch,
-            );
-            pr.active_probe_epoch = Some(epoch);
-            thread::spawn(move || {
-                let input = crate::forge::fetch_input(&repo, base.as_deref(), &plugin_config);
-                let _ = tx.send((epoch, input));
-            });
-        }
-
-        if pr.active_fetch.is_none()
-            && pr.active_probe_epoch.is_none()
-            && !pr.probe_pending
-            && let Some((generation, input)) = pr.refresh.take_fetch()
-        {
-            let (tx, repo, epoch) = (pr_tx.clone(), app.repo.clone(), config_epoch);
-            let cancelled = Arc::new(AtomicBool::new(false));
-            pr.active_fetch =
-                Some(ActiveFetch { tag: (generation, epoch), cancelled: cancelled.clone() });
-            thread::spawn(move || {
-                let view = crate::forge::fetch_cancellable(&repo, &input, &cancelled);
-                let _ = tx.send(TaggedPr { generation, config_epoch: epoch, input, view });
-            });
-        }
-        // Wake at the status-expiry boundary too, so it clears on time when idle.
-        let poll_left = poll.saturating_sub(last_poll.elapsed());
-        let mut timeout = if app.status.is_empty() {
-            poll_left
-        } else {
-            poll_left.min(STATUS_TTL.saturating_sub(status_at.elapsed()))
-        };
-        // While a fetch is in flight, wake often so its result paints promptly when it lands.
-        if pr.active_fetch.is_some() || pr.active_probe_epoch.is_some() {
-            timeout = timeout.min(Duration::from_millis(100));
-        }
-        if let Some(started) = pr.wait_started {
-            timeout = timeout.min(PR_LOADING_DELAY.saturating_sub(started.elapsed()));
-        }
-        if event::poll(timeout)? {
-            if !painted_frame.still_current(app) {
-                continue;
+            // Record user and fallback refreshes before consuming worker results. A trigger that
+            // arrived during completion verification supersedes that completion before it can
+            // paint, while the generation still coalesces repeated triggers into one fresh fetch.
+            let fallback_poll = app.tab == crate::app::Tab::Pr && last_pr_poll.elapsed() >= PR_POLL;
+            if app.pr_pending || fallback_poll {
+                app.pr_pending = false;
+                last_pr_poll = Instant::now();
+                pr.refresh.trigger();
+                pr.wait_started.get_or_insert_with(Instant::now);
+                pr.probe_pending = true;
             }
-            let event = event::read()?;
-            if app.config_error().is_some() {
-                handle_blocked_event(app, &event);
-                continue;
+
+            // A fetch completion waits for a fresh local-input probe before it may paint.
+            if let Ok(completion) = pr_rx.try_recv() {
+                let tag = (completion.generation, completion.config_epoch);
+                if pr.active_fetch_tag() != Some(tag) {
+                    continue;
+                }
+                pr.active_fetch = None;
+                let config_gate = reconcile_plugin_config(
+                    app,
+                    cfg,
+                    &mut config_epoch,
+                    &recovery_tx,
+                    &mut recovery_inflight,
+                    &mut pr,
+                );
+                if config_gate.pr_unchanged() {
+                    pr.refresh.completed(completion, config_epoch, app.tab == crate::app::Tab::Pr);
+                    pr.probe_pending = true;
+                }
+                if config_gate != ConfigGate::Unchanged {
+                    continue;
+                }
             }
-            match event {
-                Event::Key(k) if k.kind == KeyEventKind::Press => {
-                    if let Err(e) = handle_key(app, k, area, painted_frame.keymap()) {
-                        app.status = format!("error: {e}");
+
+            // A probe result is the authority for the current input. Input changes blank the old PR;
+            // a fetch result paints only when this probe exactly matches its tagged input.
+            if let Ok((epoch, result)) = probe_rx.try_recv() {
+                if pr.active_probe_epoch != Some(epoch) {
+                    continue;
+                }
+                pr.active_probe_epoch = None;
+                let config_gate = reconcile_plugin_config(
+                    app,
+                    cfg,
+                    &mut config_epoch,
+                    &recovery_tx,
+                    &mut recovery_inflight,
+                    &mut pr,
+                );
+                let mut repaint = false;
+                if !config_gate.pr_unchanged() || epoch != config_epoch {
+                    if config_gate == ConfigGate::Unchanged && epoch != config_epoch {
+                        pr.config_changed(app.tab == crate::app::Tab::Pr);
                     }
-                    logln!(
-                        "key {:?}{} -> mode={:?} focus={:?} scope={:?} file={}/{} diff_cursor={} scroll={} comments={}",
-                        k.code,
-                        if k.modifiers.is_empty() {
-                            String::new()
-                        } else {
-                            format!(" {:?}", k.modifiers)
-                        },
-                        app.mode,
-                        app.focus,
-                        app.scope,
-                        app.file_cursor,
-                        app.entries.len(),
-                        app.diff_cursor,
-                        app.diff_scroll,
-                        app.store.len()
-                    );
+                } else {
+                    repaint = apply_pr_probe_result(app, &mut pr, result, config_epoch);
                 }
-                Event::Mouse(m) => {
-                    // Reuse this frame's `area` and `heights` (computed above for the scroll
-                    // settle) so a drag-select doesn't re-measure the whole diff per motion.
-                    if let Err(e) = handle_mouse(app, m, area, &heights, painted_frame.keymap()) {
-                        app.status = format!("error: {e}");
-                    }
-                    logln!(
-                        "mouse {:?} col={} row={} -> focus={:?} file={} diff_cursor={} scroll={} anchor={:?}",
-                        m.kind,
-                        m.column,
-                        m.row,
-                        app.focus,
-                        app.file_cursor,
-                        app.diff_cursor,
-                        app.diff_scroll,
-                        app.select_anchor
-                    );
+                if config_gate != ConfigGate::Unchanged || repaint {
+                    continue;
                 }
-                // Bracketed paste: insert at the caret while composing, ignored otherwise.
-                Event::Paste(text) => {
-                    app.input_paste(&text);
-                    logln!("paste {} chars -> composing={}", text.len(), app.composing());
-                }
-                Event::Resize(_, _) => {
-                    handle_resize(app);
-                }
-                _ => {}
             }
-        }
-        if last_poll.elapsed() >= poll {
-            let config_gate = reconcile_plugin_config(
-                app,
-                cfg,
-                &mut config_epoch,
-                &recovery_tx,
-                &mut recovery_inflight,
-                &mut pr,
-            );
-            if !config_gate.ready() {
-                last_poll = Instant::now();
-                continue;
+
+            if pr.can_start_probe(app.plugin_config().is_some()) {
+                pr.probe_pending = false;
+                let (tx, repo, base, plugin_config, epoch) = (
+                    probe_tx.clone(),
+                    app.repo.clone(),
+                    app.base.clone(),
+                    app.plugin_config().expect("config checked above").clone(),
+                    config_epoch,
+                );
+                let verifies_completion = pr.refresh.pending.is_some();
+                pr.active_probe_epoch = Some(epoch);
+                thread::spawn(move || {
+                    let input = if verifies_completion {
+                        crate::forge::verify_input(&repo, base.as_deref(), &plugin_config)
+                    } else {
+                        crate::forge::fetch_input(&repo, base.as_deref(), &plugin_config)
+                    };
+                    let _ = tx.send((epoch, input));
+                });
             }
-            pr.probe_pending = true;
-            // Advance the last-turn baseline before reloading, so a turn promoted this poll
-            // is visible to this poll's changed-files build. When the agent just went idle, its
-            // turn may have pushed or run `gh pr merge`; refetch the PR if the tab is showing it
-            // (entering the tab refetches on its own otherwise) (specs/forge-host.md).
-            let turn_changed = app.track_turn();
-            if turn_changed && app.tab == crate::app::Tab::Pr {
-                app.pr_pending = true;
-            }
-            // A failed refresh must never crash the UI or drop a comment.
-            if (!config_gate.file_reloaded() || turn_changed)
-                && let Err(e) = app.reload()
+
+            if pr.active_fetch.is_none()
+                && pr.active_probe_epoch.is_none()
+                && !pr.probe_pending
+                && let Some((generation, input)) = pr.refresh.take_fetch()
             {
-                app.status = format!("refresh failed: {e}");
+                let (tx, repo, epoch) = (pr_tx.clone(), app.repo.clone(), config_epoch);
+                let cancelled = Arc::new(AtomicBool::new(false));
+                pr.active_fetch =
+                    Some(ActiveFetch { tag: (generation, epoch), cancelled: cancelled.clone() });
+                thread::spawn(move || {
+                    let view = crate::forge::fetch_cancellable(&repo, &input, &cancelled);
+                    let _ = tx.send(TaggedPr { generation, config_epoch: epoch, input, view });
+                });
             }
-            logln!(
-                "poll files={} composing={} diff_cursor={} scroll={}",
-                app.entries.len(),
-                app.composing(),
-                app.diff_cursor,
-                app.diff_scroll
-            );
-            last_poll = Instant::now();
+            // Wake at the status-expiry boundary too, so it clears on time when idle.
+            let poll_left = poll.saturating_sub(last_poll.elapsed());
+            let mut timeout = if app.status.is_empty() {
+                poll_left
+            } else {
+                poll_left.min(STATUS_TTL.saturating_sub(status_at.elapsed()))
+            };
+            // While a fetch is in flight, wake often so its result paints promptly when it lands.
+            if pr.active_fetch.is_some() || pr.active_probe_epoch.is_some() {
+                timeout = timeout.min(Duration::from_millis(100));
+            }
+            if let Some(started) = pr.wait_started {
+                timeout = timeout.min(PR_LOADING_DELAY.saturating_sub(started.elapsed()));
+            }
+            if event::poll(timeout)? {
+                if !painted_frame.still_current(app) {
+                    continue;
+                }
+                let event = event::read()?;
+                if app.config_error().is_some() {
+                    handle_blocked_event(app, &event);
+                    continue;
+                }
+                match event {
+                    Event::Key(k) if k.kind == KeyEventKind::Press => {
+                        if let Err(e) = handle_key(app, k, area, painted_frame.keymap()) {
+                            app.status = format!("error: {e}");
+                        }
+                        logln!(
+                            "key {:?}{} -> mode={:?} focus={:?} scope={:?} file={}/{} diff_cursor={} scroll={} comments={}",
+                            k.code,
+                            if k.modifiers.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" {:?}", k.modifiers)
+                            },
+                            app.mode,
+                            app.focus,
+                            app.scope,
+                            app.file_cursor,
+                            app.entries.len(),
+                            app.diff_cursor,
+                            app.diff_scroll,
+                            app.store.len()
+                        );
+                    }
+                    Event::Mouse(m) => {
+                        // Reuse this frame's `area` and `heights` (computed above for the scroll
+                        // settle) so a drag-select doesn't re-measure the whole diff per motion.
+                        if let Err(e) = handle_mouse(app, m, area, &heights, painted_frame.keymap())
+                        {
+                            app.status = format!("error: {e}");
+                        }
+                        logln!(
+                            "mouse {:?} col={} row={} -> focus={:?} file={} diff_cursor={} scroll={} anchor={:?}",
+                            m.kind,
+                            m.column,
+                            m.row,
+                            app.focus,
+                            app.file_cursor,
+                            app.diff_cursor,
+                            app.diff_scroll,
+                            app.select_anchor
+                        );
+                    }
+                    // Bracketed paste: insert at the caret while composing, ignored otherwise.
+                    Event::Paste(text) => {
+                        app.input_paste(&text);
+                        logln!("paste {} chars -> composing={}", text.len(), app.composing());
+                    }
+                    Event::Resize(_, _) => {
+                        handle_resize(app);
+                    }
+                    _ => {}
+                }
+            }
+            if app.should_quit {
+                break;
+            }
+            if last_poll.elapsed() >= poll {
+                let config_gate = reconcile_plugin_config(
+                    app,
+                    cfg,
+                    &mut config_epoch,
+                    &recovery_tx,
+                    &mut recovery_inflight,
+                    &mut pr,
+                );
+                if !config_gate.ready() {
+                    last_poll = Instant::now();
+                    continue;
+                }
+                schedule_poll_probe(&mut pr, app.tab);
+                // Advance the last-turn baseline before reloading, so a turn promoted this poll
+                // is visible to this poll's changed-files build. When the agent just went idle, its
+                // turn may have pushed or run `gh pr merge`; refetch the PR if the tab is showing it
+                // (entering the tab refetches on its own otherwise) (specs/forge-host.md).
+                let turn_changed = app.track_turn();
+                if turn_changed && app.tab == crate::app::Tab::Pr {
+                    app.pr_pending = true;
+                }
+                // A failed refresh must never crash the UI or drop a comment.
+                if (!config_gate.file_reloaded() || turn_changed)
+                    && let Err(e) = app.reload()
+                {
+                    app.status = format!("refresh failed: {e}");
+                }
+                logln!(
+                    "poll files={} composing={} diff_cursor={} scroll={}",
+                    app.entries.len(),
+                    app.composing(),
+                    app.diff_cursor,
+                    app.diff_scroll
+                );
+                last_poll = Instant::now();
+            }
         }
-    }
-    Ok(())
+        Ok(())
+    })();
+    restore_terminal(kbd);
+    drain_pr_shutdown(&mut pr, &probe_rx, &pr_rx);
+    result
 }
 
 /// A blocked frame accepts no normal input. Quit remains available, and terminal/pointer cleanup
@@ -683,29 +754,47 @@ fn handle_blocked_event(app: &mut App, event: &Event) {
 fn apply_pr_probe_result(
     app: &mut App,
     pr: &mut PrCoordinator,
-    result: Result<crate::forge::PrFetchInput, String>,
+    result: Result<crate::forge::PrFetchInput, crate::forge::PrInputError>,
     config_epoch: u64,
 ) -> bool {
     match result {
         Err(error) => {
-            app.apply_pr(crate::forge::PrView::Error(error));
+            pr.refresh.probe_failed(pr.probe_pending);
+            let (message, same_target) = match error {
+                crate::forge::PrInputError::TargetRead(message) => (message, false),
+                crate::forge::PrInputError::BranchState { target, message } => {
+                    let same_target = pr.refresh.current_input.as_ref().is_some_and(|input| {
+                        matches!(
+                            &input.repository,
+                            crate::git::RepositoryIdentity::Repository(current)
+                                if current == &target
+                        )
+                    });
+                    (message, same_target)
+                }
+            };
+            if !same_target {
+                app.clear_pr();
+            }
+            app.apply_pr(crate::forge::PrView::GitError(message));
             pr.wait_started = None;
             true
         }
-        Ok(input) => match pr.refresh.observed(input, config_epoch, app.tab == crate::app::Tab::Pr)
-        {
-            Some(PrEffect::Clear) => {
-                app.clear_pr();
-                pr.wait_started = (app.tab == crate::app::Tab::Pr).then(Instant::now);
-                true
+        Ok(input) => {
+            match pr.refresh.observed(input, config_epoch, app.tab == crate::app::Tab::Pr) {
+                Some(PrEffect::Clear) => {
+                    app.clear_pr();
+                    pr.wait_started = (app.tab == crate::app::Tab::Pr).then(Instant::now);
+                    true
+                }
+                Some(PrEffect::Apply(view)) => {
+                    app.apply_pr(view);
+                    pr.wait_started = None;
+                    true
+                }
+                None => false,
             }
-            Some(PrEffect::Apply(view)) => {
-                app.apply_pr(view);
-                pr.wait_started = None;
-                true
-            }
-            None => false,
-        },
+        }
     }
 }
 
@@ -1149,13 +1238,13 @@ pub fn handle_mouse(
 mod refresh_tests {
     use super::{
         ActiveFetch, PaintedFrameSnapshot, PrCoordinator, PrEffect, PrRefresh, TaggedPr,
-        apply_plugin_config_observation, apply_pr_probe_result, handle_blocked_event,
-        handle_resize, ready_app,
+        apply_plugin_config_observation, apply_pr_probe_result, drain_pr_shutdown,
+        handle_blocked_event, handle_resize, ready_app, schedule_poll_probe,
     };
-    use crate::app::App;
+    use crate::app::{App, Tab};
     use crate::config::{Config, plugin_config_in};
     use crate::forge::{PrFetchInput, PrView};
-    use crate::git::OriginIdentity;
+    use crate::git::RepositoryIdentity;
     use crate::model::Scope;
     use ratatui::crossterm::event::{
         Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -1166,11 +1255,27 @@ mod refresh_tests {
     use std::time::Duration;
 
     fn input(head: &str) -> PrFetchInput {
+        input_with("github.com", "acme", "widgets", head, &["feature"])
+    }
+
+    fn input_with(
+        host: &str,
+        owner: &str,
+        name: &str,
+        head: &str,
+        candidates: &[&str],
+    ) -> PrFetchInput {
         PrFetchInput {
-            origin: OriginIdentity::Missing,
+            repository: RepositoryIdentity::Repository(
+                crate::git::RepoTarget::new(host, owner, name).unwrap(),
+            ),
             head_oid: Some(head.to_string()),
-            candidates: vec!["feature".to_string()],
+            candidates: candidates.iter().map(|name| (*name).to_string()).collect(),
         }
+    }
+
+    fn no_pr() -> PrView {
+        PrView::NoPr
     }
 
     #[test]
@@ -1191,7 +1296,6 @@ mod refresh_tests {
 
         assert!(apply_pr_probe_result(&mut app, &mut coordinator, Ok(input("new")), 0));
         assert!(matches!(app.pr, PrView::Pending));
-
         assert!(!apply_pr_probe_result(&mut app, &mut coordinator, Ok(input("new")), 0));
     }
 
@@ -1282,7 +1386,7 @@ mod refresh_tests {
                 generation: old_generation,
                 config_epoch: 0,
                 input: old_input,
-                view: PrView::NoPr(vec![]),
+                view: no_pr(),
             },
             0,
             true,
@@ -1301,12 +1405,76 @@ mod refresh_tests {
         refresh.observed(a.clone(), 0, true);
         let (generation, old_input) = refresh.take_fetch().unwrap();
         refresh.completed(
-            TaggedPr { generation, config_epoch: 0, input: old_input, view: PrView::NoPr(vec![]) },
+            TaggedPr { generation, config_epoch: 0, input: old_input, view: no_pr() },
             0,
             true,
         );
 
         assert!(matches!(refresh.observed(b, 0, true), Some(PrEffect::Clear)));
+    }
+
+    #[test]
+    fn a_trigger_during_completion_verification_supersedes_before_apply() {
+        let a = input("a");
+        let mut refresh = PrRefresh::new(true);
+        refresh.observed(a.clone(), 0, true);
+        let (old_generation, fetch_input) = refresh.take_fetch().unwrap();
+        refresh.completed(
+            TaggedPr {
+                generation: old_generation,
+                config_epoch: 0,
+                input: fetch_input,
+                view: no_pr(),
+            },
+            0,
+            true,
+        );
+
+        refresh.trigger();
+        assert!(refresh.observed(a, 0, true).is_none(), "the completed snapshot never applies");
+        let (new_generation, _) = refresh.take_fetch().unwrap();
+        assert_ne!(new_generation, old_generation);
+    }
+
+    #[test]
+    fn repository_target_and_candidates_are_refresh_boundaries() {
+        let original = input("head");
+        let changes = [
+            input_with("github.com", "upstream", "widgets", "head", &["feature"]),
+            input_with("github.enterprise.test", "acme", "widgets", "head", &["feature"]),
+            input_with("github.com", "acme", "other-widgets", "head", &["feature"]),
+            input_with("github.com", "acme", "widgets", "head", &["published", "feature"]),
+        ];
+
+        for changed in changes {
+            let mut refresh = PrRefresh::new(true);
+            refresh.observed(original.clone(), 0, true);
+            let (generation, old_input) = refresh.take_fetch().unwrap();
+            refresh.completed(
+                TaggedPr { generation, config_epoch: 0, input: old_input, view: no_pr() },
+                0,
+                true,
+            );
+
+            assert!(matches!(refresh.observed(changed.clone(), 0, true), Some(PrEffect::Clear)));
+            assert_eq!(refresh.take_fetch().map(|(_, input)| input), Some(changed));
+        }
+    }
+
+    #[test]
+    fn off_tab_repository_change_clears_and_defers_its_replacement() {
+        let old = input("head");
+        let changed = input_with("github.com", "upstream", "widgets", "head", &["feature"]);
+        let mut refresh = PrRefresh::new(true);
+        refresh.observed(old, 0, true);
+        let _ = refresh.take_fetch().unwrap();
+
+        assert!(matches!(refresh.observed(changed.clone(), 0, false), Some(PrEffect::Clear)));
+        assert!(refresh.take_fetch().is_none());
+
+        refresh.trigger();
+        assert!(refresh.observed(changed.clone(), 0, true).is_none());
+        assert_eq!(refresh.take_fetch().map(|(_, input)| input), Some(changed));
     }
 
     #[test]
@@ -1317,7 +1485,7 @@ mod refresh_tests {
         refresh.observed(a.clone(), 1, true);
         let (generation, old_input) = refresh.take_fetch().unwrap();
         refresh.completed(
-            TaggedPr { generation, config_epoch: 1, input: old_input, view: PrView::NoPr(vec![]) },
+            TaggedPr { generation, config_epoch: 1, input: old_input, view: no_pr() },
             2,
             false,
         );
@@ -1332,38 +1500,127 @@ mod refresh_tests {
         refresh.observed(a.clone(), 3, true);
         let (generation, fetch_input) = refresh.take_fetch().unwrap();
         refresh.completed(
-            TaggedPr {
-                generation,
-                config_epoch: 3,
-                input: fetch_input,
-                view: PrView::NoPr(vec!["feature".to_string()]),
-            },
+            TaggedPr { generation, config_epoch: 3, input: fetch_input, view: no_pr() },
             3,
             true,
         );
 
-        assert!(matches!(refresh.observed(a, 3, true), Some(PrEffect::Apply(PrView::NoPr(_)))));
+        assert!(matches!(refresh.observed(a, 3, true), Some(PrEffect::Apply(PrView::NoPr))));
     }
 
     #[test]
-    fn a_failed_verification_probe_keeps_the_completion_for_the_next_probe() {
+    fn a_failed_verification_probe_discards_the_hidden_completion() {
         let a = input("a");
         let mut refresh = PrRefresh::new(true);
         refresh.observed(a.clone(), 0, true);
         let (generation, fetch_input) = refresh.take_fetch().unwrap();
         refresh.completed(
-            TaggedPr {
-                generation,
-                config_epoch: 0,
-                input: fetch_input,
-                view: PrView::NoPr(vec![]),
-            },
+            TaggedPr { generation, config_epoch: 0, input: fetch_input, view: no_pr() },
             0,
             true,
         );
 
+        refresh.probe_failed(false);
         assert!(refresh.take_fetch().is_none());
-        assert!(matches!(refresh.observed(a, 0, true), Some(PrEffect::Apply(PrView::NoPr(_)))));
+        refresh.trigger();
+        assert!(refresh.observed(a, 0, true).is_none());
+        assert!(refresh.take_fetch().is_some(), "the next refresh starts a fresh GitHub fetch");
+    }
+
+    #[test]
+    fn a_failed_probe_cannot_fetch_the_previous_repository() {
+        let a = input("a");
+        let mut refresh = PrRefresh::new(true);
+        refresh.observed(a.clone(), 0, true);
+        let _ = refresh.take_fetch().unwrap();
+        refresh.trigger();
+
+        refresh.probe_failed(false);
+        assert!(refresh.take_fetch().is_none());
+
+        refresh.trigger();
+        assert!(refresh.observed(a, 0, true).is_none());
+        assert!(refresh.take_fetch().is_some());
+    }
+
+    #[test]
+    fn a_failed_probe_keeps_a_refresh_that_was_queued_behind_it() {
+        let a = input("a");
+        let mut refresh = PrRefresh::new(true);
+        refresh.observed(a.clone(), 0, true);
+        let _ = refresh.take_fetch().unwrap();
+
+        refresh.trigger();
+        refresh.probe_failed(true);
+        assert!(refresh.observed(a, 0, true).is_none());
+        assert!(refresh.take_fetch().is_some(), "the queued refresh still starts GitHub work");
+    }
+
+    #[test]
+    fn an_unproven_repository_replaces_the_snapshot_and_blocks_a_stale_fetch() {
+        let mut app = App::new(std::path::PathBuf::from("."), Scope::Uncommitted, None);
+        let mut coordinator = PrCoordinator::new(true);
+        coordinator.refresh.observed(input("head"), 0, true);
+        let _ = coordinator.refresh.take_fetch().unwrap();
+        coordinator.refresh.trigger();
+        coordinator.probe_pending = false;
+        app.apply_pr(no_pr());
+
+        assert!(apply_pr_probe_result(
+            &mut app,
+            &mut coordinator,
+            Err(crate::forge::PrInputError::TargetRead("repository read failed".to_string())),
+            0,
+        ));
+        assert_eq!(app.pr, PrView::GitError("repository read failed".to_string()));
+        assert!(coordinator.wait_started.is_none());
+        assert!(coordinator.refresh.take_fetch().is_none());
+    }
+
+    #[test]
+    fn a_local_read_failure_preserves_a_snapshot_for_the_same_repository() {
+        let mut app = App::new(std::path::PathBuf::from("."), Scope::Uncommitted, None);
+        let snapshot = no_pr();
+        app.apply_pr(snapshot.clone());
+        let mut coordinator = PrCoordinator::new(true);
+        coordinator.refresh.observed(input("head"), 0, true);
+        coordinator.probe_pending = false;
+
+        assert!(apply_pr_probe_result(
+            &mut app,
+            &mut coordinator,
+            Err(crate::forge::PrInputError::BranchState {
+                target: crate::git::RepoTarget::new("github.com", "acme", "widgets").unwrap(),
+                message: "HEAD read failed".to_string(),
+            }),
+            0,
+        ));
+
+        assert_eq!(app.pr, snapshot);
+        assert!(app.pr_notice().is_some_and(|notice| notice.starts_with("Git read failed")));
+        assert!(coordinator.refresh.take_fetch().is_none());
+    }
+
+    #[test]
+    fn a_local_read_failure_for_a_different_repository_replaces_the_snapshot() {
+        let mut app = App::new(std::path::PathBuf::from("."), Scope::Uncommitted, None);
+        app.apply_pr(no_pr());
+        let mut coordinator = PrCoordinator::new(true);
+        coordinator.refresh.observed(input("head"), 0, true);
+        coordinator.probe_pending = false;
+
+        assert!(apply_pr_probe_result(
+            &mut app,
+            &mut coordinator,
+            Err(crate::forge::PrInputError::BranchState {
+                target: crate::git::RepoTarget::new("github.com", "other", "widgets").unwrap(),
+                message: "HEAD read failed".to_string(),
+            }),
+            0,
+        ));
+
+        assert_eq!(app.pr, PrView::GitError("HEAD read failed".to_string()));
+        assert!(app.pr_notice().is_none());
     }
 
     #[test]
@@ -1372,6 +1629,16 @@ mod refresh_tests {
         refresh.observed(input("a"), 0, false);
         refresh.config_changed(false);
         assert!(refresh.take_fetch().is_none());
+    }
+
+    #[test]
+    fn normal_poll_schedules_repository_probe_only_on_the_pr_tab() {
+        let mut coordinator = PrCoordinator::new(false);
+        schedule_poll_probe(&mut coordinator, Tab::Changes);
+        assert!(!coordinator.probe_pending);
+
+        schedule_poll_probe(&mut coordinator, Tab::Pr);
+        assert!(coordinator.probe_pending);
     }
 
     #[test]
@@ -1384,6 +1651,54 @@ mod refresh_tests {
 
         assert!(cancelled.load(Ordering::Acquire));
         assert_eq!(coordinator.active_fetch_tag(), Some((7, 3)));
+    }
+
+    #[test]
+    fn repository_probe_waits_for_the_active_fetch_to_exit() {
+        let mut coordinator = PrCoordinator::new(true);
+        coordinator.active_fetch =
+            Some(ActiveFetch { tag: (7, 3), cancelled: Arc::new(AtomicBool::new(false)) });
+
+        assert!(!coordinator.can_start_probe(true));
+        coordinator.active_fetch = None;
+        assert!(coordinator.can_start_probe(true));
+    }
+
+    #[test]
+    fn a_config_change_retains_probe_ownership_until_completion() {
+        let mut coordinator = PrCoordinator::new(true);
+        coordinator.active_probe_epoch = Some(3);
+
+        coordinator.config_changed(true);
+
+        assert_eq!(coordinator.active_probe_epoch, Some(3));
+        assert!(coordinator.probe_pending);
+    }
+
+    #[test]
+    fn shutdown_cancels_and_drains_matching_pr_workers() {
+        let fetch_cancelled = Arc::new(AtomicBool::new(false));
+        let mut coordinator = PrCoordinator::new(true);
+        coordinator.active_probe_epoch = Some(3);
+        coordinator.active_fetch =
+            Some(ActiveFetch { tag: (7, 3), cancelled: fetch_cancelled.clone() });
+        let (probe_tx, probe_rx) = mpsc::channel();
+        let (fetch_tx, fetch_rx) = mpsc::channel();
+        probe_tx.send((3, Ok(input("probe")))).unwrap();
+        fetch_tx
+            .send(TaggedPr {
+                generation: 7,
+                config_epoch: 3,
+                input: input("fetch"),
+                view: PrView::Pending,
+            })
+            .unwrap();
+
+        drain_pr_shutdown(&mut coordinator, &probe_rx, &fetch_rx);
+
+        assert!(fetch_cancelled.load(Ordering::Acquire));
+        assert!(coordinator.active_probe_epoch.is_none());
+        assert!(coordinator.active_fetch.is_none());
     }
 
     #[test]

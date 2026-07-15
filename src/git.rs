@@ -67,14 +67,49 @@ pub fn toplevel(path: &Path) -> Option<PathBuf> {
 /// A canonical GitHub API and repository target.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RepoTarget {
-    pub host: String,
-    pub owner: String,
-    pub name: String,
+    host: String,
+    owner: String,
+    name: String,
 }
 
-/// Host classification for origin's rewritten primary fetch URL.
+impl RepoTarget {
+    /// Build one canonical repository target from a hostname and GitHub owner/name pair.
+    pub(crate) fn new(host: &str, owner: &str, name: &str) -> Option<Self> {
+        let host = host.to_ascii_lowercase();
+        (crate::config::valid_host_syntax(&host)
+            && valid_repository_component(owner)
+            && valid_repository_component(name))
+        .then(|| Self { host, owner: owner.to_owned(), name: name.to_owned() })
+    }
+
+    /// The lowercase canonical forge hostname.
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+
+    /// The repository owner used at the GitHub API boundary.
+    pub fn owner(&self) -> &str {
+        &self.owner
+    }
+
+    /// The repository name used at the GitHub API boundary.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+fn valid_repository_component(value: &str) -> bool {
+    !value.is_empty()
+        && value != "."
+        && value != ".."
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
+/// Host classification for one candidate repository remote.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum OriginIdentity {
+pub enum RepositoryIdentity {
     Repository(RepoTarget),
     Missing,
     Hostless,
@@ -89,53 +124,39 @@ enum RemoteTransport {
     Unsupported,
 }
 
-/// Classify one remote URL against GitHub.com and the optional configured Enterprise host.
-fn classify_remote(url: &str, enterprise: Option<&str>) -> OriginIdentity {
+/// Classify one repository URL against GitHub.com and the configured Enterprise host.
+fn classify_remote(url: &str, enterprise: Option<&str>) -> RepositoryIdentity {
     let Some((transport, host, path, has_port)) = split_remote(url) else {
-        return OriginIdentity::Hostless;
+        return RepositoryIdentity::Hostless;
     };
     if host.is_empty() {
-        return OriginIdentity::Hostless;
+        return RepositoryIdentity::Hostless;
     }
-    let host_lower = host.to_ascii_lowercase();
+    let host = host.to_ascii_lowercase();
     if transport == RemoteTransport::Unsupported
         || (transport == RemoteTransport::Hosted && has_port)
     {
-        return OriginIdentity::Unsupported(host_lower);
+        return RepositoryIdentity::Unsupported(host);
     }
-    let canonical = if host_lower == "github.com"
-        || (transport == RemoteTransport::Ssh && is_alias(&host_lower, "github.com"))
-    {
-        Some("github.com")
-    } else if let Some(enterprise) = enterprise
-        && (host_lower == enterprise
-            || (transport == RemoteTransport::Ssh && is_alias(&host_lower, enterprise)))
-    {
-        Some(enterprise)
-    } else {
-        None
-    };
-    let Some(canonical) = canonical else {
-        return OriginIdentity::Unsupported(host_lower);
+    let Some(canonical) = canonical_supported_host(&host, enterprise) else {
+        return RepositoryIdentity::Unsupported(host);
     };
     let path = path.trim_matches('/');
     let path = path.strip_suffix(".git").unwrap_or(path);
     let mut parts = path.split('/');
     let (Some(owner), Some(name), None) = (parts.next(), parts.next(), parts.next()) else {
-        return OriginIdentity::Malformed(canonical.to_owned());
+        return RepositoryIdentity::Malformed(canonical);
     };
-    if owner.is_empty() || name.is_empty() {
-        return OriginIdentity::Malformed(canonical.to_owned());
+    match RepoTarget::new(&canonical, owner, name) {
+        Some(target) => RepositoryIdentity::Repository(target),
+        None => RepositoryIdentity::Malformed(canonical),
     }
-    OriginIdentity::Repository(RepoTarget {
-        host: canonical.to_owned(),
-        owner: owner.to_owned(),
-        name: name.to_owned(),
-    })
 }
 
-fn is_alias(host: &str, canonical: &str) -> bool {
-    host.strip_prefix(canonical).is_some_and(|suffix| suffix.starts_with('-') && suffix.len() > 1)
+/// Return the exact GitHub.com or configured Enterprise host, lowercased.
+fn canonical_supported_host(host: &str, enterprise: Option<&str>) -> Option<String> {
+    let host = host.to_ascii_lowercase();
+    (host == "github.com" || enterprise == Some(host.as_str())).then_some(host)
 }
 
 /// Split a Git remote URL into transport, host, and path for scheme and scp-style forms.
@@ -160,17 +181,17 @@ fn split_remote(url: &str) -> Option<(RemoteTransport, &str, &str, bool)> {
 
 // --- PR-fetch local reads (candidate branches) -----------------------------------
 //
-// See `specs/forge-host.md` "Resolution" / "Candidate branches". Everything the PR fetch
-// reads from local git happens here in one failure-aware pass: a git command that *fails*
-// is a transient [`GitFail`] (the PR tab freezes its last good view), never read as
-// absence; only a command that succeeds and finds nothing narrows the answer.
+// See `specs/forge-host.md` "Resolution" / "Candidate branches". Repository selection and
+// branch-state derivation both use the same failure contract: a git command that *fails* is a
+// transient [`GitFail`], never read as absence. The caller distinguishes a target read failure
+// from a later branch-state failure so only an unproven target replaces the visible snapshot.
 
 /// A git command that failed (spawn error or unexpected non-zero exit) during the PR
 /// fetch's local reads — a transient failure per `specs/forge-host.md`, never absence.
 #[derive(Debug)]
 pub struct GitFail(pub String);
 
-/// Spawn one PR-fetch git read. `LC_ALL=C` pins Git's messages to English — origin discovery
+/// Spawn one PR-fetch git read. `LC_ALL=C` pins Git's messages to English — remote discovery
 /// classifies a missing remote by stderr text, which Git otherwise localizes.
 fn run_git(repo: &Path, args: &[&str]) -> Result<std::process::Output, GitFail> {
     Command::new("git")
@@ -208,12 +229,10 @@ fn git_strict(repo: &Path, args: &[&str]) -> Result<String, GitFail> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// Everything the PR fetch reads from local Git in one failure-aware pass. [`OriginIdentity`]
-/// preserves repository, missing, hostless, unsupported, and malformed origin states; the
-/// optional `HEAD` and candidate list preserve detached and unborn states.
+/// Everything that determines one PR fetch.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PrFetchInput {
-    pub origin: OriginIdentity,
+    pub repository: RepositoryIdentity,
     /// `HEAD` pinned to an OID at the start of the pass; every ancestry test, distance,
     /// and the `sync` count use this pin, so one fetch reads one consistent local state.
     pub head_oid: Option<String>,
@@ -222,18 +241,22 @@ pub struct PrFetchInput {
     pub candidates: Vec<String>,
 }
 
-/// Derive the PR fetch's local state: the origin identity, pinned `HEAD`, and the candidate
-/// branches the work could be published under (`specs/forge-host.md`).
+/// The local branch identity and candidate publication names.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PrLocalState {
+    pub head_oid: Option<String>,
+    pub candidates: Vec<String>,
+}
+
+/// Derive the pinned `HEAD` and candidate branches (`specs/forge-host.md`).
 pub fn pr_local(
     repo: &Path,
     base_flag: Option<&str>,
     config_bases: &[String],
-    github_host: Option<&str>,
-) -> Result<PrFetchInput, GitFail> {
-    let origin = origin_identity(repo, github_host)?;
+) -> Result<PrLocalState, GitFail> {
     let Some(branch) = git_tristate(repo, &["symbolic-ref", "--quiet", "--short", "HEAD"])? else {
         // Detached HEAD — post-merge cleanup, not a review seat; nothing to publish.
-        return Ok(PrFetchInput { origin, head_oid: None, candidates: Vec::new() });
+        return Ok(PrLocalState { head_oid: None, candidates: Vec::new() });
     };
     let head_oid = git_tristate(repo, &["rev-parse", "--verify", "--quiet", "HEAD^{commit}"])?;
     let bases = base_names(base_flag, config_bases);
@@ -246,24 +269,38 @@ pub fn pr_local(
         None => Vec::new(), // an unborn branch has no commits to compare against
     };
     let candidates = candidate_order(push_dest.as_deref(), &tips, &branch);
-    Ok(PrFetchInput { origin, head_oid, candidates })
+    Ok(PrLocalState { head_oid, candidates })
 }
 
-/// Classify origin's primary rewritten fetch URL. A missing origin is a clean state; every other
-/// `remote get-url` failure is transient.
-/// `remote get-url` is kept over `config --get remote.origin.url` because it applies
-/// `url.<base>.insteadOf` rewrites, which can be what maps a shorthand to github.com. Its
-/// missing-remote exit code (2) is also git's generic usage-error code, so absence is told
-/// apart by the message text — stable English under [`run_git`]'s `LC_ALL=C`.
-fn origin_identity(repo: &Path, github_host: Option<&str>) -> Result<OriginIdentity, GitFail> {
-    let args = ["remote", "get-url", "origin"];
+/// Resolve from a readable supported `upstream`; unusable identities fall back, read errors do not.
+pub(crate) fn repository_identity(
+    repo: &Path,
+    github_host: Option<&str>,
+) -> Result<RepositoryIdentity, GitFail> {
+    let upstream = remote_identity(repo, "upstream", github_host)?;
+    if matches!(upstream, RepositoryIdentity::Repository(_)) {
+        return Ok(upstream);
+    }
+    remote_identity(repo, "origin", github_host)
+}
+
+/// Classify one rewritten primary fetch URL. A missing remote is a clean state; every other
+/// `remote get-url` failure is transient. The command applies `url.*.insteadOf` rewrites.
+fn remote_identity(
+    repo: &Path,
+    remote: &str,
+    github_host: Option<&str>,
+) -> Result<RepositoryIdentity, GitFail> {
+    let args = ["remote", "get-url", "--", remote];
     let out = run_git(repo, &args)?;
     if out.status.success() {
-        return Ok(classify_remote(String::from_utf8_lossy(&out.stdout).trim(), github_host));
+        let url = std::str::from_utf8(&out.stdout)
+            .map_err(|_| GitFail(format!("git remote get-url {remote}: invalid UTF-8")))?;
+        return Ok(classify_remote(url.trim(), github_host));
     }
     let stderr = String::from_utf8_lossy(&out.stderr);
     if stderr.to_lowercase().contains("no such remote") {
-        return Ok(OriginIdentity::Missing);
+        return Ok(RepositoryIdentity::Missing);
     }
     Err(GitFail(format!("git {args:?}: {}", stderr.trim())))
 }
@@ -841,7 +878,7 @@ fn parse_name_status(out: &str) -> Vec<(ChangeKind, String, Option<String>)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChangeKind, OriginIdentity, RepoTarget, candidate_order, classify_remote,
+        ChangeKind, RepoTarget, RepositoryIdentity, candidate_order, classify_remote,
         parse_name_status, parse_numstat,
     };
 
@@ -885,13 +922,9 @@ mod tests {
     }
 
     #[test]
-    fn origin_identity_parses_github_and_enterprise_remote_forms() {
+    fn repository_identity_parses_github_and_enterprise_remote_forms() {
         let repo = |host: &str, owner: &str, name: &str| {
-            OriginIdentity::Repository(RepoTarget {
-                host: host.to_string(),
-                owner: owner.to_string(),
-                name: name.to_string(),
-            })
+            RepositoryIdentity::Repository(RepoTarget::new(host, owner, name).unwrap())
         };
         // HTTPS, with and without `.git` and a trailing slash.
         assert_eq!(
@@ -923,18 +956,6 @@ mod tests {
             classify_remote("git://github.com/owner/repo", None),
             repo("github.com", "owner", "repo")
         );
-        // Multi-account SSH host alias (`~/.ssh/config` `Host github.com-work`).
-        assert_eq!(
-            classify_remote("git@github.com-work:owner/repo.git", None),
-            repo("github.com", "owner", "repo")
-        );
-        assert_eq!(
-            classify_remote(
-                "git@github.company.com-work:owner/repo.git",
-                Some("github.company.com")
-            ),
-            repo("github.company.com", "owner", "repo")
-        );
         assert_eq!(
             classify_remote(
                 "https://github.company.com/owner/repo.git",
@@ -945,51 +966,75 @@ mod tests {
     }
 
     #[test]
-    fn origin_identity_keeps_alias_and_failure_states_distinct() {
+    fn repository_identity_rejects_aliases_and_keeps_failure_states_distinct() {
+        assert_eq!(
+            classify_remote("git@github.com-work:owner/repo.git", None),
+            RepositoryIdentity::Unsupported("github.com-work".to_string())
+        );
+        assert_eq!(
+            classify_remote(
+                "git@github.company.com-work:owner/repo.git",
+                Some("github.company.com")
+            ),
+            RepositoryIdentity::Unsupported("github.company.com-work".to_string())
+        );
         assert_eq!(
             classify_remote("https://github.com-attacker/owner/repo", None),
-            OriginIdentity::Unsupported("github.com-attacker".to_string())
+            RepositoryIdentity::Unsupported("github.com-attacker".to_string())
         );
         assert_eq!(
             classify_remote(
                 "https://github.company.com-work/owner/repo",
                 Some("github.company.com")
             ),
-            OriginIdentity::Unsupported("github.company.com-work".to_string())
+            RepositoryIdentity::Unsupported("github.company.com-work".to_string())
         );
         assert_eq!(
             classify_remote("git@gitlab.com:owner/repo.git", Some("github.company.com")),
-            OriginIdentity::Unsupported("gitlab.com".to_string())
+            RepositoryIdentity::Unsupported("gitlab.com".to_string())
         );
         assert_eq!(
             classify_remote("https://github.com/owner", None),
-            OriginIdentity::Malformed("github.com".to_string())
+            RepositoryIdentity::Malformed("github.com".to_string())
         );
         assert_eq!(
             classify_remote("https://github.com", None),
-            OriginIdentity::Malformed("github.com".to_string())
+            RepositoryIdentity::Malformed("github.com".to_string())
         );
         assert_eq!(
             classify_remote("https://gitlab.com", None),
-            OriginIdentity::Unsupported("gitlab.com".to_string())
+            RepositoryIdentity::Unsupported("gitlab.com".to_string())
         );
         assert_eq!(
             classify_remote(
                 "https://github.company.com:8443/owner/repo.git",
                 Some("github.company.com")
             ),
-            OriginIdentity::Unsupported("github.company.com".to_string())
+            RepositoryIdentity::Unsupported("github.company.com".to_string())
         );
-        assert_eq!(classify_remote("/tmp/repo", None), OriginIdentity::Hostless);
-        assert_eq!(classify_remote("file:///tmp/repo", None), OriginIdentity::Hostless);
+        assert_eq!(classify_remote("/tmp/repo", None), RepositoryIdentity::Hostless);
+        assert_eq!(classify_remote("file:///tmp/repo", None), RepositoryIdentity::Hostless);
         assert_eq!(
             classify_remote("file://github.com/owner/repo", None),
-            OriginIdentity::Unsupported("github.com".to_string())
+            RepositoryIdentity::Unsupported("github.com".to_string())
         );
         assert_eq!(
             classify_remote("ftp://github.com/owner/repo", None),
-            OriginIdentity::Unsupported("github.com".to_string())
+            RepositoryIdentity::Unsupported("github.com".to_string())
         );
+    }
+
+    #[test]
+    fn repository_target_enforces_its_canonical_shape() {
+        let target = RepoTarget::new("GitHub.COM", "owner", "repo").unwrap();
+        assert_eq!(target.host(), "github.com");
+        assert_eq!(target.owner(), "owner");
+        assert_eq!(target.name(), "repo");
+        assert!(RepoTarget::new("bad host", "owner", "repo").is_none());
+        assert!(RepoTarget::new("github.com", ".", "repo").is_none());
+        assert!(RepoTarget::new("github.com", "owner/name", "repo").is_none());
+        assert!(RepoTarget::new("github.com", "owner", "bad\nname").is_none());
+        assert!(RepoTarget::new("github.com", "owner", "bad\u{202e}name").is_none());
     }
 
     #[test]
