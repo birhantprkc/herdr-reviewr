@@ -2570,7 +2570,7 @@ impl App {
         match target.export(&text) {
             Ok(()) => {
                 self.store.take_all();
-                self.status = format!("sent {n} comment(s) to {}", target.label());
+                self.status = target.success_message(n);
                 logln!("export OK");
             }
             Err(e) => {

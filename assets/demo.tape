@@ -1,7 +1,7 @@
 # Demo recording for herdr-reviewr. Regenerate with:
 #   cargo build --release && vhs assets/demo.tape
-# Self-contained: builds a throwaway git repo with an agent-style change, then drives the
-# release binary through the review loop. Needs `git` and `vhs` on PATH.
+# Self-contained: builds a throwaway git repo with an agent-style change, then drives the release
+# binary beside a small fake agent pane through the review loop. Needs `git`, `tmux`, and `vhs`.
 
 Output assets/demo.gif
 
@@ -16,11 +16,10 @@ Set TypingSpeed 45ms
 # --- Hidden setup: a temp repo with a committed baseline + an uncommitted edit to review ---
 Hide
 Type "BIN=$PWD/target/release/herdr-reviewr && bash assets/demo-fixture.sh /tmp/herdr-reviewr-demo" Enter
-Type "cd /tmp/herdr-reviewr-demo && clear" Enter
+Type "bash /tmp/herdr-reviewr-demo/.git/reviewr-demo/demo-session $BIN" Enter
 Show
 
 # --- The review loop ---
-Type "$BIN" Enter
 Sleep 2s
 
 # Focus the diff and move into the changed region.
@@ -41,23 +40,12 @@ Sleep 600ms
 Type "guard the empty value here too?"
 Sleep 800ms
 Enter
-Sleep 1500ms
-
-# Browse the whole tree on the All files tab.
-Type "2"
 Sleep 1200ms
-Down
-Sleep 500ms
-Down
-Sleep 900ms
 
-# Back to Changes, open the comments list.
-Type "1"
-Sleep 700ms
-Type "l"
-Sleep 1800ms
-Escape
-Sleep 600ms
+# Send the review. reviewr adds it to the adjacent agent input and hands focus back.
+Type "s"
+Sleep 2800ms
 
-Type "q"
-Sleep 800ms
+# Leave tmux and clean up the demo session.
+Ctrl+B
+Type "d"

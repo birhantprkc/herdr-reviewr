@@ -54,15 +54,17 @@ impl PrView {
     /// active `refresh` binding's hint key, so the advertised retry key follows a rebind.
     pub fn retry_remedy(&self, refresh: char) -> Option<String> {
         match self {
-            Self::NoGh => Some(format!("gh not found — install `gh`, then press {refresh}")),
+            Self::NoGh => {
+                Some(format!("GitHub CLI not found. Install `gh`, then press {refresh}."))
+            }
             Self::NotAuthed(host) => Some(format!(
-                "not signed in — run `gh auth login --hostname {host}`, then press {refresh}"
+                "Not signed in to {host}. Run `gh auth login --hostname {host}`, then press {refresh}."
             )),
             Self::GitError(message) => {
-                Some(format!("Git read failed — {message}; press {refresh} to retry now"))
+                Some(format!("Git read failed: {message}. Press {refresh} to retry."))
             }
             Self::Error(message) => {
-                Some(format!("GitHub unavailable — {message}; press {refresh} to retry now"))
+                Some(format!("GitHub unavailable: {message}. Press {refresh} to retry."))
             }
             _ => None,
         }

@@ -41,6 +41,10 @@ impl ExportTarget for FakeTarget {
     fn label(&self) -> &'static str {
         "fake"
     }
+    fn success_message(&self, count: usize) -> String {
+        let noun = if count == 1 { "comment" } else { "comments" };
+        format!("exported {count} {noun}")
+    }
     fn export(&self, text: &str) -> Result<()> {
         self.captured.borrow_mut().push(text.to_string());
         if self.ok { Ok(()) } else { bail!("fake export failure") }
@@ -1077,6 +1081,7 @@ fn a_failed_export_keeps_comments_and_success_consumes_them() {
     let target = FakeTarget::ok();
     app.export(&target);
     assert!(app.store.is_empty(), "a successful export consumes the comments");
+    assert_eq!(app.status, "exported 2 comments", "the target owns the success confirmation");
 
     // The sent text is the real export block format, end to end through App::export.
     let sent = target.last();
@@ -2558,7 +2563,9 @@ fn same_input_failure_preserves_any_visible_pr_snapshot_and_remedy() {
     assert_eq!(app.pr, no_pr);
     assert_eq!(
         app.pr_notice(),
-        Some("not signed in — run `gh auth login --hostname github.example.com`, then press r")
+        Some(
+            "Not signed in to github.example.com. Run `gh auth login --hostname github.example.com`, then press r."
+        )
     );
 }
 
@@ -2713,7 +2720,7 @@ fn the_pr_remedy_names_the_rebound_refresh_key() {
     app.apply_pr(PrView::NotAuthed("github.example.com".to_string()));
 
     assert!(
-        app.pr_notice().is_some_and(|notice| notice.ends_with("then press R")),
+        app.pr_notice().is_some_and(|notice| notice.ends_with("then press R.")),
         "the remedy follows the active refresh binding: {:?}",
         app.pr_notice()
     );

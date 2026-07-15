@@ -8,18 +8,17 @@ the terminal.
 
 What you get, in one persistent pane pointed at a git worktree:
 
-- **Diff review** — the agent's changed files, syntax-highlighted, scoped to *uncommitted*,
-  *branch*, or *last turn*.
-- **Changeset traversal** — `]` and `[` walk the changes hunk by hunk. At a file's last hunk the
-  step stops and the footer offers the crossing, so one more press opens the next file. `f` and
-  `F` jump straight from file to file.
+- **Diff review** — the agent's changed files, syntax-highlighted, scoped to *uncommitted* or the
+  whole *branch*. Walk hunks with `]` and `[` or jump between files with `f` and `F`.
+- **Last-turn diff** — review the most recent change-producing turn on its own, even when the
+  branch already carries earlier work.
 - **Line comments** — select a range and write a note. It stays visible as a card under the code
   instead of hiding behind a marker.
 - **Send** — one keystroke drops every comment into the agent's input as
   `path:start-end — comment`. You add context and hit enter.
 - **File viewer** — the whole worktree, not just the diff, with any file's current content
   rendered in the pane.
-- **PR view** — the branch's open pull request, read-only, without switching windows. The
+- **PR view** — the branch's pull request, read-only, without switching windows. The
   description and every comment render as styled markdown.
 - **Markdown preview** — one key flips a `.md` file between source and a rendered view, with
   headings, lists, tables, links, and code blocks highlighted like the diff. The toggle keeps
@@ -42,35 +41,24 @@ It **never edits your worktree** and sends nothing on its own. Its only write to
 
 ## Install
 
-From the herdr marketplace. You get a prebuilt binary, no Rust toolchain:
+Install the latest release. It uses a prebuilt binary, so you don't need a Rust toolchain:
 
 ```bash
 herdr plugin install persiyanov/herdr-reviewr
 ```
 
-The sidebar **auto-opens for a newly created worktree**, so installing the plugin is enough. Set
-`auto_open = false` to keep it hidden until you ask (see [Configuration](#configuration)). To
-toggle it on demand, bind a key to the **reviewr: toggle sidebar** action in your herdr config.
-Keybindings live in user config, not in the plugin manifest:
+Then open it from your current herdr workspace:
 
-```toml
-[[keys.command]]
-key = "cmd+r"
-type = "plugin_action"
-command = "persiyanov.reviewr.toggle"   # <plugin_id>.<action_id> — note the id, not the name
+```bash
+herdr plugin action invoke open --plugin persiyanov.reviewr
 ```
 
-`cmd+…` chords reach herdr. macOS swallows `alt+…`. With no key bound, run the action once with
-`herdr plugin action invoke toggle --plugin persiyanov.reviewr`.
-
-Beside `toggle` there are two explicit actions, made for scripts and layout plugins. `open` opens
-the sidebar and does nothing when one is already open. `close` closes it and does nothing when none
-is. Bind or invoke them the same way, as `persiyanov.reviewr.open` and `persiyanov.reviewr.close`.
-See [Auto-open and layout plugins](#auto-open-and-layout-plugins) for the layout recipe.
+reviewr opens automatically in new worktrees. Set `auto_open = false` to keep it hidden until you
+ask (see [Configuration](#configuration)).
 
 ## Quick start
 
-The core loop takes five keys. Open the sidebar next to your agent and:
+The core loop takes five steps. Open the sidebar next to your agent and:
 
 1. **Pick a file.** The agent's changed files are in the navigator (on the right by default).
    `j` / `k` moves the cursor. The diff opens in the read pane as you go. Or press `]` to walk
@@ -84,6 +72,18 @@ The core loop takes five keys. Open the sidebar next to your agent and:
 
 The footer always shows the keys that work right now, so you can learn it by using it. The tables
 below are the full reference.
+
+For a shortcut, bind a key to the **reviewr: toggle sidebar** action in your herdr config.
+Keybindings live in user config, not in the plugin manifest:
+
+```toml
+[[keys.command]]
+key = "cmd+r"
+type = "plugin_action"
+command = "persiyanov.reviewr.toggle"   # <plugin_id>.<action_id> — note the id, not the name
+```
+
+`cmd+…` chords reach herdr. In many macOS terminal setups, `alt+…` is reserved by the terminal.
 
 ## Controls
 
@@ -143,9 +143,9 @@ Plus the usual caret moves: arrows, `Home` / `End`, `Ctrl+A` / `Ctrl+E`, word-ju
 | `o` | Open the PR in your browser |
 | `r` | Refresh |
 
-herdr is mouse-native, so clicking a file, dragging to select lines, clicking a tab or the `Send`
-button, and the scroll wheel all work too. A link in rendered markdown opens in your browser on
-click (`http`/`https` only), and an anchor link (`#section`) jumps to its heading.
+Mouse controls work too: click a file or tab, drag to select lines, click `Send`, or use the scroll
+wheel. A link in rendered markdown opens in your browser on click (`http`/`https` only), and an
+anchor link (`#section`) jumps to its heading.
 
 ## The three tabs
 
@@ -396,12 +396,15 @@ it in whatever placement you configured.
 
 A layout can also open reviewr itself, once its panes are in place:
 
-```
+```bash
 herdr plugin action invoke open --plugin persiyanov.reviewr
 ```
 
 `open` ignores `auto_open`, because an explicit call is you asking. It opens with your configured
 placement and does nothing when a sidebar is already open, so a layout can run it on every pass.
+The matching `close` action does nothing when no sidebar is open. Invoke them as
+`persiyanov.reviewr.open` and `persiyanov.reviewr.close`.
+
 Two things to know. The action opens reviewr in the **focused** workspace, so invoke it while the
 new workspace has focus. And it opens reviewr as its **own new pane**. A layout pane whose command
 is the invoke will exit once the invoke returns. Run the invoke as a one-shot command from your

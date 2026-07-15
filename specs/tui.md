@@ -111,7 +111,7 @@ These three navigator actions work from either main pane on every tab. While the
 
 A divider drag belongs to the navigator position and split axis at mouse-down. A keypress, terminal resize, or config-driven layout change cancels it. After cancellation, drag events are consumed until mouse-up rather than becoming a selection in the read pane.
 
-Writing a comment: select a range or land on a line, press `c`, type into the inline box, `enter` saves and `esc` cancels. A saved comment renders as a read-only card spliced under its line, titled with its location, so written feedback stays on screen. `e` reopens the card as an edit box in place, hiding the card while editing. `d` deletes it. A successful send reports a transient `sent N comments` status that fades.
+Writing a comment: select a range or land on a line, press `c`, type into the inline box, `enter` saves and `esc` cancels. A saved comment renders as a read-only card spliced under its line, titled with its location, so written feedback stays on screen. `e` reopens the card as an edit box in place, hiding the card while editing. `d` deletes it. A successful send reports that the comments were added to the agent input; a successful copy reports that they were copied. The transient status pluralizes `comment` and fades.
 
 ### Changeset traversal
 
@@ -271,7 +271,7 @@ A plain-text field that edits at the caret, not only at the end. An empty box sh
 ## Failure semantics
 
 - A poll never touches the comment input or saved comments. Draft text and caret survive every refresh.
-- A config error replaces the view. Saved comments always survive. An open composer or comments list survives with its tab's state. Recovery restores them.
+- A config error and its automatic-reload remedy replace the view. Saved comments always survive. An open composer or comments list survives with its tab's state. Recovery restores them.
 - A poll that finds no change makes no visible update: no flicker, no lost selection or scroll.
 - Git, clipboard, and agent-send calls run synchronously between frames. A very large diff or a hung send can briefly block input. Moving them off the draw path is a v1 non-goal.
 - A paste outside the comment editor is ignored. It never starts or mutates a comment.

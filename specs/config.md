@@ -58,7 +58,7 @@ An error names the config path and the read, syntax, key, or value failure. It s
 
 | entrypoint       | invalid config outcome                                               |
 | ---------------- | -------------------------------------------------------------------- |
-| sidebar binary   | shows only the config error and performs no review work               |
+| sidebar binary   | shows the config error plus its automatic-reload remedy; performs no review work |
 | manual action    | exits 1 with the config error and performs no action                   |
 | plugin event     | exits 1, logs the config error, and performs no action                 |
 

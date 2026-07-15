@@ -90,6 +90,7 @@ fn invalid_config_replaces_the_entire_sidebar_with_its_error() {
 
     assert!(out.contains("config /tmp/reviewr/config.toml"));
     assert!(out.contains("expected a built-in theme name"));
+    assert!(out.contains("The config reloads automatically."));
     assert!(!out.contains("Changes"), "normal sidebar chrome must be hidden");
 }
 
@@ -554,6 +555,7 @@ fn pr_empty_states_are_calm_and_keep_the_ambiguity_count() {
     app.pr = PrView::Ambiguous(3);
     let out = render(&app);
     assert!(out.contains("3 open PRs"), "the ambiguity count shows:\n{out}");
+    assert!(out.contains("Keep one open, then press r."), "the remedy shows:\n{out}");
     app.pr = PrView::GitError("git remote get-url upstream failed".to_string());
     let out = render(&app);
     assert!(out.contains("Git read failed"), "local failures stay factual:\n{out}");
@@ -1392,7 +1394,7 @@ fn a_short_narrow_pr_pane_keeps_the_retry_action_and_one_body_row() {
     app.apply_pr(PrView::NotAuthed("github.example.com".to_string()));
 
     let out = dump(&render_size(&app, 30, 7));
-    assert!(out.contains("not signed"), "the failure state remains visible:\n{out}");
+    assert!(out.contains("Not signed"), "the failure state remains visible:\n{out}");
     assert!(out.contains("press r"), "the actionable tail remains visible:\n{out}");
     assert!(out.contains("steady body"), "the preserved snapshot keeps one readable row:\n{out}");
 }

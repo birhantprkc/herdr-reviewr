@@ -3,7 +3,7 @@ name = "reviewr"
 version = "0.18.0"
 min_herdr_version = "0.7.0"
 platforms = ["macos", "linux"]
-description = "Native terminal code-review sidebar for herdr."
+description = "Review agent-written diffs beside the chat and add line comments to the agent input."
 
 # On `herdr plugin install`, download the prebuilt `herdr-reviewr` binary for this platform from
 # the matching GitHub Release into $HERDR_PLUGIN_ROOT/bin (no Rust toolchain needed). Skipped by

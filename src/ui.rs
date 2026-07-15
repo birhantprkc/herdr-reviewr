@@ -32,8 +32,10 @@ pub fn render(frame: &mut Frame, app: &App) {
     // Link hit-testing resolves against the painted frame; each frame repaints its own.
     app.clear_painted_links();
     if let Some(error) = app.config_error() {
+        let message =
+            format!("{error}\n\nFix the file to continue. The config reloads automatically.");
         frame.render_widget(
-            Paragraph::new(error).wrap(ratatui::widgets::Wrap { trim: false }),
+            Paragraph::new(message).wrap(ratatui::widgets::Wrap { trim: false }),
             area,
         );
         return;
@@ -1853,7 +1855,7 @@ fn pr_empty_msg(view: &forge::PrView, refresh: char) -> String {
         forge::PrView::Detached => "No pull request found — HEAD is detached.".into(),
         forge::PrView::NoPr => "No pull request yet. Ready to ship?".into(),
         forge::PrView::Ambiguous(n) => {
-            format!("{n} open PRs back this branch — open one on GitHub")
+            format!("Found {n} open PRs for this branch. Keep one open, then press {refresh}.")
         }
         forge::PrView::NoGh
         | forge::PrView::NotAuthed(_)
@@ -1862,13 +1864,13 @@ fn pr_empty_msg(view: &forge::PrView, refresh: char) -> String {
             unreachable!("retry failures returned above")
         }
         forge::PrView::NeedsGitHubRemote => {
-            "the PR tab needs a supported GitHub upstream or origin".into()
+            "PRs need a GitHub remote named upstream or origin.".into()
         }
         forge::PrView::UnsupportedHost(host) => {
-            format!("unsupported host {host} — Enterprise users can set `github_host`")
+            format!("Unsupported host: {host}. Using GitHub Enterprise? Set `github_host`.")
         }
         forge::PrView::MalformedOrigin(host) => {
-            format!("malformed GitHub origin for {host} — expected owner/repository")
+            format!("The origin remote must point to a GitHub owner/repository on {host}.")
         }
     }
 }
