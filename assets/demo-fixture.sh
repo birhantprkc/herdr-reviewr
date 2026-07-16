@@ -92,13 +92,24 @@ set -euo pipefail
 BIN="$1"
 TOOLS="$(cd "$(dirname "$0")" && pwd)"
 D="$(cd "$TOOLS/../.." && pwd)"
-tmux kill-session -t reviewr-demo 2>/dev/null || true
-tmux new-session -d -s reviewr-demo "$TOOLS/agent-pane"
-tmux split-window -h -p 62 -t reviewr-demo:0 \
+SOCKET="reviewr-demo"
+
+# Keep the recording isolated from the user's tmux server, opt out of any inherited NO_COLOR
+# setting, and tell the private server that VHS's outer terminal supports RGB. Otherwise the demo
+# loses the same syntax colors and diff fills that appear in a real terminal.
+unset TMUX NO_COLOR
+cleanup() {
+  tmux -L "$SOCKET" kill-server 2>/dev/null || true
+}
+trap cleanup EXIT
+cleanup
+tmux -L "$SOCKET" new-session -d -s reviewr-demo "$TOOLS/agent-pane"
+tmux -L "$SOCKET" set-option -g default-terminal tmux-256color
+tmux -L "$SOCKET" set-option -as terminal-features ",${TERM}:RGB"
+tmux -L "$SOCKET" split-window -h -p 62 -t reviewr-demo:0 \
   "cd '$D' && HERDR_BIN_PATH='$TOOLS/mock-herdr' HERDR_TAB_ID=demo:t1 HERDR_WORKSPACE_ID=demo HERDR_PANE_ID=demo:p2 '$BIN'"
-tmux set-option -t reviewr-demo status off
-tmux select-pane -t reviewr-demo:0.1
-tmux attach-session -t reviewr-demo
-tmux kill-session -t reviewr-demo 2>/dev/null || true
+tmux -L "$SOCKET" set-option -t reviewr-demo status off
+tmux -L "$SOCKET" select-pane -t reviewr-demo:0.1
+tmux -L "$SOCKET" -T RGB attach-session -t reviewr-demo
 EOF
 chmod +x "$TOOLS/demo-session"
