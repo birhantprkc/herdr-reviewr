@@ -49,7 +49,8 @@ The navigator shows checks and selects the description or a comment. The read pa
 - Bodies render as markdown (`markdown.md`). A finding's `snippet` stays plain `+`/`−`-colored lines.
 - A human author is emphasized over the bots.
 - `j`/`k` or a click selects a description or comment and reveals it in the navigator viewport. Checks are not selectable.
-- The wheel over the navigator scrolls its viewport without changing the selection. `PageUp`/`PageDown` scroll the focused pane. The wheel over the read pane scrolls the read pane. Both panes stop with their last line at the bottom edge. `o` or the chip opens the PR in the browser.
+- The wheel over the navigator scrolls its viewport without changing the selection. The wheel over the read pane scrolls the read pane. `PageUp`/`PageDown` scroll the focused pane. Both panes stop with their last line at the bottom edge.
+- `o` or the chip opens the PR in the browser.
 - A body taller than the read pane shows a scrollbar on the pane's right border. One that fits shows none.
 - A retry notice for a preserved snapshot stays fixed above the read body, so it remains visible without resetting the reader's scroll.
 - The authoring keys (`s`, `c`, `v`, `d`, `e`) do nothing here.

@@ -58,7 +58,18 @@ impl Config {
 
 /// The built-in base-branch candidates for the `branch` scope, used when `config.toml`
 /// sets no `base_branches` (`specs/review-model.md`).
-pub const DEFAULT_BASE_BRANCHES: [&str; 4] = ["origin/main", "origin/master", "main", "master"];
+pub const DEFAULT_BASE_BRANCHES: [&str; 2] = ["main", "master"];
+
+/// One `base_branches` entry's canonical bare branch name: a leading `refs/heads/`,
+/// `refs/remotes/origin/`, or `origin/` prefix is stripped (`specs/config.md`).
+pub(crate) fn canonical_base(entry: &str) -> String {
+    entry
+        .strip_prefix("refs/remotes/origin/")
+        .or_else(|| entry.strip_prefix("refs/heads/"))
+        .or_else(|| entry.strip_prefix("origin/"))
+        .unwrap_or(entry)
+        .to_string()
+}
 
 const PLUGIN_CONFIG_KEYS: [&str; 9] = [
     "theme",
@@ -334,7 +345,10 @@ fn parse_plugin_config(path: &Path) -> Result<PluginConfig, PluginConfigError> {
                     "a non-empty array of Git ref names",
                 ));
             }
-            branches.push(branch.to_owned());
+            let canonical = canonical_base(branch);
+            if !branches.contains(&canonical) {
+                branches.push(canonical);
+            }
         }
         config.base_branches = branches;
     }
@@ -626,13 +640,30 @@ mod tests {
         .unwrap();
         let config = super::plugin_config_in(dir.path()).unwrap();
         assert_eq!(config.theme(), "tokyo-night");
-        assert_eq!(config.base_branches(), ["origin/dev", "main"]);
+        // Entries canonicalize to bare names at validation (`specs/config.md`).
+        assert_eq!(config.base_branches(), ["dev", "main"]);
         assert_eq!(config.default_scope(), Scope::LastTurn);
         assert_eq!(config.navigator_position(), NavigatorPosition::Bottom);
         assert_eq!(config.toggle_placement(), TogglePlacement::Overlay);
         assert_eq!(config.toggle_direction(), ToggleDirection::Down);
         assert!(!config.auto_open());
         assert_eq!(config.github_host(), Some("github.example.com"));
+    }
+
+    #[test]
+    fn base_entries_canonicalize_and_duplicates_collapse_to_the_first() {
+        assert_eq!(super::canonical_base("origin/main"), "main");
+        assert_eq!(super::canonical_base("refs/heads/main"), "main");
+        assert_eq!(super::canonical_base("refs/remotes/origin/main"), "main");
+        assert_eq!(super::canonical_base("release/1.0"), "release/1.0");
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "base_branches = [\"origin/main\", \"main\", \"refs/heads/master\"]\n",
+        )
+        .unwrap();
+        let config = super::plugin_config_in(dir.path()).unwrap();
+        assert_eq!(config.base_branches(), ["main", "master"]);
     }
 
     #[test]

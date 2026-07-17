@@ -10,7 +10,7 @@ How reviewr reads one pull request from GitHub — identity, state, checks, comm
 
 ## Overview
 
-reviewr resolves the worktree's open pull request across the candidate branches its work could be published under, then reads a snapshot of it through `gh` on each poll. The snapshot is the single value the `PR` tab renders.
+reviewr resolves the worktree's pull request through its published commits, then reads a snapshot of it through `gh` on each poll. Every shown PR provably contains this worktree's work. The snapshot is the single value the `PR` tab renders.
 
 ```
 PR #226  open  persiyanov/deep-research-benchmark → main   ⇡ 2 unpushed
@@ -21,21 +21,21 @@ PR #226  open  persiyanov/deep-research-benchmark → main   ⇡ 2 unpushed
 
 The snapshot:
 
-| field          | type      | meaning                                                                |
-| -------------- | --------- | ---------------------------------------------------------------------- |
-| `number`       | int?      | PR number, `null` when no PR resolves                                  |
-| `title`, `url` | string    | identity                                                               |
-| `body`         | string    | the PR description as GitHub returns it, empty when none               |
-| `state`        | enum      | `open`, `merged`, or `closed`                                          |
-| `is_draft`     | bool      | draft flag                                                             |
-| `head_ref`     | string    | the PR's head branch name, which may differ from the local branch      |
-| `head_is_fork` | bool      | the head lives in another repository (GitHub's `isCrossRepository`)    |
-| `base_ref`     | string    | the merge target                                                       |
-| `merge`        | enum      | `clean`, `conflicting`, or `blocked`                                   |
-| `sync`         | enum      | `in_sync`, `unpushed`, `behind`, or `unknown`, with a count when known |
-| `checks`       | list      | one row per latest check: `name` and `status` (conclusion folded in)   |
-| `comments`     | list      | one row per comment, newest first                                      |
-| `truncated`    | bool      | a capped surface had a further page, so a list is a prefix             |
+| field                  | type   | meaning                                                                     |
+| ---------------------- | ------ | --------------------------------------------------------------------------- |
+| `number`               | int?   | PR number, `null` when no PR resolves                                       |
+| `title`, `url`         | string | identity                                                                    |
+| `body`                 | string | the PR description as GitHub returns it, empty when none                    |
+| `state`                | enum   | `open`, `merged`, or `closed`                                               |
+| `is_draft`             | bool   | draft flag                                                                  |
+| `head_ref`             | string | the PR's head branch name, which may differ from the local branch           |
+| `head_is_fork`         | bool   | the head lives in another repository (GitHub's `isCrossRepository`)         |
+| `base_ref`             | string | the merge target                                                            |
+| `merge`                | enum   | `clean`, `conflicting`, or `blocked`                                        |
+| `sync`                 | enum   | `in_sync`, `unpushed`, `behind`, or `unknown`, with a count when known      |
+| `checks`               | list   | one row per latest check: `name` and `status` (conclusion folded in)        |
+| `comments`             | list   | one row per comment, newest first                                           |
+| `truncated`            | bool   | a capped surface had a further page, so a list is a prefix                  |
 
 A `comments` row:
 
@@ -84,28 +84,32 @@ redirect a fetch.
 
 ### Resolution
 
+The worktree's published commits nominate pull requests, and containment admits them. A branch name never proves identity, so names play no part in resolution.
+
 - Each fetch pins `HEAD` and the base ref to commit OIDs. Ancestry, distance, and sync calculations use those pins while the agent commits beside it.
-- The open PR resolves across all candidate branches.
-- Exactly one open PR across the candidates resolves, under whichever name it lives.
-- Several open PRs resolve to the earliest candidate in derivation order. Several on that one name disambiguate by `headRefOid` equal to the pinned `HEAD`. Failing that, reviewr surfaces the ambiguity count, never a silent guess.
-- With no open PR anywhere, the newest-created merged or closed PR shows as historical state. With none at all, the body says only `No pull request yet. Ready to ship?`
-- A fork PR reads checks, comments, and merge state from the base repository. The resolution key is the head branch name, not a (repository, name) pair, so a same-named fork branch can match. The `⑂` header marker makes that case visible.
-- A detached `HEAD` shows the empty state. reviewr never queries `headRefName:""`, which GitHub reads as unfiltered.
-
-### Candidate branches
-
-Each fetch re-derives and deduplicates the possible publication names in this order. Steps 1 and 3 always remain. Step 2 contributes the nearest tips up to 8 total names.
-
-1. Git's recorded upstream (`branch.<name>.merge`), stripped of its remote prefix, unless it names a configured base branch. `@{push}` is never consulted: git computes a destination even when nothing is recorded, which would shadow a real upstream.
-2. Remote-tracking branches under `refs/remotes/origin/*` (excluding `origin/HEAD` and the base branches) whose tip is ancestry-comparable with the pinned `HEAD`: equal to it, an ancestor of it carrying non-base work, or a descendant of it. Nearest-first by `HEAD...tip` distance, ties lexicographic. With no base resolvable, only equal and descendant tips qualify.
-3. The local branch name, always.
+- The publication points are the nearest ancestors of the pinned `HEAD` present on `origin`. A point that is an ancestor of any resolved base entry proves nothing and is skipped.
+- With no publication point beyond the pinned base, the tab shows the empty state. The worktree has published no reviewable work.
+- With no base resolvable, no point is provable and the tab shows the empty state.
+- Each publication point is asked of the forge: which pull requests contain this commit. The query runs against the `origin` repository, where the commits live. An `origin` on another host proves nothing on the target's forge, so the target repository stands in. Only PRs based on the resolved repository target count.
+- Every resolved PR therefore contains the worktree's published work. There is no other admission path.
+- Exactly one open PR resolves when one contains a publication point.
+- Several open PRs disambiguate in order: a head equal to the pinned `HEAD`, a head equal to a publication point, the head named by the recorded upstream. A record naming a configured base is tracking, not publication, and never joins the tiebreak. Failing all three, reviewr surfaces the count, never a silent guess.
+- With no open PR, the newest-merged PR containing a publication point shows as historical state.
+- A PR closed without merging does not associate. It still resolves as history through exact identity: an `origin` branch tip at a publication point names it, and its reported head equals that point.
+- With none at all, the body says only `No pull request yet. Ready to ship?`
+- A fork PR resolves through the same query: the commits live on the fork (`origin`), and the association carries the base-repository PR. `pr-tab.md` marks the fork case.
+- Local staleness costs recall first: a stale `origin/*` ref can hide a publication point. A stale base ref can also admit mainline history as one, until a fetch heals it.
+- A detached `HEAD` has no pin and shows the empty state.
 
 What a user observes:
 
-- A worktree pushed as `git push origin HEAD:<other-name>` resolves its PR. The push updated a distance-0 candidate.
-- A teammate's branch parked at this worktree's exact `HEAD` never beats the branch git says this worktree pushes to.
-- A remote branch descending from `HEAD` can be a colleague's continuation of this work. Its PR resolves when no better candidate has one, and the header names the branch.
-- Between a rebase and its force-push, a branch published under a different name with no upstream shows the empty state. The push restores it on the next poll.
+- A worktree pushed as `git push origin HEAD:<other-name>` resolves its PR. The pushed commits are the publication point, whatever the name.
+- A teammate's PR parked at this worktree's exact `HEAD` never beats the PR on the recorded upstream.
+- A remote branch extending `HEAD` can be a colleague's continuation of this work. Its PR resolves when no better pick exists. The header names the resolved branch, and `sync` shows `behind`.
+- A worktree with no commits beyond the base shows the empty state. A sibling worktree's PR never attaches to it.
+- A reused branch name never resurrects an earlier, unrelated PR. Old PRs do not contain this worktree's commits.
+- The worktree's own merged PR shows as history while its publication point stays beyond the pinned base. A squash-merged point stays beyond it indefinitely.
+- A rebase discards the old publication points. Between the rebase and its force-push, the tab shows the empty state. The push restores it on the next poll.
 
 ### Derived state
 
@@ -126,7 +130,7 @@ What a user observes:
 - A bot's PR-level posts collapse to its latest. A human's are each kept.
 - `is_resolved` and `is_outdated` come from GitHub, never recomputed against the worktree.
 - Outdated and resolved threads stay in the list with their marker.
-- Each surface reads one page of 100 rows, never paged to exhaustion. A further page on any surface — reviews, comments, threads, or checks — sets `truncated`, and the UI shows `+more on GitHub ↗`, so a capped list is never presented as complete.
+- Each surface reads its newest 100 rows, never paged to exhaustion. A further page on any surface — reviews, comments, threads, or checks — sets `truncated`, and `pr-tab.md` marks the capped list, so it is never presented as complete.
 
 ### Refresh
 
@@ -137,9 +141,9 @@ What a user observes:
 - One fetch is in flight at a time. One or more triggers arriving mid-flight supersede its result and start one fresh fetch when it completes.
 - A GitHub change during a fetch can appear on the following fetch.
 - Each fetch uses one validated config snapshot for host and base selection (→ CFG-ONE-SNAPSHOT, `config.md`).
-- A GitHub result paints only if the current config, repository target, pinned `HEAD`, and candidate
-  branches still match the input that produced it. If reviewr cannot prove that match, the result
-  never paints. An active tab starts one replacement; an inactive tab waits for entry.
+- A GitHub result paints only if the current config, repository target, pinned `HEAD`, pinned base, and
+  publication points still match the input that produced it. If reviewr cannot prove that match, the
+  result never paints. An active tab starts one replacement; an inactive tab waits for entry.
 - If the repository target is proven unchanged before a later branch-state read fails, the visible
   same-target snapshot stays with a retry notice; the next refresh performs a fresh GitHub fetch.
 - The snapshot re-derives in full each fetch. reviewr keeps no hidden or historical PR cache beyond the visible snapshot.
@@ -150,7 +154,14 @@ What a user observes:
 
 reviewr reads GitHub and never writes it, so every failure degrades to a clear state. `Changes` and `All files` are unaffected.
 
-- A same-input failure preserves the visible snapshot and shows its remedy. With no same-input snapshot, the remedy fills the tab. The remedies: a missing `gh` shows the install step, an unauthenticated fetch shows `gh auth login --hostname <host>`, any other fetch failure shows the retry error.
+- A same-input failure preserves the visible snapshot and shows its remedy. With no same-input snapshot, the remedy fills the tab.
+
+| failure               | remedy shown                      |
+| --------------------- | --------------------------------- |
+| missing `gh`          | the install step                  |
+| unauthenticated fetch | `gh auth login --hostname <host>` |
+| any other fetch error | the retry error                   |
+
 - A failure before the repository target resolves replaces any snapshot with the retryable Git error. reviewr cannot prove that the snapshot still belongs to the current target.
 - A branch-state Git failure after the same repository target resolves preserves the visible
   same-target snapshot with the retryable Git error.
@@ -165,7 +176,7 @@ reviewr reads GitHub and never writes it, so every failure degrades to a clear s
 - No repository selector or cross-repository search.
 - No different parent repositories across sibling worktrees from one clone. Use a separate clone for each parent.
 - No SSH host-alias normalization. An alias-only repository needs a canonical-host remote.
-- No discovery of an unrecorded publication name on a non-`origin` remote. The local branch name or a recorded upstream must identify it.
+- No discovery of an unrecorded publication name on a non-`origin` remote.
 - No event subscription. The snapshot polls `gh`, no webhook or socket.
 - No server-version compatibility layer for Enterprise schemas.
 - No second forge. GitHub via `gh` only.

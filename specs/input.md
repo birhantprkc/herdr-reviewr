@@ -105,17 +105,17 @@ The bar fills by priority until the width runs out, and a trailing `…` marks a
 | primary    | the most likely next step, in a bright accent, always shown                    |
 | send       | `s send N`, present once any comment is written, just below the primary        |
 | actions    | what else works here, in normal text                                           |
-| navigation | dim, stable: pane toggle, navigator position, tab digits, quit; dropped first |
+| navigation | dim, stable: pane toggle, navigator position, tab digits, quit; dropped first  |
 | status     | a transient message (`comment added`) that fades, never replacing actions      |
 
 The actions follow the cursor:
 
-| cursor on                                | primary                        | also                    |
-| ---------------------------------------- | ------------------------------ | ----------------------- |
+| cursor on                                | primary                        | also                              |
+| ---------------------------------------- | ------------------------------ | --------------------------------- |
 | an armed crossing                        | `] next file` / `[ prev file`  | the cursor's own actions, demoted |
-| a diff line                              | `c comment`                    | `v select`              |
-| a line of a markdown file that previews  | `c comment`                    | `v select · m preview`  |
-| a live selection                         | `c comment`                    | `esc clear`             |
+| a diff line                              | `c comment`                    | `v select`                        |
+| a line of a markdown file that previews  | `c comment`                    | `v select · m preview`            |
+| a live selection                         | `c comment`                    | `esc clear`                       |
 | a commented line                         | `e edit`                       | `d delete · n/N jump`   |
 | a fold                                   | `→ expand fold`                | —                       |
 | an open markdown preview                 | `m source`                     | —                       |
@@ -129,7 +129,7 @@ The actions follow the cursor:
 - Movement keys are never shown. The armed crossing is the one exception.
 - The comment editor and the comments list show their own actions.
 - The changed-file count and line totals live in the header. The footer carries only the comment count, inside `s send N`.
-- On `PR` the bar leads with the PR's state, then `o open ↗`, then navigation (`pr-tab.md`).
+- On `PR` the bar carries the PR state line and `o open ↗` per `pr-tab.md`, then navigation.
 
 ### Comment editor
 
@@ -142,7 +142,7 @@ A plain-text field that edits at the caret, not only at the end. An empty box sh
 └──────────────────────────────────────────┘
 ```
 
-| key                                             | does                                            |
+| key                                             | does                                             |
 | ----------------------------------------------- | ------------------------------------------------ |
 | `←` / `→`                                       | move the caret one character                     |
 | `↑` / `↓`                                       | move the caret one wrapped row, keeping column   |

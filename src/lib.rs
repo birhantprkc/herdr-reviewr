@@ -1255,22 +1255,25 @@ mod refresh_tests {
     use std::time::Duration;
 
     fn input(head: &str) -> PrFetchInput {
-        input_with("github.com", "acme", "widgets", head, &["feature"])
+        input_with("github.com", "acme", "widgets", head)
     }
 
-    fn input_with(
-        host: &str,
-        owner: &str,
-        name: &str,
-        head: &str,
-        candidates: &[&str],
-    ) -> PrFetchInput {
+    fn input_with(host: &str, owner: &str, name: &str, head: &str) -> PrFetchInput {
         PrFetchInput {
             repository: RepositoryIdentity::Repository(
                 crate::git::RepoTarget::new(host, owner, name).unwrap(),
             ),
-            head_oid: Some(head.to_string()),
-            candidates: candidates.iter().map(|name| (*name).to_string()).collect(),
+            origin_repository: None,
+            local: crate::git::PrLocalState {
+                head_oid: Some(head.to_string()),
+                base_oid: Some("base".to_string()),
+                points: vec![crate::git::PublicationPoint {
+                    oid: head.to_string(),
+                    names: vec!["feature".to_string()],
+                }],
+                upstream: None,
+                detached: false,
+            },
         }
     }
 
@@ -1437,13 +1440,18 @@ mod refresh_tests {
     }
 
     #[test]
-    fn repository_target_and_candidates_are_refresh_boundaries() {
+    fn repository_target_and_points_are_refresh_boundaries() {
         let original = input("head");
+        let mut renamed_point = input("head");
+        renamed_point.local.points[0].names.push("published".to_string());
+        let mut moved_base = input("head");
+        moved_base.local.base_oid = Some("advanced".to_string());
         let changes = [
-            input_with("github.com", "upstream", "widgets", "head", &["feature"]),
-            input_with("github.enterprise.test", "acme", "widgets", "head", &["feature"]),
-            input_with("github.com", "acme", "other-widgets", "head", &["feature"]),
-            input_with("github.com", "acme", "widgets", "head", &["published", "feature"]),
+            input_with("github.com", "upstream", "widgets", "head"),
+            input_with("github.enterprise.test", "acme", "widgets", "head"),
+            input_with("github.com", "acme", "other-widgets", "head"),
+            renamed_point,
+            moved_base,
         ];
 
         for changed in changes {
@@ -1464,7 +1472,7 @@ mod refresh_tests {
     #[test]
     fn off_tab_repository_change_clears_and_defers_its_replacement() {
         let old = input("head");
-        let changed = input_with("github.com", "upstream", "widgets", "head", &["feature"]);
+        let changed = input_with("github.com", "upstream", "widgets", "head");
         let mut refresh = PrRefresh::new(true);
         refresh.observed(old, 0, true);
         let _ = refresh.take_fetch().unwrap();

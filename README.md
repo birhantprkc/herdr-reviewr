@@ -190,7 +190,7 @@ CLI flags on the pane command:
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--poll <ms>` | `2000` | worktree poll interval (min `200`) |
-| `--base <ref>` | auto | base branch for `branch` scope, overrides `base_branches` |
+| `--base <ref>` | auto | base for `branch` scope, any rev, overrides `base_branches` |
 | `--theme <name>` | `catppuccin` | UI + syntax theme (see below) |
 | `--wrap <on\|off>` | `on` | soft-wrap long diff lines (`w` toggles at runtime) |
 
@@ -209,7 +209,7 @@ The file accepts these nine keys:
 
 ```toml
 theme = "tokyo-night"
-base_branches = ["origin/develop", "origin/main", "main", "master"]
+base_branches = ["develop", "main", "master"]
 default_scope = "branch"
 navigator_position = "right"
 toggle_placement = "overlay"
@@ -266,8 +266,10 @@ another for stacked layouts. Press `<` to grow the navigator, `>` to shrink it, 
 ### Base branch
 
 The **branch** scope diffs against the merge-base with a base branch. reviewr tries an ordered
-list of candidates and uses the first that exists in your repo, so one setting works across repos
-with different trunks. The default is `origin/main`, then `origin/master`, `main`, `master`.
+list of candidates and uses the first that resolves in your repo, so one setting works across
+repos with different trunks. The default is `main`, then `master` — each entry checks
+`origin/<name>` first, then the local branch, and `origin/main` is just another spelling of
+`main`.
 
 To review against a different base, a `develop` trunk say, set `base_branches` in the same
 config file. reviewr re-reads it on refresh, so editing it and pressing `r` re-bases without a
@@ -275,12 +277,13 @@ relaunch:
 
 ```toml
 # ~/.config/herdr/plugins/config/persiyanov.reviewr/config.toml
-base_branches = ["origin/develop", "origin/main", "main", "master"]
+base_branches = ["develop", "main", "master"]
 ```
 
-reviewr picks the first entry that exists in the repo. A `--base <ref>` flag still wins when it
-names an existing ref. A missing file or omitted key uses the default list. A malformed value
-blocks the plugin like any other invalid config.
+reviewr picks the first entry that resolves. A `--base <ref>` flag wins over the list and takes
+any rev — a branch, a tag, a SHA. When nothing in the list resolves, the default branch
+`origin/HEAD` names is the fallback. A missing file or omitted key uses the default list. A
+malformed value blocks the plugin like any other invalid config.
 
 ### Keybindings
 

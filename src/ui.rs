@@ -1855,7 +1855,7 @@ fn pr_empty_msg(view: &forge::PrView, refresh: char) -> String {
         forge::PrView::Detached => "No pull request found — HEAD is detached.".into(),
         forge::PrView::NoPr => "No pull request yet. Ready to ship?".into(),
         forge::PrView::Ambiguous(n) => {
-            format!("Found {n} open PRs for this branch. Keep one open, then press {refresh}.")
+            format!("Found {n} open PRs containing this work. Keep one open, then press {refresh}.")
         }
         forge::PrView::NoGh
         | forge::PrView::NotAuthed(_)

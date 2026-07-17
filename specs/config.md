@@ -14,7 +14,7 @@ The plugin config is one typed value. A valid file may set any subset of the sup
 
 ```toml
 theme = "tokyo-night"
-base_branches = ["origin/develop", "origin/main", "main", "master"]
+base_branches = ["develop", "main", "master"]
 default_scope = "branch"
 navigator_position = "bottom"
 toggle_placement = "overlay"
@@ -27,30 +27,32 @@ comment = ["c", "ㅊ"]
 select  = ["v", "ㅍ"]
 ```
 
-| key                  | value                                                                        |
-| -------------------- | ---------------------------------------------------------------------------- |
-| `theme`              | one name from the theme set in `theme.md`                                    |
-| `base_branches`      | non-empty array of non-empty ref names                                       |
-| `default_scope`      | `uncommitted`, `branch`, or `last-turn`                                      |
-| `navigator_position` | `right` (default), `left`, `top`, or `bottom`                                |
-| `toggle_placement`   | `split`, `overlay`, `zoomed`, or `tab`                                       |
-| `toggle_direction`   | `right` or `down`                                                            |
-| `auto_open`          | boolean                                                                      |
-| `github_host`        | bare hostname other than `github.com`                                         |
-| `keybindings`        | table of actions from the keymap in `input.md`, each a non-empty array of keys |
+| key                  | value                                                                              |
+| -------------------- | ---------------------------------------------------------------------------------- |
+| `theme`              | one name from the theme set in `theme.md`                                          |
+| `base_branches`      | non-empty array of non-empty branch names, `origin/` and `refs/` prefixes accepted |
+| `default_scope`      | `uncommitted`, `branch`, or `last-turn`                                            |
+| `navigator_position` | `right` (default), `left`, `top`, or `bottom`                                      |
+| `toggle_placement`   | `split`, `overlay`, `zoomed`, or `tab`                                             |
+| `toggle_direction`   | `right` or `down`                                                                  |
+| `auto_open`          | boolean                                                                            |
+| `github_host`        | bare hostname other than `github.com`                                              |
+| `keybindings`        | table of actions from the keymap in `input.md`, each a non-empty array of keys     |
 
 ## Behavior
 
 The cross-entrypoint invariants, coded for citation:
 
-| code                   | Always true                                                                   |
-| ---------------------- | ----------------------------------------------------------------------------- |
+| code                   | Always true                                                                    |
+| ---------------------- | ------------------------------------------------------------------------------ |
 | `CFG-MISSING-DEFAULTS` | A missing config file uses every default.                                      |
 | `CFG-WHOLE-FILE`       | An unknown key or an invalid value makes the whole file invalid.               |
 | `CFG-BLOCKED-INERT`    | An entrypoint that observes an invalid file performs none of its normal work.  |
 | `CFG-ONE-SNAPSHOT`     | One operation or refresh uses one validated config snapshot.                   |
 
 An omitted key uses that key's default. An invalid file applies none of its keys. Every sidebar frame, manual action, and plugin event validates the whole file first.
+
+Each `base_branches` entry canonicalizes to one bare branch name: a leading `refs/heads/`, `refs/remotes/origin/`, or `origin/` prefix is stripped. Duplicate entries collapse to the first occurrence. Every consumer resolves an entry through `refs/remotes/origin/<name>`, then `refs/heads/<name>`. The `--base` flag resolves verbatim first, then as a canonical entry. `origin/HEAD` backstops an unresolvable list (`review-model.md`).
 
 A repository may lack every ref named by a valid `base_branches` list. That is runtime absence, not invalid configuration.
 
