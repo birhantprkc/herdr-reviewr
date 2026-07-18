@@ -128,5 +128,14 @@ pub fn comment() -> herdr_reviewr::forge::Comment {
 /// against the freshly reloaded state — the same sequence the event loop performs.
 pub fn enter_tab(app: &mut App, tab: herdr_reviewr::app::Tab) {
     app.set_tab(tab).unwrap();
-    app.service_reload().unwrap();
+    land_world(app);
+}
+
+/// Land the queued world refresh synchronously, as the worker's completion would.
+pub fn land_world(app: &mut App) {
+    let snapshot = herdr_reviewr::world::build(&app.world_input()).unwrap();
+    app.reconcile_world(snapshot);
+    app.world_pending = false;
+    app.world_sample = false;
+    app.world_reveal = false;
 }

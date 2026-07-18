@@ -1904,6 +1904,13 @@ fn jump_moves_the_cursor_onto_a_commented_line() {
 
 // --- last-turn scope -----------------------------------------------------------
 
+/// Drive one status sample on the worker-owned turn host and mirror its baseline into the
+/// app, exactly as a world completion landing would (specs/herdr-host.md).
+fn observe_turn(app: &mut App, host: &mut herdr_reviewr::world::TurnHost, status: Option<Status>) {
+    host.observe(status);
+    app.sync_turn_baseline(host.baseline().map(str::to_string));
+}
+
 #[test]
 fn last_turn_is_empty_until_a_turn_is_observed() {
     let r = Repo::init();
@@ -1921,10 +1928,11 @@ fn last_turn_shows_a_change_producing_turn() {
     r.write("a.rs", "one\n");
     r.commit_all("init");
     let mut app = App::new(r.path_buf(), Scope::LastTurn, None);
-    app.apply_agent_status(Some(Status::Idle));
-    app.apply_agent_status(Some(Status::Working)); // turn start: candidate = "one"
+    let mut host = herdr_reviewr::world::TurnHost::open(r.path_buf());
+    observe_turn(&mut app, &mut host, Some(Status::Idle));
+    observe_turn(&mut app, &mut host, Some(Status::Working)); // turn start: candidate = "one"
     r.write("a.rs", "one\ntwo\n");
-    app.apply_agent_status(Some(Status::Working)); // first change promotes the baseline
+    observe_turn(&mut app, &mut host, Some(Status::Working)); // first change promotes the baseline
     app.reload().unwrap();
     assert!(!app.awaiting_turn(), "the baseline is now set");
     assert!(app.entries.iter().any(|f| f.path == "a.rs"), "the turn's edit shows");
@@ -1936,15 +1944,16 @@ fn a_question_only_turn_keeps_the_previous_turns_diff() {
     r.write("a.rs", "one\n");
     r.commit_all("init");
     let mut app = App::new(r.path_buf(), Scope::LastTurn, None);
+    let mut host = herdr_reviewr::world::TurnHost::open(r.path_buf());
     // Turn A edits a file.
-    app.apply_agent_status(Some(Status::Idle));
-    app.apply_agent_status(Some(Status::Working));
+    observe_turn(&mut app, &mut host, Some(Status::Idle));
+    observe_turn(&mut app, &mut host, Some(Status::Working));
     r.write("a.rs", "one\ntwo\n");
-    app.apply_agent_status(Some(Status::Working));
+    observe_turn(&mut app, &mut host, Some(Status::Working));
     // Turn B is a question — no file change.
-    app.apply_agent_status(Some(Status::Idle));
-    app.apply_agent_status(Some(Status::Working));
-    app.apply_agent_status(Some(Status::Idle));
+    observe_turn(&mut app, &mut host, Some(Status::Idle));
+    observe_turn(&mut app, &mut host, Some(Status::Working));
+    observe_turn(&mut app, &mut host, Some(Status::Idle));
     app.reload().unwrap();
     assert!(
         app.entries.iter().any(|f| f.path == "a.rs"),
@@ -1958,13 +1967,14 @@ fn a_permission_pause_stays_one_turn() {
     r.write("a.rs", "one\n");
     r.commit_all("init");
     let mut app = App::new(r.path_buf(), Scope::LastTurn, None);
-    app.apply_agent_status(Some(Status::Idle));
-    app.apply_agent_status(Some(Status::Working)); // turn start: candidate = "one"
+    let mut host = herdr_reviewr::world::TurnHost::open(r.path_buf());
+    observe_turn(&mut app, &mut host, Some(Status::Idle));
+    observe_turn(&mut app, &mut host, Some(Status::Working)); // turn start: candidate = "one"
     r.write("a.rs", "one\nbefore\n"); // edit before the prompt
-    app.apply_agent_status(Some(Status::Blocked)); // permission prompt promotes baseline = "one"
-    app.apply_agent_status(Some(Status::Working)); // resume — must NOT re-baseline
+    observe_turn(&mut app, &mut host, Some(Status::Blocked)); // permission prompt promotes baseline = "one"
+    observe_turn(&mut app, &mut host, Some(Status::Working)); // resume — must NOT re-baseline
     r.write("a.rs", "one\nbefore\nafter\n"); // edit after the prompt
-    app.apply_agent_status(Some(Status::Working));
+    observe_turn(&mut app, &mut host, Some(Status::Working));
     app.reload().unwrap();
     let a = app.entries.iter().find(|f| f.path == "a.rs").expect("a.rs changed");
     let annotation = a.annotation.as_ref().expect("a changed file is annotated");
@@ -1978,10 +1988,11 @@ fn the_baseline_survives_a_restart() {
     r.commit_all("init");
     {
         let mut app = App::new(r.path_buf(), Scope::LastTurn, None);
-        app.apply_agent_status(Some(Status::Idle));
-        app.apply_agent_status(Some(Status::Working));
+        let mut host = herdr_reviewr::world::TurnHost::open(r.path_buf());
+        observe_turn(&mut app, &mut host, Some(Status::Idle));
+        observe_turn(&mut app, &mut host, Some(Status::Working));
         r.write("a.rs", "one\ntwo\n");
-        app.apply_agent_status(Some(Status::Working)); // promotes and persists the ref
+        observe_turn(&mut app, &mut host, Some(Status::Working)); // promotes and persists the ref
     }
     // A fresh App — a sidebar restart — resumes the persisted baseline.
     let mut restarted = App::new(r.path_buf(), Scope::LastTurn, None);
@@ -1996,9 +2007,10 @@ fn no_agent_status_pauses_tracking() {
     r.write("a.rs", "one\n");
     r.commit_all("init");
     let mut app = App::new(r.path_buf(), Scope::LastTurn, None);
-    app.apply_agent_status(None); // no herdr / no resolvable agent
+    let mut host = herdr_reviewr::world::TurnHost::open(r.path_buf());
+    observe_turn(&mut app, &mut host, None); // no herdr / no resolvable agent
     r.write("a.rs", "one\ntwo\n");
-    app.apply_agent_status(None);
+    observe_turn(&mut app, &mut host, None);
     app.reload().unwrap();
     assert!(app.awaiting_turn(), "without a status signal the baseline never forms");
 }
@@ -2047,7 +2059,7 @@ fn all_files_tab_browses_the_whole_worktree_and_renders_content() {
 }
 
 #[test]
-fn a_tab_switch_paints_the_stashed_frame_and_defers_its_reload() {
+fn a_tab_switch_paints_the_stashed_frame_and_requests_its_refresh() {
     use herdr_reviewr::app::Tab;
     let r = Repo::init();
     r.write("a.rs", "fn a() {}\n");
@@ -2055,35 +2067,27 @@ fn a_tab_switch_paints_the_stashed_frame_and_defers_its_reload() {
     let mut app = app_on(&r);
 
     // A first visit has no stash to paint, so it loads before its frame
-    // (policies/ux-responsiveness.md): no pending reload survives the switch.
+    // (policies/ux-responsiveness.md): no pending request survives the switch.
     app.set_tab(Tab::AllFiles).unwrap();
-    assert!(!app.reload_pending, "a first visit loads synchronously");
+    assert!(!app.world_pending, "a first visit loads synchronously");
     assert!(app.entries.iter().any(|e| e.path == "a.rs"), "the first frame is populated");
 
-    // A return visit paints the stashed frame as it was and defers its reload
+    // A return visit paints the stashed frame as it was and requests its refresh
     // (specs/tui.md, specs/overview.md Continuity).
     enter_tab(&mut app, Tab::Changes);
     r.write("b.rs", "fn b() {}\n");
     app.set_tab(Tab::AllFiles).unwrap();
-    assert!(app.reload_pending, "a return visit defers its reload");
+    assert!(app.world_pending, "a return visit requests its refresh");
+    assert!(app.world_reveal, "the landing will re-reveal the re-anchored cursor");
     assert!(
         !app.entries.iter().any(|e| e.path == "b.rs"),
         "the switch frame is the stash, not the current worktree"
     );
 
-    // Servicing runs the deferred reload once and settles the tab. The reload may have
-    // re-anchored the cursor, so the reveal re-arms against the fresh rows.
-    app.reveal_files = false;
-    app.service_reload().unwrap();
-    assert!(!app.reload_pending);
-    assert!(app.reveal_files, "the serviced reload reveals the re-anchored cursor");
-    assert!(app.entries.iter().any(|e| e.path == "b.rs"), "the reload caught up");
-
-    // A second service is a no-op: the flag is consumed.
-    let before = app.entries.len();
-    r.write("c.rs", "fn c() {}\n");
-    app.service_reload().unwrap();
-    assert_eq!(app.entries.len(), before, "no pending flag, no reload");
+    // The completion lands: the built snapshot reconciles and the view catches up.
+    let snapshot = herdr_reviewr::world::build(&app.world_input()).unwrap();
+    app.reconcile_world(snapshot);
+    assert!(app.entries.iter().any(|e| e.path == "b.rs"), "the landing caught up");
 }
 
 #[test]
@@ -2210,10 +2214,14 @@ fn switching_scope_on_all_files_remarks_in_place() {
     );
     assert_eq!(annotation_of(&app, "b.rs"), Some(None), "b.rs is unmarked under uncommitted");
 
-    // Branch is a superset: it adds the committed b.rs and keeps a.rs — re-marked in place.
+    // Branch is a superset: the changed set rebuilds before the frame, the tree's
+    // annotations land with the queued refresh (specs/tui.md).
     app.set_scope(Scope::Branch).unwrap();
     assert_eq!(app.file_cursor, cursor, "the cursor holds across a scope re-mark");
     assert_eq!(app.changed_count(), 2, "branch marks both the committed and the dirty file");
+    assert!(app.world_pending, "the tree's annotations refresh behind the switch");
+    common::land_world(&mut app);
+    assert_eq!(app.file_cursor, cursor, "the cursor still holds after the landing");
     assert!(matches!(annotation_of(&app, "a.rs"), Some(Some(_))), "a.rs stays marked");
     assert!(matches!(annotation_of(&app, "b.rs"), Some(Some(_))), "b.rs is now marked");
 }

@@ -19,7 +19,6 @@ use crate::highlight::Highlighter;
 use crate::logln;
 use crate::model::{Comment, CommentStore, Scope, Side};
 use crate::theme::{self, Palette};
-use crate::turn::{Status, TurnTracker};
 
 /// Navigator shares and bounds, as percentages of the body's split axis.
 const DEFAULT_SIDE_PCT: u16 = 32;
@@ -64,7 +63,7 @@ pub enum Tab {
 impl Tab {
     /// Whether this tab uses the file-tree / diff machinery (and so the per-tab stash). The
     /// `PR` tab does not — it holds its own state and never swaps into the diff fields.
-    fn is_file_tab(self) -> bool {
+    pub(crate) fn is_file_tab(self) -> bool {
         matches!(self, Tab::Changes | Tab::AllFiles)
     }
 }
@@ -292,9 +291,14 @@ pub struct App {
     /// Set when the PR view needs a (re)fetch; the event loop services it after drawing, so a
     /// `loading` frame shows before the blocking `gh` calls run.
     pub pr_pending: bool,
-    /// A file-tab switch painted its stashed frame and deferred the reload; the event loop
-    /// services it via [`Self::service_reload`] right after that frame (specs/tui.md).
-    pub reload_pending: bool,
+    /// A world refresh request awaiting dispatch; the event loop hands it to the worker
+    /// after the frame paints (specs/tui.md).
+    pub world_pending: bool,
+    /// Whether the pending request samples the agent's status — set by the poll alone.
+    pub world_sample: bool,
+    /// Whether the pending request re-reveals the cursor when its result lands — set by a
+    /// user-initiated switch, never by a poll.
+    pub world_reveal: bool,
     /// Whether the active file tab has ever completed a reload (stash counterpart:
     /// `TabStash::visited`). Gates the first-visit synchronous load in [`Self::set_tab`].
     tab_visited: bool,
@@ -314,10 +318,9 @@ pub struct App {
     /// preview (`specs/markdown.md`). Interior-mutable so the renderer can fill it from
     /// `&App`; cleared with the diff cache on a theme switch.
     markdown_cache: std::cell::RefCell<crate::markdown::RenderCache>,
-    /// The `last-turn` baseline lifecycle, driven by polling the agent's status.
-    turn: TurnTracker,
-    /// This worktree's key for the private baseline ref, fixed for the session.
-    turn_key: String,
+    /// The worker-owned turn baseline, mirrored from completions so the sync `last-turn`
+    /// paths (the diff's old side, the scope-switch rebuild) read it without a round-trip.
+    turn_baseline: Option<String>,
 }
 
 /// One painted link region: `x_start..x_end` on screen row `y`, in absolute cells.
@@ -346,14 +349,11 @@ impl App {
     }
 
     fn build(repo: PathBuf, scope: Scope, base: Option<String>, load_turn: bool) -> Self {
-        // Resume any persisted turn baseline for this worktree, so `last-turn` keeps its
-        // anchor across a sidebar restart (specs/herdr-host.md).
-        let turn_key = git::worktree_key(&repo);
-        let turn = if load_turn {
-            TurnTracker::with_baseline(git::read_baseline_ref(&repo, &turn_key))
-        } else {
-            TurnTracker::default()
-        };
+        // Mirror any persisted turn baseline for this worktree, so `last-turn` keeps its
+        // anchor across a sidebar restart. The worker's `TurnHost` owns the tracker; this
+        // mirror follows its completions (specs/herdr-host.md).
+        let turn_baseline =
+            if load_turn { git::read_baseline_ref(&repo, &git::worktree_key(&repo)) } else { None };
         let theme = theme::resolve(None);
         Self {
             repo,
@@ -411,7 +411,9 @@ impl App {
             pr_nav_max_scroll: std::cell::Cell::new(usize::MAX),
             reveal_pr_nav: std::cell::Cell::new(true),
             pr_pending: false,
-            reload_pending: false,
+            world_pending: false,
+            world_sample: false,
+            world_reveal: false,
             tab_visited: false,
             highlighter: Highlighter::new(theme.syntax),
             palette: theme.palette,
@@ -421,8 +423,7 @@ impl App {
             requested_theme_name: None,
             cache: DiffCache::new(),
             markdown_cache: std::cell::RefCell::new(crate::markdown::RenderCache::default()),
-            turn,
-            turn_key,
+            turn_baseline,
         }
     }
 
@@ -506,10 +507,12 @@ impl App {
         self.list_cursor = old.list_cursor;
         self.navigator_side_pct = old.navigator_side_pct;
         self.navigator_stack_pct = old.navigator_stack_pct;
-        // A tab switch deferred its reload and recovery landed first: the carried fields
-        // below may reinstate the stale stashed frame, so the pending reload must survive
+        // A tab switch requested its refresh and recovery landed first: the carried fields
+        // below may reinstate the stale stashed frame, so the pending request must survive
         // the swap or that frame never refreshes until the next poll.
-        self.reload_pending = old.reload_pending;
+        self.world_pending = old.world_pending;
+        self.world_sample = old.world_sample;
+        self.world_reveal = old.world_reveal;
         let old_mode = old.mode.clone();
         match old_mode {
             Mode::Normal => {}
@@ -687,14 +690,14 @@ impl App {
             scope: self.scope,
             base: self.base.clone(),
             base_branches: self.config_snapshot().base_branches().to_vec(),
-            turn_baseline: self.turn.baseline().map(str::to_string),
+            turn_baseline: self.turn_baseline.clone(),
             toggled_dirs: self.toggled_dirs.clone(),
         }
     }
 
     /// Reconcile a built snapshot into the view — the one place a world result touches place
     /// state, by identity first, then fallback, then clamp (`specs/overview.md` Continuity).
-    fn reconcile_world(&mut self, snapshot: crate::world::WorldSnapshot) {
+    pub fn reconcile_world(&mut self, snapshot: crate::world::WorldSnapshot) {
         // Keep the cursor on the same row target across the rebuild; fall back to the open
         // file, then the first file. The toggled-directory set survives untouched.
         let anchor = self.cursor_anchor();
@@ -903,8 +906,8 @@ impl App {
             }
             Scope::LastTurn => {
                 let old = self
-                    .turn
-                    .baseline()
+                    .turn_baseline
+                    .as_deref()
                     .map(|b| git::file_content(&self.repo, b, old_path))
                     .unwrap_or_default();
                 (old, worktree_content(&self.repo, new_path))
@@ -915,55 +918,22 @@ impl App {
     /// Whether the `last-turn` scope is active but no baseline has been captured yet — the
     /// cold-start (or no-herdr) state the UI paints as `waiting for the agent's next turn`.
     pub fn awaiting_turn(&self) -> bool {
-        self.scope == Scope::LastTurn && !self.turn.has_baseline()
+        self.scope == Scope::LastTurn && self.turn_baseline.is_none()
     }
 
-    /// Sample the agent's status and advance the `last-turn` baseline. Reads the resolved
-    /// agent's status over the herdr CLI; absence or ambiguity pauses tracking. Never
-    /// propagates — a missing herdr is normal, so failures only log. Returns whether this
-    /// sample ended a turn (the agent went idle after acting), the `PR` tab's refetch signal.
-    pub fn track_turn(&mut self) -> bool {
-        if self.plugin_config().is_none() {
-            return false;
-        }
-        let status = crate::herdr::resolved_agent_status().ok().flatten();
-        self.apply_agent_status(status)
+    /// Follow the worker's baseline. Every completion carries the authoritative value, so
+    /// the mirror syncs even when the completion's snapshot is superseded or discarded.
+    pub fn sync_turn_baseline(&mut self, baseline: Option<String>) {
+        self.turn_baseline = baseline;
     }
 
-    /// Advance the baseline from one status sample — the core [`track_turn`](Self::track_turn)
-    /// wraps, and the seam tests drive without herdr. On a turn start (a resting→`working`
-    /// edge) it snapshots the worktree as the candidate; while a candidate is pending it
-    /// promotes once the worktree diverges from it, persisting the new baseline. Git errors
-    /// only log, so a transient git failure never crashes the poll. Returns whether this
-    /// sample ended a turn (a `working`→resting edge), the `PR` tab's refetch signal.
-    pub fn apply_agent_status(&mut self, status: Option<Status>) -> bool {
-        if self.plugin_config().is_none() {
-            return false;
-        }
-        let Some(status) = status else { return false };
-        let transition = self.turn.observe(status);
-        if transition.started {
-            match git::snapshot_worktree(&self.repo) {
-                Ok(sha) => self.turn.set_candidate(sha),
-                Err(e) => logln!("turn snapshot failed: {e}"),
-            }
-        }
-        // Promote the pending candidate once the turn has changed a file. Compare full
-        // snapshots so a new untracked file counts as a change (specs/herdr-host.md).
-        let Some(candidate) = self.turn.candidate().map(str::to_string) else {
-            return transition.ended;
-        };
-        match git::snapshot_worktree(&self.repo) {
-            Ok(now) if now != candidate => {
-                self.turn.promote();
-                if let Err(e) = git::write_baseline_ref(&self.repo, &self.turn_key, &candidate) {
-                    logln!("turn baseline ref write failed: {e}");
-                }
-            }
-            Ok(_) => {}
-            Err(e) => logln!("turn divergence check failed: {e}"),
-        }
-        transition.ended
+    /// Queue a world refresh for the event loop to dispatch after the frame paints.
+    /// `sample` rides the poll's status sample along; `reveal` re-reveals the cursor when
+    /// the result lands, for user-initiated switches only (specs/tui.md).
+    pub fn request_world_refresh(&mut self, sample: bool, reveal: bool) {
+        self.world_pending = true;
+        self.world_sample |= sample;
+        self.world_reveal |= reveal;
     }
 
     /// Snap the diff view back to the top, clearing any pending selection.
@@ -1387,6 +1357,10 @@ impl App {
                 self.file_cursor = 0;
                 self.expanded_folds.clear();
                 self.reset_diff_view();
+                // The changed set rebuilds before the frame, so the list never shows another
+                // scope's files under the new scope's label (specs/tui.md). In `Changes` the
+                // changeset is the whole snapshot, so this is the full (cheap) reload.
+                self.reload()?;
             } else {
                 self.stash.file_cursor = 0;
                 self.stash.expanded_folds.clear();
@@ -1394,9 +1368,14 @@ impl App {
                 self.stash.diff_scroll = 0;
                 self.stash.h_scroll = 0;
                 self.stash.select_anchor = None;
+                // `All files` keeps its tree; only the changed set rebuilds before the frame.
+                // The tree's annotations refresh behind it via the worker (specs/tui.md).
+                let changed = crate::world::build_changed(&self.world_input())?;
+                self.changed =
+                    changed.iter().map(|f| (f.path.clone(), Annotation::from(f))).collect();
+                self.request_world_refresh(false, false);
             }
-            self.reload()?;
-            // An explicit switch reveals the cursor (a poll, which also calls reload, does not).
+            // An explicit switch reveals the cursor (a poll does not).
             self.reveal_files = true;
         }
         Ok(())
@@ -1405,8 +1384,7 @@ impl App {
     /// Switch to `tab`, saving the active tab's navigator and read-pane state and restoring the
     /// target's. Each tab keeps its own opened file and scroll, so returning to a tab lands
     /// exactly where you left it (specs/tui.md). The switch frame paints the restored state as
-    /// it was; the reload against the current worktree is deferred to [`Self::service_reload`],
-    /// which the event loop runs right after that frame — stale for one frame, never wrong
+    /// it was; a world refresh lands behind it — stale until it lands, never wrong
     /// (specs/overview.md Continuity). A no-op on the active tab or while composing; focus
     /// stays on the same side.
     pub fn set_tab(&mut self, tab: Tab) -> Result<()> {
@@ -1428,40 +1406,25 @@ impl App {
             self.swap_active_with_stash();
             self.active_file_tab = tab;
         }
-        self.reload_pending = true;
-        // A first visit has no stash to paint: deferring would show an empty tree under a
-        // live changed-count for a frame, a header/body disagreement
+        // A first visit has no stash to paint: refreshing behind would show an empty tree
+        // under a live changed-count, a header/body disagreement
         // (policies/ux-responsiveness.md). Load it before the frame instead; every return
         // visit paints its stash instantly and refreshes behind it. The visited marker,
         // not emptiness — a clean repo's `Changes` tab is legitimately empty.
-        if !self.tab_visited {
-            self.service_reload()?;
+        if self.tab_visited {
+            self.request_world_refresh(false, true);
+        } else {
+            self.reload()?;
         }
         self.settle_tab_entry();
         self.reveal_files = true; // pull the restored cursor back into view
         Ok(())
     }
 
-    /// Run the reload a tab switch deferred past its paint. The event loop calls this after the
-    /// switch frame draws; a repaint follows before input, so the fresh state is one frame
-    /// behind the instant one. Re-settles focus and the cursor reveal because the reload may
-    /// have moved the cursor or emptied the pane the switch frame showed.
-    pub fn service_reload(&mut self) -> Result<()> {
-        if !std::mem::take(&mut self.reload_pending) {
-            return Ok(());
-        }
-        self.reload()?;
-        self.settle_tab_entry();
-        // The switch frame revealed the stashed cursor; the reload may have re-anchored it
-        // onto a different row, so reveal again against the fresh rows.
-        self.reveal_files = true;
-        Ok(())
-    }
-
     /// An empty read pane — a first visit landing on a collapsed tree, or an open file gone
     /// empty — focuses the tree, so the cursor keys aren't trapped on a pane with nothing to
     /// move (specs/tui.md). Runs on the switch frame and again after its deferred reload.
-    fn settle_tab_entry(&mut self) {
+    pub(crate) fn settle_tab_entry(&mut self) {
         if self.visible.is_empty() {
             self.focus = Focus::Files;
         }
@@ -2881,15 +2844,17 @@ mod tests {
     }
 
     #[test]
-    fn config_recovery_carries_a_pending_reload() {
-        // A tab switch deferred its reload, then recovery landed first: the carried flag is
-        // what makes the recovered app service that reload instead of keeping the stale
-        // stashed frame until the next poll.
+    fn config_recovery_carries_a_pending_world_request() {
+        // A tab switch requested its refresh, then recovery landed first: the carried flags
+        // are what make the recovered app dispatch that refresh instead of keeping the
+        // stale stashed frame until the next poll.
         let mut old = App::blocked(PathBuf::from("."), Scope::Uncommitted, None);
-        old.reload_pending = true;
+        old.request_world_refresh(true, true);
         let mut recovered = App::new(PathBuf::from("."), Scope::Uncommitted, None);
         recovered.carry_authored_state_from(&mut old);
-        assert!(recovered.reload_pending, "the deferred reload survives the recovery swap");
+        assert!(recovered.world_pending, "the pending refresh survives the recovery swap");
+        assert!(recovered.world_sample, "the poll's sample flag survives the recovery swap");
+        assert!(recovered.world_reveal, "the switch's reveal flag survives the recovery swap");
     }
 
     #[test]
@@ -2921,6 +2886,5 @@ mod tests {
         assert!(app.set_tab(super::Tab::AllFiles).is_err());
         assert!(app.move_cursor(1).is_err());
         assert!(app.select_file(0).is_err());
-        assert!(!app.track_turn());
     }
 }

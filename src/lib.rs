@@ -331,10 +331,6 @@ impl ConfigGate {
     fn pr_unchanged(self) -> bool {
         !matches!(self, Self::Blocked | Self::Changed { pr_changed: true, .. })
     }
-
-    fn file_reloaded(self) -> bool {
-        matches!(self, Self::Changed { file_reloaded: true, .. })
-    }
 }
 
 impl PrRefresh {
@@ -427,6 +423,47 @@ impl PrRefresh {
     }
 }
 
+/// Land one world completion. The worker's baseline syncs and a turn end schedules the PR
+/// refetch regardless of the tag; the snapshot reconciles only when the completion carries
+/// the live generation and its input still matches the view — a mismatched snapshot is
+/// discarded whole and a fresh refresh queued (specs/tui.md). Returns whether the
+/// completion matched the live generation, clearing the in-flight marker.
+fn land_world_completion(
+    app: &mut App,
+    completion: crate::world::WorldCompletion,
+    generation: u64,
+) -> bool {
+    app.sync_turn_baseline(completion.input.turn_baseline.clone());
+    if completion.turn.as_ref().is_some_and(|t| t.ended) {
+        // One fetch per turn, on any tab: the turn may have pushed or merged, and
+        // entering the tab then finds fresh work already underway (forge-host.md).
+        app.pr_pending = true;
+    }
+    if completion.generation != generation {
+        return false;
+    }
+    match completion.snapshot {
+        Some(Ok(snapshot))
+            if app.config_error().is_none() && app.world_input() == completion.input =>
+        {
+            app.reconcile_world(snapshot);
+            if completion.reveal {
+                // The switch frame revealed the stashed cursor; the landing may have
+                // re-anchored it, so settle and reveal again.
+                app.settle_tab_entry();
+                app.reveal_files = true;
+            }
+        }
+        // The view moved on while the build ran: discard whole, refresh again.
+        Some(Ok(_)) => app.request_world_refresh(false, false),
+        // A failed refresh reports and keeps the stale frame — the same contract as a
+        // failed poll (specs/tui.md).
+        Some(Err(e)) => app.status = format!("refresh failed: {e}"),
+        None => {}
+    }
+    true
+}
+
 /// Draw, then wait up to the poll deadline for input; refresh on each tick.
 fn event_loop(
     terminal: &mut DefaultTerminal,
@@ -445,6 +482,17 @@ fn event_loop(
     let mut recovery_inflight = false;
     let (pr_tx, pr_rx) = mpsc::channel::<TaggedPr>();
     let mut pr = PrCoordinator::new(app.plugin_config().is_some());
+    // The world worker owns every refresh build and the turn tracker; the loop sends
+    // input-tagged jobs and reconciles the completions (specs/tui.md).
+    let (world_tx, world_job_rx) = mpsc::channel::<crate::world::WorldJob>();
+    let (world_res_tx, world_rx) = mpsc::channel::<crate::world::WorldCompletion>();
+    let _world_worker = crate::world::spawn(
+        crate::world::TurnHost::open(app.repo.clone()),
+        world_job_rx,
+        world_res_tx,
+    );
+    let mut world_generation = 0_u64;
+    let mut world_inflight: Option<Instant> = None;
     let mut config_epoch = 0_u64;
     let mut status_at = Instant::now();
     let mut last_status = String::new();
@@ -526,29 +574,29 @@ fn event_loop(
             let painted_frame = PaintedFrameSnapshot::capture(app);
             terminal.draw(|f| ui::render(f, app))?;
 
-            // A tab switch painted its stashed frame above; run the deferred reload now and
-            // repaint before accepting input, so the switch is instant and the fresh state is
-            // one frame behind it. A failed refresh reports and keeps the stale frame — the
-            // same contract as a failed poll (specs/tui.md).
-            if app.reload_pending {
-                if let Err(e) = app.service_reload() {
-                    app.status = format!("refresh failed: {e}");
+            // A world completion reconciles into the view only while the view it described is
+            // still current; the worker's baseline is authoritative either way (specs/tui.md).
+            if let Ok(completion) = world_rx.try_recv() {
+                if land_world_completion(app, completion, world_generation) {
+                    world_inflight = None;
                 }
-                // The worktree was just reloaded, so restarting the poll clock stops the
-                // deadline from running the twin reload again next iteration. A deadline
-                // that had already elapsed still takes its turn sample here — deferring it
-                // a full interval would let a turn start go unobserved for up to 2×poll,
-                // and a late-observed start swallows the turn's first edits into the
-                // baseline (specs/herdr-host.md). A boundary that did move reloads, as the
-                // tick would have.
-                if last_poll.elapsed() >= poll
-                    && app.track_turn()
-                    && let Err(e) = app.reload()
-                {
-                    app.status = format!("refresh failed: {e}");
-                }
-                last_poll = Instant::now();
                 continue;
+            }
+
+            // Dispatch the queued refresh after the frame above painted, so a switch stays
+            // instant and the fresh state lands behind it (specs/tui.md).
+            if app.world_pending && app.config_error().is_none() {
+                app.world_pending = false;
+                let sample_turn = std::mem::take(&mut app.world_sample);
+                let reveal = std::mem::take(&mut app.world_reveal);
+                world_generation = world_generation.wrapping_add(1);
+                world_inflight = Some(Instant::now());
+                let _ = world_tx.send(crate::world::WorldJob {
+                    generation: world_generation,
+                    input: app.world_input(),
+                    sample_turn,
+                    reveal,
+                });
             }
 
             // Record user and fallback refreshes before consuming worker results. A trigger that
@@ -657,8 +705,12 @@ fn event_loop(
             } else {
                 poll_left.min(STATUS_TTL.saturating_sub(status_at.elapsed()))
             };
-            // While a fetch is in flight, wake often so its result paints promptly when it lands.
-            if pr.active_fetch.is_some() || pr.active_probe_epoch.is_some() {
+            // While a fetch or a world refresh is in flight, wake often so its result paints
+            // promptly when it lands.
+            if pr.active_fetch.is_some()
+                || pr.active_probe_epoch.is_some()
+                || world_inflight.is_some()
+            {
                 timeout = timeout.min(Duration::from_millis(100));
             }
             if let Some(started) = pr.wait_started {
@@ -743,22 +795,11 @@ fn event_loop(
                     continue;
                 }
                 schedule_poll_probe(&mut pr, app.tab);
-                // Advance the last-turn baseline before reloading, so a turn promoted this poll
-                // is visible to this poll's changed-files build. When the agent just went idle, its
-                // turn may have pushed or run `gh pr merge`; refetch the PR if the tab is showing it
-                // (entering the tab refetches on its own otherwise) (specs/forge-host.md).
-                let turn_changed = app.track_turn();
-                // One fetch per turn, on any tab: the turn may have pushed or merged, and
-                // entering the tab then finds fresh work already underway (forge-host.md).
-                if turn_changed {
-                    app.pr_pending = true;
-                }
-                // A failed refresh must never crash the UI or drop a comment.
-                if (!config_gate.file_reloaded() || turn_changed)
-                    && let Err(e) = app.reload()
-                {
-                    app.status = format!("refresh failed: {e}");
-                }
+                // The tick's refresh runs on the worker. The same request samples the agent's
+                // status there, so a turn promoted by the sample is visible to the same
+                // request's changed-files build (specs/herdr-host.md). A turn end sets the PR
+                // refetch when the completion lands.
+                app.request_world_refresh(true, false);
                 logln!(
                     "poll files={} composing={} diff_cursor={} scroll={}",
                     app.entries.len(),
@@ -1072,7 +1113,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> 
     if let Some(action) = action {
         match action {
             K::Quit => app.should_quit = true,
-            K::Refresh => app.reload()?,
+            K::Refresh => app.request_world_refresh(false, false),
             K::TabChanges => app.set_tab(crate::app::Tab::Changes)?,
             K::TabAllFiles => app.set_tab(crate::app::Tab::AllFiles)?,
             K::TabPr => app.set_tab(crate::app::Tab::Pr)?,
