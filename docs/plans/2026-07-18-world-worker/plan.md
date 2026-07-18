@@ -16,7 +16,7 @@ World refresh — the changed set, the file tree, turn sampling, snapshots — m
 - [x] A result landing after a scope, tab, or baseline change is discarded, and a newer request supersedes an older one (integration tests).
 - [x] A result landing while composing leaves the frozen diff and draft untouched, however early its refresh began (integration test).
 - [x] Turn edges observed off-thread behave exactly as today: baseline captured, promoted, persisted (existing `last-turn` suite green).
-- [x] The `⟳` glyph paints in its reserved tab-strip cell only when a refresh exceeds 150ms, on every tab. The PR `· refreshing…` note is gone (render tests).
+- [x] The `⟳` glyph paints in its reserved tab-strip cell only when a refresh exceeds the indicator delay, on every tab. The PR `· refreshing…` note is gone (render tests).
 - [x] A scope switch shows the new scope's changed set in the switch frame, `last-turn` included (existing tests).
 - [x] `reload_pending` and `service_reload` are deleted.
 - [x] `just ci` green. A/B bench against main recorded in `scripts/bench-results/`.
@@ -67,3 +67,4 @@ World refresh — the changed set, the file tree, turn sampling, snapshots — m
 - 2026-07-18: indicator reopened in brainstorming → the ⟳ glyph stands, spinner rejected as flicker on subsecond refreshes, landed in `specs/tui.md`.
 - 2026-07-18: landings waited on the 100ms in-flight wake → world wake tightened to 15ms, painted medians back at main's sync-reload level. The superseded run1 baseline was deleted.
 - 2026-07-18: garfield — the `All files` switch frame showed the old scope's badges under the new header → the tree re-marks in place before the frame (specs/tui.md); `toggled_dirs` left out of the `Changes` tag; `TurnReport` slimmed to `ended`; the indicator and wake decisions extracted pure and unit-tested; the worker's coalescing got a real-channel test.
+- 2026-07-18: QA — the indicator delay rose from 150ms to 300ms and its color quieted to the header's secondary gray, so routine subsecond refreshes never blink it (`specs/tui.md`).
