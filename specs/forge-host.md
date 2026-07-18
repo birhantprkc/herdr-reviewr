@@ -139,13 +139,15 @@ What a user observes:
 - The first fetch starts when the panel opens, so the tab is populated before the user reaches it.
 - A refetch fires on entering the tab, on the `refresh` binding (default `r`), and on the agent's turn-end (a `working` → `idle`/`done` edge) while the tab is active. A turn may have pushed or merged, changing forge state with no other local signal.
 - A fallback poll refetches every 60 seconds while the tab is active. Off the tab there is no polling.
-- A fetch-input change observed on refresh clears the current PR. It starts a fetch while the tab is active; otherwise the next tab entry starts it.
+- A refresh that observes a different repository target or candidate branch set clears the current PR. reviewr cannot prove the snapshot still describes the same pull request (`overview.md` Continuity).
+- A refresh that observes only a moved `HEAD` keeps the snapshot on screen and refetches behind it. The same pull request with newer commits is stale, not wrong. The refreshing indicator covers the gap.
+- Either observation starts the replacement fetch at once, on or off the tab, so entering the tab finds fresh work already underway.
 - One fetch is in flight at a time. One or more triggers arriving mid-flight supersede its result and start one fresh fetch when it completes.
 - A GitHub change during a fetch can appear on the following fetch.
 - Each fetch uses one snapshot of reviewr's config for host and base selection. A later fetch sees a config edit without restarting reviewr.
 - A GitHub result paints only if the current config, repository target, pinned `HEAD`, and candidate
   branches still match the input that produced it. If reviewr cannot prove that match, the result
-  never paints. An active tab starts one replacement; an inactive tab waits for entry.
+  never paints, and one replacement fetch starts against the current input.
 - If the repository target is proven unchanged before a later branch-state read fails, the visible
   same-target snapshot stays with a retry notice; the next refresh performs a fresh GitHub fetch.
 - The snapshot re-derives in full each fetch. reviewr keeps no hidden or historical PR cache beyond the visible snapshot.

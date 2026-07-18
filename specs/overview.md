@@ -58,6 +58,30 @@ Named so the architecture stays open to them. None is part of this design.
 - A side-by-side split diff view for wide panes.
 - Search within the diff, and live theme switching.
 
+## Continuity
+
+The agent edits the worktree while the reviewer reads it. These rules govern how every surface
+absorbs that motion — a poll, a refresh, a returning fetch, an agent commit.
+
+State divides into three kinds:
+
+- Authored state is what the reviewer wrote: comments and the draft being typed.
+- Place state is where the reviewer's attention is: the active tab and scope, the open file, every
+  cursor and scroll, folds, a selection, the layout.
+- Derived state is everything recomputed from git or GitHub: changesets, trees, diffs, the PR
+  snapshot.
+
+Authored state follows O3. Only the reviewer removes it.
+
+Place state moves only under the reviewer's own input. A world event may only reconcile it, in
+order: match the same target by identity (a path, a comment's author and anchor — never a row
+index), fall back to the nearest surviving target, clamp as the last resort. While the reviewer is
+mid-gesture — composing, dragging a divider, holding a selection — their place is frozen.
+
+Derived state on screen may be stale, never wrong. A view blanks only when its identity changed —
+a different repository, pull request, or file — never because the same thing gained newer content.
+Newer content paints over the old in place, reconciling the reviewer's place as above.
+
 ## Invariants
 
 | #  | Always true                                                                                                                  |
@@ -67,6 +91,7 @@ Named so the architecture stays open to them. None is part of this design.
 | O3 | A comment, saved or being typed, is never lost to a refresh or the agent's edits. Only the user removes it.                   |
 | O4 | Comments leave only by an explicit export, to the agent pane or the clipboard.                                                |
 | O5 | The crate forbids `unsafe`.                                                                                                   |
+| O6 | A refresh never moves the reviewer's place. Reconciliation runs by identity, then fallback, then clamp (see Continuity).      |
 
 ## Related specs
 
