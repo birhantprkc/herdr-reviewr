@@ -18,14 +18,14 @@ What you get, in one persistent pane pointed at a git worktree:
 
 - **Diff review** — the agent's changed files, syntax-highlighted, scoped to *uncommitted* or the
   whole *branch*. Walk hunks with `]` and `[` or jump between files with `f` and `F`.
-- **Last-turn diff** — review the most recent change-producing turn on its own, even when the
+- **Last-turn diff** — review what the agent's latest turn changed, by itself, even when the
   branch already carries earlier work.
 - **Line comments** — select a range and write a note. It stays visible as a card under the code
   instead of hiding behind a marker.
 - **Send** — one keystroke drops every comment into the agent's input as
   `path:start-end — comment`. You add context and hit enter.
-- **File viewer** — the whole worktree, not just the diff, with any file's current content
-  rendered in the pane.
+- **File viewer** — the whole worktree, with any file's current content rendered in the
+  pane.
 - **PR view** — the branch's pull request, read-only, without switching windows. The
   description and every comment render as styled markdown.
 - **Markdown preview** — one key flips a `.md` file between source and a rendered view, with
@@ -49,7 +49,7 @@ It **never edits your worktree** and sends nothing on its own. Its only write to
 
 ## Install
 
-Install the latest release. It uses a prebuilt binary, so you don't need a Rust toolchain:
+Install the latest release. Prebuilt binaries, no Rust toolchain needed:
 
 ```bash
 herdr plugin install persiyanov/herdr-reviewr
@@ -61,10 +61,10 @@ Then open it from your current herdr workspace:
 herdr plugin action invoke open --plugin persiyanov.reviewr
 ```
 
-reviewr opens automatically in new worktrees. Set `auto_open = false` to keep it hidden until you
+reviewr auto-opens in new worktrees. Set `auto_open = false` to keep it hidden until you
 ask (see [Configuration](#configuration)).
 
-**To update**, reinstall — your config survives, it is keyed by plugin id:
+**To update**, reinstall. Your config is keyed by plugin id and survives:
 
 ```bash
 herdr plugin uninstall persiyanov.reviewr && herdr plugin install persiyanov/herdr-reviewr
@@ -107,11 +107,11 @@ type = "plugin_action"
 command = "persiyanov.reviewr.toggle"   # <plugin_id>.<action_id> — note the id, not the name
 ```
 
-`cmd+…` chords reach herdr. In many macOS terminal setups, `alt+…` is reserved by the terminal.
+`cmd+…` chords reach herdr. In many macOS terminal setups the terminal swallows `alt+…` itself.
 
 ## Controls
 
-The single-key shortcuts below are defaults. Any of them can be rebound per action, including to
+The single-key shortcuts below are defaults. You can rebind any of them per action, including to
 several keys at once ([Keybindings](#keybindings)).
 
 **Getting around**
@@ -224,12 +224,10 @@ Everything else is set in reviewr's own config file:
 ~/.config/herdr/plugins/config/persiyanov.reviewr/config.toml
 ```
 
-Create the file if it does not exist yet. herdr hands this directory to the plugin as
-`$HERDR_PLUGIN_CONFIG_DIR`, and the path above is where it lives on disk. Note that this is
-reviewr's file, not herdr's. Settings added to herdr's own `~/.config/herdr/config.toml` never
-reach reviewr.
+Create the file if it does not exist yet. This is reviewr's own file. Settings added to
+herdr's `~/.config/herdr/config.toml` never reach reviewr.
 
-The file accepts these nine keys:
+The file accepts these keys:
 
 ```toml
 theme = "tokyo-night"
@@ -292,7 +290,7 @@ another for stacked layouts. Press `<` to grow the navigator, `>` to shrink it, 
 The **branch** scope diffs against the merge-base with a base branch. reviewr tries an ordered
 list of candidates and uses the first that resolves in your repo, so one setting works across
 repos with different trunks. The default is `main`, then `master` — each entry checks
-`origin/<name>` first, then the local branch, and `origin/main` is just another spelling of
+`origin/<name>` first, then the local branch, and `origin/main` is another spelling of
 `main`.
 
 To review against a different base, a `develop` trunk say, set `base_branches` in the same
@@ -311,7 +309,7 @@ malformed value blocks the plugin like any other invalid config.
 
 ### Keybindings
 
-Every single-key shortcut is rebindable per action. Set `[keybindings]` in the same config file.
+You can rebind every single-key shortcut per action. Set `[keybindings]` in the same config file.
 Each entry maps an action name to an array of keys. That array replaces the action's default
 keys, and actions you don't mention keep theirs. The footer and header hints show the first key
 in the array. reviewr re-reads the file on refresh, so a keymap edit applies without a relaunch.
@@ -362,7 +360,7 @@ both actions, so a typo can't silently shadow another shortcut.
 
 ### GitHub repository and hosts
 
-If a remote literally named `upstream` has a supported GitHub `owner/repository` fetch URL, the PR
+If a remote named exactly `upstream` has a supported GitHub `owner/repository` fetch URL, the PR
 tab reads that repository. An absent or unusable `upstream` identity falls back to `origin`, and a Git
 read failure stays visible and never falls through. A standard fork clone — fork at `origin`, base
 repository at `upstream` — therefore works without setup. Both remotes use their primary fetch URL
