@@ -649,33 +649,6 @@ impl App {
         self.entries.iter().find(|e| e.path == open).cloned()
     }
 
-    /// Reload the changed-files list and (unless composing) the open diff.
-    ///
-    /// The `All files` entries: every worktree path (ignored dimmed), with the children of
-    /// expanded ignored directories loaded lazily (`specs/file-list.md`). Only directories the
-    /// user has expanded are walked, so the cost tracks what is on screen, not the whole tree.
-    fn all_files_entries(&self) -> Result<Vec<Entry>> {
-        let to_entry = |w: git::WorktreeEntry| Entry {
-            annotation: self.changed.get(&w.path).cloned(),
-            path: w.path,
-            previous_path: None,
-            ignored: w.ignored,
-            is_dir: w.is_dir,
-        };
-        let mut entries: Vec<Entry> =
-            git::all_files(&self.repo)?.into_iter().map(&to_entry).collect();
-        let mut i = 0;
-        while i < entries.len() {
-            if entries[i].is_dir && self.toggled_dirs.contains(&entries[i].path) {
-                let path = entries[i].path.clone();
-                let children = git::list_ignored_dir(&self.repo, &path).into_iter().map(&to_entry);
-                entries.extend(children);
-            }
-            i += 1;
-        }
-        Ok(entries)
-    }
-
     /// Never touches the comment store or the in-progress input — that is the
     /// "a comment is never lost to a refresh" invariant (`specs/overview.md`).
     pub fn reload(&mut self) -> Result<()> {
@@ -700,33 +673,34 @@ impl App {
             }
             return Ok(());
         }
+        let snapshot = crate::world::build(&self.world_input())?;
+        self.reconcile_world(snapshot);
+        Ok(())
+    }
+
+    /// The input the next world build reads — the tag a landed snapshot is checked against
+    /// before it may reconcile (specs/tui.md).
+    pub fn world_input(&self) -> crate::world::WorldInput {
+        crate::world::WorldInput {
+            repo: self.repo.clone(),
+            tab: self.tab,
+            scope: self.scope,
+            base: self.base.clone(),
+            base_branches: self.config_snapshot().base_branches().to_vec(),
+            turn_baseline: self.turn.baseline().map(str::to_string),
+            toggled_dirs: self.toggled_dirs.clone(),
+        }
+    }
+
+    /// Reconcile a built snapshot into the view — the one place a world result touches place
+    /// state, by identity first, then fallback, then clamp (`specs/overview.md` Continuity).
+    fn reconcile_world(&mut self, snapshot: crate::world::WorldSnapshot) {
         // Keep the cursor on the same row target across the rebuild; fall back to the open
         // file, then the first file. The toggled-directory set survives untouched.
         let anchor = self.cursor_anchor();
         let open = self.diff_path.clone();
-        // The active scope's changeset, computed regardless of tab so the changed-file count
-        // and comment staleness stay correct even while `All files` lists the whole worktree.
-        // last-turn diffs the captured baseline; with none yet, it is empty until a turn start
-        // is observed (specs/review-model.md).
-        let changed = match self.scope {
-            Scope::LastTurn => match self.turn.baseline() {
-                Some(t) => git::changed_against_tree(&self.repo, t)?,
-                None => Vec::new(),
-            },
-            _ => git::changed_files(
-                &self.repo,
-                self.scope,
-                self.base.as_deref(),
-                self.config_snapshot().base_branches(),
-            )?,
-        };
-        self.changed = changed.iter().map(|f| (f.path.clone(), Annotation::from(f))).collect();
-        self.entries = match self.tab {
-            // The whole worktree (ignored included), with expanded ignored dirs loaded lazily.
-            Tab::AllFiles => self.all_files_entries()?,
-            // `Changes` (the `PR` tab returned early above).
-            _ => changed.iter().map(Entry::from_changed).collect(),
-        };
+        self.changed = snapshot.changed;
+        self.entries = snapshot.entries;
         self.rebuild_file_rows();
         self.file_cursor = anchor
             .and_then(|a| self.row_of_anchor(&a))
@@ -750,7 +724,6 @@ impl App {
             self.load_read();
         }
         self.tab_visited = true;
-        Ok(())
     }
 
     /// Load the read pane for the active tab: the scope diff in `Changes`, the whole-file
@@ -2000,7 +1973,7 @@ impl App {
         // In `All files`, expanding an ignored directory loads its children lazily, so the
         // entry set is rebuilt before the rows (file-list.md). Other tabs just re-flatten.
         if self.tab == Tab::AllFiles
-            && let Ok(entries) = self.all_files_entries()
+            && let Ok(entries) = crate::world::all_files_entries(&self.world_input(), &self.changed)
         {
             self.entries = entries;
         }

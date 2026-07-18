@@ -27,6 +27,7 @@ pub mod proc;
 pub mod theme;
 pub mod turn;
 pub mod ui;
+pub mod world;
 
 use std::io;
 use std::sync::Arc;
