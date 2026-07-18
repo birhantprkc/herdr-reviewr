@@ -674,9 +674,12 @@ pub fn all_files(repo: &Path) -> Result<Vec<WorktreeEntry>> {
             out.push(WorktreeEntry { path: path.to_string(), ignored: false, is_dir: false });
         }
     }
-    for path in untracked(repo)? {
-        if seen.insert(path.clone()) {
-            out.push(WorktreeEntry { path, ignored: false, is_dir: false });
+    // `ls-files --others` over the `status` pass `changed_files` runs: same set (verified
+    // identical), no second status walk in the same reload, and no tracked-state computation.
+    let others = git(repo, &["ls-files", "--others", "--exclude-standard", "-z"])?;
+    for path in others.split('\0').filter(|s| !s.is_empty()) {
+        if seen.insert(path.to_string()) {
+            out.push(WorktreeEntry { path: path.to_string(), ignored: false, is_dir: false });
         }
     }
     for (path, is_dir) in ignored_entries(repo)? {
@@ -688,16 +691,29 @@ pub fn all_files(repo: &Path) -> Result<Vec<WorktreeEntry>> {
     Ok(out)
 }
 
-/// The ignored entries from `git status --ignored`: a wholly-ignored directory comes back as
-/// `dir/` (mapped to `is_dir = true`), an individually-ignored file as itself.
+/// The ignored entries: a wholly-ignored directory comes back as `dir/` (mapped to
+/// `is_dir = true`), an individually-ignored file as itself.
+///
+/// `ls-files --directory` prunes at each ignored directory instead of walking inside it, where
+/// `git status --ignored` enumerates the whole tree — seconds against a large `node_modules`.
+/// `--no-empty-directory` matches `status`'s output exactly, which skips empty ignored dirs.
 fn ignored_entries(repo: &Path) -> Result<Vec<(String, bool)>> {
-    let status = git(repo, &["status", "--ignored=traditional", "--porcelain", "-z"])?;
-    // Only `!!` records; tracked/untracked come from the passes above. A trailing `/` marks a
-    // wholly-ignored directory (mapped to `is_dir`), anything else an individually-ignored file.
-    Ok(porcelain_records(&status)
-        .into_iter()
-        .filter(|(xy, _)| *xy == "!!")
-        .map(|(_, path)| match path.strip_suffix('/') {
+    let out = git(
+        repo,
+        &[
+            "ls-files",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "--directory",
+            "--no-empty-directory",
+            "-z",
+        ],
+    )?;
+    Ok(out
+        .split('\0')
+        .filter(|s| !s.is_empty())
+        .map(|path| match path.strip_suffix('/') {
             Some(dir) => (dir.to_string(), true),
             None => (path.to_string(), false),
         })
