@@ -136,7 +136,7 @@ const STATUS_TTL: Duration = Duration::from_secs(4);
 /// changes with no local signal (a reviewer's comment). Local pushes and `gh` PR actions refresh
 /// sooner, on the agent's turn-end, so this cadence is the slow safety net (specs/forge-host.md).
 const PR_POLL: Duration = Duration::from_mins(1);
-const PR_LOADING_DELAY: Duration = Duration::from_millis(150);
+const INDICATOR_DELAY: Duration = Duration::from_millis(300);
 const PR_SHUTDOWN_GRACE: Duration = Duration::from_millis(500);
 
 #[derive(Debug)]
@@ -474,7 +474,7 @@ pub fn land_world_completion(
 /// Whether a file tab's in-flight refresh shows the tab-strip glyph: past the delay, and
 /// only for a job that builds a snapshot — a sample-only job never lights it (specs/tui.md).
 fn world_indicator(inflight: Option<(Duration, bool)>) -> bool {
-    inflight.is_some_and(|(elapsed, builds)| builds && elapsed >= PR_LOADING_DELAY)
+    inflight.is_some_and(|(elapsed, builds)| builds && elapsed >= INDICATOR_DELAY)
 }
 
 /// The wake while a world job is in flight: tight for a building job so its landing paints
@@ -552,7 +552,7 @@ fn event_loop(
                 &mut recovery_inflight,
                 &mut pr,
             );
-            if pr.wait_started.is_some_and(|started| started.elapsed() >= PR_LOADING_DELAY) {
+            if pr.wait_started.is_some_and(|started| started.elapsed() >= INDICATOR_DELAY) {
                 app.set_pr_refreshing(true);
                 pr.wait_started = None;
             }
@@ -749,7 +749,7 @@ fn event_loop(
                 timeout = timeout.min(world_wake(builds));
             }
             if let Some(started) = pr.wait_started {
-                timeout = timeout.min(PR_LOADING_DELAY.saturating_sub(started.elapsed()));
+                timeout = timeout.min(INDICATOR_DELAY.saturating_sub(started.elapsed()));
             }
             if event::poll(timeout)? {
                 if !painted_frame.still_current(app) {
@@ -1379,12 +1379,12 @@ mod refresh_tests {
         use std::time::Duration;
         assert!(!world_indicator(None), "nothing in flight, nothing lit");
         assert!(
-            !world_indicator(Some((Duration::from_millis(300), false))),
+            !world_indicator(Some((Duration::from_millis(500), false))),
             "sample-only jobs never light it"
         );
-        assert!(!world_indicator(Some((Duration::from_millis(100), true))), "below the delay");
+        assert!(!world_indicator(Some((Duration::from_millis(200), true))), "below the delay");
         assert!(
-            world_indicator(Some((Duration::from_millis(150), true))),
+            world_indicator(Some((Duration::from_millis(300), true))),
             "a building job past the delay lights it"
         );
     }

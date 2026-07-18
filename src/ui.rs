@@ -498,7 +498,8 @@ fn tab_bar_spans(app: &App) -> Vec<Span<'static>> {
     }
     // The reserved indicator cell (specs/tui.md): blank when idle, so nothing shifts.
     spans.push(Span::styled(" ", bar));
-    spans.push(Span::styled(indicator_glyph(app), bar.fg(p.yellow)));
+    // Quiet like the header's secondary text — status, not an alert (specs/tui.md).
+    spans.push(Span::styled(indicator_glyph(app), bar.fg(p.overlay0)));
     spans.push(Span::styled(HEADER_GAP, bar));
     spans
 }
