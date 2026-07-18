@@ -12,14 +12,14 @@ World refresh — the changed set, the file tree, turn sampling, snapshots — m
 
 ## Definition of Done
 
-- [ ] `bench_tui.py`: the chained tab-then-`f` press paints in single-frame time, medians comparable to `file_next`. Today's residue is ~146ms.
-- [ ] A result landing after a scope, tab, or baseline change is discarded, and a newer request supersedes an older one (integration tests).
-- [ ] A result landing while composing leaves the frozen diff and draft untouched, however early its refresh began (integration test).
-- [ ] Turn edges observed off-thread behave exactly as today: baseline captured, promoted, persisted (existing `last-turn` suite green).
-- [ ] The `⟳` glyph paints in its reserved tab-strip cell only when a refresh exceeds 150ms, on every tab. The PR `· refreshing…` note is gone (render tests).
-- [ ] A scope switch shows the new scope's changed set in the switch frame, `last-turn` included (existing tests).
-- [ ] `reload_pending` and `service_reload` are deleted.
-- [ ] `just ci` green. A/B bench against main recorded in `scripts/bench-results/`.
+- [x] `bench_tui.py`: the chained tab-then-`f` press paints in single-frame time, medians comparable to `file_next`. Today's residue is ~146ms.
+- [x] A result landing after a scope, tab, or baseline change is discarded, and a newer request supersedes an older one (integration tests).
+- [x] A result landing while composing leaves the frozen diff and draft untouched, however early its refresh began (integration test).
+- [x] Turn edges observed off-thread behave exactly as today: baseline captured, promoted, persisted (existing `last-turn` suite green).
+- [x] The `⟳` glyph paints in its reserved tab-strip cell only when a refresh exceeds 150ms, on every tab. The PR `· refreshing…` note is gone (render tests).
+- [x] A scope switch shows the new scope's changed set in the switch frame, `last-turn` included (existing tests).
+- [x] `reload_pending` and `service_reload` are deleted.
+- [x] `just ci` green. A/B bench against main recorded in `scripts/bench-results/`.
 
 ## Out of Scope
 
@@ -29,15 +29,15 @@ World refresh — the changed set, the file tree, turn sampling, snapshots — m
 
 ## Execution Plan
 
-1. [ ] Commit the approved spec Draft.
-2. [ ] Extract into `src/world.rs`: a pure build (`WorldInput` → `WorldSnapshot`: changed set, entries) and `reconcile(app, snapshot)` owning every place-state touch — anchor match, fallback, clamp, composing skip. Called synchronously for now. Behavior, suite, and bench unchanged.
-3. [ ] Worker thread in `src/world.rs`: request/response channels, `WorldInput` tag (repo, tab, scope, base, turn baseline, config epoch, generation), latest-wins. Completions wired into `event_loop` beside `pr_rx`.
-4. [ ] `TurnTracker` moves into the worker: poll-flagged requests sample status, snapshot + promote + ref write happen worker-side, transitions ride the result. The UI mirrors the baseline sha and sets `pr_pending` on turn end.
-5. [ ] Keep the sync exceptions: a scope switch rebuilds the changed set inline (`last-turn` via the mirrored baseline), the first-visit gate (`tab_visited`) stays.
-6. [ ] Delete `reload_pending`, `service_reload`, and the twin-reload block in `event_loop`.
-7. [ ] `src/ui.rs`: the reserved tab-strip cell with the 150ms-debounced `⟳`, on all tabs. Remove the PR note.
-8. [ ] Integration tests in `tests/`: tag discard, supersede, mid-compose landing, off-thread turn edge.
-9. [ ] Bench A/B against a freshly built main binary under the same load. Record JSON baselines.
+1. [x] Commit the approved spec Draft.
+2. [x] Extract into `src/world.rs`: a pure build (`WorldInput` → `WorldSnapshot`: changed set, entries) and `reconcile(app, snapshot)` owning every place-state touch — anchor match, fallback, clamp, composing skip. Called synchronously for now. Behavior, suite, and bench unchanged.
+3. [x] Worker thread in `src/world.rs`: request/response channels, `WorldInput` tag (repo, tab, scope, base, turn baseline, config epoch, generation), latest-wins. Completions wired into `event_loop` beside `pr_rx`.
+4. [x] `TurnTracker` moves into the worker: poll-flagged requests sample status, snapshot + promote + ref write happen worker-side, transitions ride the result. The UI mirrors the baseline sha and sets `pr_pending` on turn end.
+5. [x] Keep the sync exceptions: a scope switch rebuilds the changed set inline (`last-turn` via the mirrored baseline), the first-visit gate (`tab_visited`) stays.
+6. [x] Delete `reload_pending`, `service_reload`, and the twin-reload block in `event_loop`.
+7. [x] `src/ui.rs`: the reserved tab-strip cell with the 150ms-debounced `⟳`, on all tabs. Remove the PR note.
+8. [x] Integration tests in `tests/`: tag discard, supersede, mid-compose landing, off-thread turn edge.
+9. [x] Bench A/B against a freshly built main binary under the same load. Record JSON baselines.
 
 ## Likely Files
 
@@ -64,3 +64,5 @@ World refresh — the changed set, the file tree, turn sampling, snapshots — m
 - If step 2 cannot cleanly separate the open-diff rebuild, keep that rebuild inside `reconcile` on the paint path and shrink `WorldSnapshot` to the list and changeset.
 - If the bench residue survives step 6, the diff build dominates — reopen the async-diff fork in brainstorming.
 - 2026-07-18: initial plan.
+- 2026-07-18: indicator reopened in brainstorming → the ⟳ glyph stands, spinner rejected as flicker on subsecond refreshes, landed in `specs/tui.md`.
+- 2026-07-18: landings waited on the 100ms in-flight wake → world wake tightened to 15ms, painted medians back at main's sync-reload level.

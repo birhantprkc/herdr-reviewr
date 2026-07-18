@@ -428,7 +428,7 @@ impl PrRefresh {
 /// the live generation and its input still matches the view — a mismatched snapshot is
 /// discarded whole and a fresh refresh queued (specs/tui.md). Returns whether the
 /// completion matched the live generation, clearing the in-flight marker.
-fn land_world_completion(
+pub fn land_world_completion(
     app: &mut App,
     completion: crate::world::WorldCompletion,
     generation: u64,
@@ -712,13 +712,14 @@ fn event_loop(
             } else {
                 poll_left.min(STATUS_TTL.saturating_sub(status_at.elapsed()))
             };
-            // While a fetch or a world refresh is in flight, wake often so its result paints
-            // promptly when it lands.
-            if pr.active_fetch.is_some()
-                || pr.active_probe_epoch.is_some()
-                || world_inflight.is_some()
-            {
+            // While a fetch is in flight, wake often so its result paints promptly when it
+            // lands. A world refresh usually lands within tens of milliseconds, so its wake
+            // is tighter — the landing paints near the build's own speed.
+            if pr.active_fetch.is_some() || pr.active_probe_epoch.is_some() {
                 timeout = timeout.min(Duration::from_millis(100));
+            }
+            if world_inflight.is_some() {
+                timeout = timeout.min(Duration::from_millis(15));
             }
             if let Some(started) = pr.wait_started {
                 timeout = timeout.min(PR_LOADING_DELAY.saturating_sub(started.elapsed()));

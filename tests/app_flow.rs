@@ -3167,3 +3167,95 @@ fn each_file_tab_holds_its_own_diff_preview_choice() {
     enter_tab(&mut app, Tab::Changes);
     assert!(app.preview_active(), "Changes kept its own preview choice");
 }
+
+// --- world completions ---------------------------------------------------------
+
+/// A completion as the worker would send it: built now, for the app's current input,
+/// tagged `generation`.
+fn completion_for(app: &App, generation: u64) -> herdr_reviewr::world::WorldCompletion {
+    let input = app.world_input();
+    let snapshot = herdr_reviewr::world::build(&input).unwrap();
+    herdr_reviewr::world::WorldCompletion {
+        generation,
+        input,
+        reveal: false,
+        turn: None,
+        snapshot: Some(Ok(snapshot)),
+    }
+}
+
+#[test]
+fn a_result_for_a_view_that_moved_on_is_discarded_whole() {
+    let r = edited_repo();
+    let mut app = app_on(&r);
+    // The build ran for `uncommitted`; the reviewer switched scope before it landed.
+    let stale = completion_for(&app, 7);
+    app.set_scope(Scope::Branch).unwrap();
+    let before = app.entries.clone();
+    assert!(
+        herdr_reviewr::land_world_completion(&mut app, stale, 7),
+        "the live generation clears the in-flight marker even when the view moved on"
+    );
+    assert_eq!(app.entries, before, "the mismatched snapshot never paints");
+    assert!(app.world_pending, "a fresh refresh is queued for the current view");
+}
+
+#[test]
+fn a_superseded_completion_syncs_the_baseline_but_paints_nothing() {
+    let r = edited_repo();
+    let mut app = app_on(&r);
+    r.write("d.rs", "d\n");
+    let mut stale = completion_for(&app, 3);
+    stale.input.turn_baseline = Some("cafe".into());
+    stale.turn =
+        Some(herdr_reviewr::world::TurnReport { ended: true, baseline: Some("cafe".into()) });
+    let before = app.entries.clone();
+    assert!(
+        !herdr_reviewr::land_world_completion(&mut app, stale, 4),
+        "a superseded tag never clears the live in-flight marker"
+    );
+    assert_eq!(app.entries, before, "a superseded snapshot never paints");
+    assert!(app.pr_pending, "the turn end still schedules the PR refetch");
+    assert_eq!(
+        app.world_input().turn_baseline.as_deref(),
+        Some("cafe"),
+        "the worker's baseline is authoritative even from a superseded completion"
+    );
+}
+
+#[test]
+fn a_completion_landing_mid_composition_leaves_the_frozen_diff() {
+    let r = edited_repo();
+    let mut app = app_on(&r);
+    app.focus = Focus::Diff;
+    app.diff_cursor = row_with(&app, '+');
+    app.start_comment();
+    for ch in "half-written".chars() {
+        app.input_push(ch);
+    }
+    let frozen_diff = app.diff.clone();
+
+    // The refresh began before composing did; its result lands mid-composition.
+    r.write("a.rs", "alpha\nBETA\ngamma\ndelta\nepsilon\nzeta\n");
+    r.write("c.rs", "c\n");
+    let early = completion_for(&app, 9);
+    assert!(herdr_reviewr::land_world_completion(&mut app, early, 9));
+
+    assert!(app.composing(), "still composing");
+    assert_eq!(app.input, "half-written", "the draft is untouched");
+    assert_eq!(app.diff, frozen_diff, "the frozen diff holds, however early the refresh began");
+    assert!(app.entries.iter().any(|f| f.path == "c.rs"), "the file list still lands");
+}
+
+#[test]
+fn a_reveal_completion_settles_the_tab_and_rearms_the_cursor_reveal() {
+    let r = edited_repo();
+    let mut app = app_on(&r);
+    r.write("c.rs", "c\n");
+    let mut landing = completion_for(&app, 2);
+    landing.reveal = true;
+    app.reveal_files = false;
+    assert!(herdr_reviewr::land_world_completion(&mut app, landing, 2));
+    assert!(app.reveal_files, "a switch-originated landing re-reveals the re-anchored cursor");
+    assert!(app.entries.iter().any(|f| f.path == "c.rs"), "the landing caught up");
+}
