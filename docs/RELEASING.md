@@ -58,6 +58,11 @@ Pick the new version with semver: a behavior change or new feature is a minor bu
 
 The toolchain is pinned by `rust-toolchain.toml`, so CI and local builds match.
 
+## Gotcha: a tag name is single-use
+
+Releases are immutable. Deleting a failed release does not free its tag name — the repository
+rules reserve it forever. A release that must be recut ships under the next patch version.
+
 ## Reinstall locally after a release
 
 Switch your own machine from the dev link to the published release. This is also the cheapest

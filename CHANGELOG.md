@@ -6,7 +6,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [0.20.0] — 2026-07-18
+## [0.20.1] — 2026-07-18
 
 ### Changed
 - **Input never waits on a refresh.** Every background rebuild — the changed set, the file tree,
