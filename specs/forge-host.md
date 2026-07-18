@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-06-27
-Last edited: 2026-07-17
+Last edited: 2026-07-18
 ---
 
 # forge host
@@ -10,7 +10,7 @@ How reviewr reads one pull request from GitHub — identity, state, checks, comm
 
 ## Overview
 
-reviewr resolves the worktree's pull request through its published commits, then reads a snapshot of it through `gh` on each poll. Every shown PR provably contains this worktree's work. The snapshot is the single value the `PR` tab renders.
+reviewr resolves the worktree's pull request through its commits, then reads a snapshot of it through `gh` on each poll. Every shown PR provably belongs to this worktree's work. The snapshot is the single value the `PR` tab renders.
 
 ```
 PR #226  open  persiyanov/deep-research-benchmark → main   ⇡ 2 unpushed
@@ -84,17 +84,18 @@ redirect a fetch.
 
 ### Resolution
 
-The worktree's published commits nominate pull requests, and containment admits them. A branch name never proves identity, so names play no part in resolution.
+The worktree's commits nominate pull requests. Containment or exact head identity admits them. A branch name never proves identity, so names play no part in resolution.
 
 - Each fetch pins `HEAD` and the base ref to commit OIDs. Ancestry, distance, and sync calculations use those pins while the agent commits beside it.
 - The publication points are the nearest ancestors of the pinned `HEAD` present on `origin`. A point that is an ancestor of any resolved base entry proves nothing and is skipped.
-- With no publication point beyond the pinned base, the tab shows the empty state. The worktree has published no reviewable work.
-- With no base resolvable, no point is provable and the tab shows the empty state.
+- The pinned `HEAD` also nominates by exact identity when it is not an ancestor of any resolved base entry. A PR admits through this path only when its head is exactly that commit. The PR may be open or merged.
+- With no publication point and no exact-identity admission, the tab shows the empty state. The worktree has published no provable work.
+- With no base resolvable, no nomination is provable and the tab shows the empty state.
 - Each publication point is asked of the forge: which pull requests contain this commit. The query runs against the `origin` repository, where the commits live. An `origin` on another host proves nothing on the target's forge, so the target repository stands in. Only PRs based on the resolved repository target count.
-- Every resolved PR therefore contains the worktree's published work. There is no other admission path.
+- Every resolved PR therefore contains the worktree's published work or carries its parked commit as the exact head. There is no third admission path.
 - Exactly one open PR resolves when one contains a publication point.
 - Several open PRs disambiguate in order: a head equal to the pinned `HEAD`, a head equal to a publication point, the head named by the recorded upstream. A record naming a configured base is tracking, not publication, and never joins the tiebreak. Failing all three, reviewr surfaces the count, never a silent guess.
-- With no open PR, the newest-merged PR containing a publication point shows as historical state.
+- With no open PR, the newest-merged PR containing a publication point shows as historical state. A merged PR whose head is exactly the pinned `HEAD` resolves the same way, even with no publication point.
 - A worktree parked on published base history keeps its epilogue: the absorbed tip still nominates, and a merged PR whose head is exactly that commit resolves as history. Containment proves nothing for an absorbed commit.
 - A PR closed without merging does not associate. It still resolves as history through exact identity: an `origin` branch tip at a publication point names it, and its reported head equals that point.
 - With none at all, the body says only `No pull request yet. Ready to ship?`
@@ -110,6 +111,7 @@ What a user observes:
 - A worktree with no commits beyond the base shows the empty state. A sibling worktree's PR never attaches to it.
 - A reused branch name never resurrects an earlier, unrelated PR. Old PRs do not contain this worktree's commits.
 - The worktree's own merged PR shows as history while the space stays parked on its branch, even after the base absorbs the merge.
+- A squash-merged PR shows as history after GitHub deletes its remote branch. The parked tip is exactly the PR's head, and that proves it.
 - A rebase discards the old publication points. Between the rebase and its force-push, the tab shows the empty state. The push restores it on the next poll.
 
 ### Derived state

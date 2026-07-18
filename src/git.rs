@@ -265,6 +265,10 @@ pub struct PrLocalState {
     /// parked on, kept only when no point survives. A merged PR whose head is exactly
     /// one of them still resolves as the epilogue (`specs/forge-host.md`).
     pub absorbed: Vec<String>,
+    /// The pinned `HEAD` nominates by exact identity: it sits outside every resolved
+    /// base's history, so a PR whose head is exactly this commit is provably this
+    /// worktree's — the exact-identity epilogue (`specs/forge-host.md`).
+    pub head_nominates: bool,
     /// The recorded upstream's bare branch name, the last open-PR tiebreak. A record
     /// naming a configured base is tracking, not publication, and is dropped.
     pub upstream: Option<String>,
@@ -288,12 +292,17 @@ pub fn pr_local(
         Some(head) if !bases.is_empty() => publication_points(repo, head, &bases)?,
         _ => (Vec::new(), Vec::new()),
     };
+    let head_nominates = match &head_oid {
+        Some(head) if !bases.is_empty() => beyond_all_bases(repo, head, &bases)?,
+        _ => false,
+    };
     let upstream = recorded_upstream(repo, &branch, base_flag, config_bases)?;
     Ok(PrLocalState {
         head_oid,
         base_oid: bases.into_iter().next(),
         points,
         absorbed,
+        head_nominates,
         upstream,
         detached: false,
     })
@@ -389,17 +398,15 @@ fn publication_points(
     oids.truncate(32);
     let mut points = Vec::new();
     let mut absorbed = Vec::new();
-    'point: for oid in oids {
+    for oid in oids {
         if points.len() >= 8 {
             break;
         }
-        for base in bases {
-            if is_ancestor(repo, &oid, base)? {
-                if absorbed.len() < 4 {
-                    absorbed.push(oid);
-                }
-                continue 'point;
+        if !beyond_all_bases(repo, &oid, bases)? {
+            if absorbed.len() < 4 {
+                absorbed.push(oid);
             }
+            continue;
         }
         let names =
             tips.iter().filter(|(tip, _)| tip == &oid).map(|(_, name)| name.clone()).collect();
@@ -418,22 +425,35 @@ fn is_ancestor(repo: &Path, commit: &str, of: &str) -> Result<bool, GitFail> {
     Ok(git_tristate(repo, &["merge-base", "--is-ancestor", commit, of])?.is_some())
 }
 
+/// Whether `oid` lies beyond every resolved base — an ancestor of none of them. A point
+/// filter and the `HEAD` nomination both ask this one question, so they never disagree.
+fn beyond_all_bases(repo: &Path, oid: &str, bases: &[String]) -> Result<bool, GitFail> {
+    for base in bases {
+        if is_ancestor(repo, oid, base)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 /// The target and origin identities from one read of each remote. The target resolves from
 /// a readable supported `upstream`, falling back to `origin`; unusable identities fall
 /// back, read errors do not. The origin identity rides along for the association query —
-/// the worktree's commits live where it pushes (`specs/forge-host.md`).
+/// the worktree's commits live where it pushes (`specs/forge-host.md`). A usable `upstream`
+/// already fixes the target, so an `origin` read that fails then costs only that fetch's
+/// association source, not the whole read.
 pub(crate) fn remote_identities(
     repo: &Path,
     github_host: Option<&str>,
 ) -> Result<(RepositoryIdentity, Option<RepoTarget>), GitFail> {
     let upstream = remote_identity(repo, "upstream", github_host)?;
-    let origin = remote_identity(repo, "origin", github_host)?;
+    let origin = remote_identity(repo, "origin", github_host);
     let origin_target = match &origin {
-        RepositoryIdentity::Repository(target) => Some(target.clone()),
+        Ok(RepositoryIdentity::Repository(target)) => Some(target.clone()),
         _ => None,
     };
     let repository =
-        if matches!(upstream, RepositoryIdentity::Repository(_)) { upstream } else { origin };
+        if matches!(upstream, RepositoryIdentity::Repository(_)) { upstream } else { origin? };
     Ok((repository, origin_target))
 }
 

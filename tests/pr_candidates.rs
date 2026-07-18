@@ -231,6 +231,36 @@ fn a_parked_merged_tip_survives_as_an_absorbed_candidate() {
 }
 
 #[test]
+fn head_nominates_only_outside_every_resolved_base() {
+    // A branch with its own commit past main: HEAD is provably this worktree's work.
+    let repo = worktree();
+    let local = pr_local(repo.path(), None).expect("pr_local");
+    assert!(local.head_nominates, "a HEAD beyond the base nominates by exact identity");
+
+    // A zero-work worktree parked at the base tip: HEAD is base history, so a stranger's
+    // PR head parked at the same commit must never attach.
+    repo.git(&["switch", "-qC", "work", "main"]);
+    let local = pr_local(repo.path(), None).expect("pr_local");
+    assert!(!local.head_nominates, "a HEAD in base history proves nothing");
+}
+
+#[test]
+fn a_squash_merged_tip_with_a_deleted_branch_still_nominates_by_head_identity() {
+    // The deleted-branch epilogue: main absorbed the work as a different commit (squash)
+    // and the remote branch is gone, so no origin ref reaches the parked tip. Points and
+    // absorbed cannot prove the PR — only the exact-identity HEAD can.
+    let repo = worktree();
+    repo.git(&["switch", "-q", "main"]);
+    repo.git(&["merge", "-q", "--squash", "work"]);
+    repo.git(&["commit", "-qm", "squash of work"]);
+    repo.git(&["update-ref", "refs/remotes/origin/main", "main"]);
+    repo.git(&["switch", "-q", "work"]);
+    let local = pr_local(repo.path(), None).expect("pr_local");
+    assert!(local.points.is_empty(), "the orphaned tip is on no origin ref");
+    assert!(local.head_nominates, "the squashed tip is not base history");
+}
+
+#[test]
 fn a_point_carries_every_origin_name_at_its_tip() {
     let repo = worktree();
     repo.git(&["update-ref", "refs/remotes/origin/feat", "HEAD"]);
@@ -266,6 +296,7 @@ fn without_a_resolvable_base_no_point_is_provable() {
     let local = pr_local(repo.path(), None).expect("pr_local");
     assert_eq!(local.base_oid, None);
     assert!(local.points.is_empty());
+    assert!(!local.head_nominates, "no base resolved, so nothing can prove HEAD");
 
     // origin/HEAD backstops the unresolvable list (`specs/review-model.md`).
     repo.git(&["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk"]);
