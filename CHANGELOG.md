@@ -6,6 +6,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.20.0] — 2026-07-18
+
+### Changed
+- **Input never waits on a refresh.** Every background rebuild — the changed set, the file tree,
+  the agent-status sample, the turn snapshot — now runs on a worker thread. A keypress paints
+  immediately even while the sidebar refreshes, and a poll tick can no longer swallow a keystroke
+  mid-scroll. Results land only while they still describe what you are looking at, so the view is
+  at worst briefly stale, never wrong.
+- **A refresh indicator in the tab strip.** Pressing `r` lights a one-cell `⟳` beside the tabs
+  immediately, held long enough to read. Background refreshes show it only when they run long — a
+  cold scan, a slow fetch, a hung git. It replaces the `PR` pane's `· refreshing…` title note, and
+  its reserved cell means the header never shifts.
+- **Scope switches repaint consistently.** Switching scope in `All files` updates the header count
+  and every row's change badge in the same frame, with the tree itself refreshing right behind.
+
 ## [0.19.0] — 2026-07-18
 
 ### Changed
