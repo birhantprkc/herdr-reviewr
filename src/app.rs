@@ -289,6 +289,9 @@ pub struct App {
     /// Set when the PR view needs a (re)fetch; the event loop services it after drawing, so a
     /// `loading` frame shows before the blocking `gh` calls run.
     pub pr_pending: bool,
+    /// A file-tab switch painted its stashed frame and deferred the reload; the event loop
+    /// services it via [`Self::service_reload`] right after that frame (specs/tui.md).
+    pub reload_pending: bool,
     highlighter: Highlighter,
     /// The active palette every renderer paints from (`specs/theme.md`).
     palette: Palette,
@@ -402,6 +405,7 @@ impl App {
             pr_nav_max_scroll: std::cell::Cell::new(usize::MAX),
             reveal_pr_nav: std::cell::Cell::new(true),
             pr_pending: false,
+            reload_pending: false,
             highlighter: Highlighter::new(theme.syntax),
             palette: theme.palette,
             theme_name: theme.name,
@@ -1414,9 +1418,12 @@ impl App {
     }
 
     /// Switch to `tab`, saving the active tab's navigator and read-pane state and restoring the
-    /// target's, then reloading it against the current worktree. Each tab keeps its own opened
-    /// file and scroll, so returning to a tab lands exactly where you left it (specs/tui.md). A
-    /// no-op on the active tab or while composing; focus stays on the same side.
+    /// target's. Each tab keeps its own opened file and scroll, so returning to a tab lands
+    /// exactly where you left it (specs/tui.md). The switch frame paints the restored state as
+    /// it was; the reload against the current worktree is deferred to [`Self::service_reload`],
+    /// which the event loop runs right after that frame — stale for one frame, never wrong
+    /// (specs/overview.md Continuity). A no-op on the active tab or while composing; focus
+    /// stays on the same side.
     pub fn set_tab(&mut self, tab: Tab) -> Result<()> {
         self.ensure_config_ready()?;
         if self.tab == tab || self.composing() {
@@ -1436,7 +1443,7 @@ impl App {
             self.swap_active_with_stash();
             self.active_file_tab = tab;
         }
-        self.reload()?;
+        self.reload_pending = true;
         // An empty read pane — a first visit landing on a collapsed tree, or an open file gone
         // empty — focuses the tree, so the cursor keys aren't trapped on a pane with nothing to
         // move (specs/tui.md).
@@ -1444,6 +1451,21 @@ impl App {
             self.focus = Focus::Files;
         }
         self.reveal_files = true; // pull the restored cursor back into view
+        Ok(())
+    }
+
+    /// Run the reload a tab switch deferred past its paint. The event loop calls this after the
+    /// switch frame draws; a repaint follows before input, so the fresh state is one frame
+    /// behind the instant one. Re-checks the empty-pane focus because the reload may have
+    /// emptied or filled the read pane the switch frame showed.
+    pub fn service_reload(&mut self) -> Result<()> {
+        if !std::mem::take(&mut self.reload_pending) {
+            return Ok(());
+        }
+        self.reload()?;
+        if self.visible.is_empty() {
+            self.focus = Focus::Files;
+        }
         Ok(())
     }
 

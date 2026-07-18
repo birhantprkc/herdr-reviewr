@@ -957,6 +957,7 @@ fn all_files_tab_bar_footer_and_count_read_for_the_tab() {
     r.write("a.rs", "ONE\n"); // one change
     let mut app = app_on(&r);
     app.set_tab(Tab::AllFiles).unwrap();
+    app.service_reload().unwrap();
 
     let out = render(&app);
     assert!(out.contains("1 Changes"), "tab labels carry their switch digit:\n{out}");
@@ -1005,7 +1006,8 @@ fn all_files_empty_pane_reads_select_a_file() {
     r.write("src/b.rs", "y\n"); // two children so src/ is a real collapsed dir, not a folded file
     r.commit_all("init");
     let mut app = app_on(&r);
-    app.set_tab(Tab::AllFiles).unwrap(); // clean repo: no seed; cursor rests on collapsed src/
+    app.set_tab(Tab::AllFiles).unwrap();
+    app.service_reload().unwrap(); // clean repo: no seed; cursor rests on collapsed src/
 
     let out = render(&app);
     assert!(out.contains("select a file to read"), "the empty All files read-pane copy:\n{out}");
@@ -1101,6 +1103,7 @@ fn the_markdown_preview_renders_styled_lines_without_a_gutter() {
     r.commit_all("init");
     let mut app = app_on(&r);
     app.set_tab(Tab::AllFiles).unwrap();
+    app.service_reload().unwrap();
 
     // Source view: raw markdown, and the footer surfaces the way into the preview.
     app.focus = Focus::Diff;
@@ -1450,6 +1453,7 @@ the target body
     r.commit_all("init");
     let mut app = app_on(&r);
     app.set_tab(Tab::AllFiles).unwrap();
+    app.service_reload().unwrap();
 
     // In source view an anchor click is inert: no anchors are painted there.
     let _ = render(&app);
@@ -1508,6 +1512,7 @@ fn the_preview_paints_link_regions_and_names_itself_in_the_title() {
     r.commit_all("init");
     let mut app = app_on(&r);
     app.set_tab(Tab::AllFiles).unwrap();
+    app.service_reload().unwrap();
 
     let source = render(&app);
     assert!(!source.contains("· preview"), "source view has no preview marker");
@@ -1562,6 +1567,7 @@ fn an_uppercase_unicode_anchor_still_finds_its_heading() {
     r.commit_all("init");
     let mut app = app_on(&r);
     app.set_tab(Tab::AllFiles).unwrap();
+    app.service_reload().unwrap();
     app.toggle_preview();
     let _ = render(&app);
 

@@ -491,6 +491,7 @@ fn hunk_steps_are_inert_where_no_change_rows_are_painted() {
 
     // `All files` renders whole-file content: every row is context, so a step has no target.
     app.set_tab(herdr_reviewr::app::Tab::AllFiles).unwrap();
+    app.service_reload().unwrap();
     let (path, cursor) = (app.diff_path.clone(), app.diff_cursor);
     app.next_hunk();
     assert_eq!((app.diff_path.clone(), app.diff_cursor), (path, cursor));
@@ -1722,6 +1723,7 @@ fn tab_cannot_change_while_composing() {
     // A tab switch mid-comment must be a no-op, so the panes never swap out from under the
     // open composer (the compose-freeze invariant), matching set_scope.
     app.set_tab(Tab::AllFiles).unwrap();
+    app.service_reload().unwrap();
     assert_eq!(app.tab, Tab::Changes, "the tab is frozen mid-comment");
     assert!(app.composing(), "still composing");
     assert_eq!(app.input, "x", "input untouched");
@@ -2030,6 +2032,7 @@ fn all_files_tab_browses_the_whole_worktree_and_renders_content() {
     // All files lists the whole worktree and opens its first file (README, the top-level one),
     // so src/ stays collapsed by default.
     app.set_tab(Tab::AllFiles).unwrap();
+    app.service_reload().unwrap();
     assert_eq!(app.tab, Tab::AllFiles);
     assert!(app.entries.iter().any(|e| e.path == "src/ui.rs"), "an unchanged file is listed");
     assert_eq!(app.diff_path.as_deref(), Some("README.md"), "All files opens its first file");
@@ -2047,6 +2050,32 @@ fn all_files_tab_browses_the_whole_worktree_and_renders_content() {
 }
 
 #[test]
+fn a_tab_switch_paints_the_stashed_frame_and_defers_its_reload() {
+    use herdr_reviewr::app::Tab;
+    let r = Repo::init();
+    r.write("a.rs", "fn a() {}\n");
+    r.commit_all("base");
+    let mut app = app_on(&r);
+
+    // The switch itself restores the stashed state and schedules the reload; nothing is
+    // derived on the switch path (specs/tui.md, specs/overview.md Continuity).
+    app.set_tab(Tab::AllFiles).unwrap();
+    assert!(app.reload_pending, "the switch defers its reload");
+    assert!(app.entries.is_empty(), "a first visit paints the empty stash");
+
+    // Servicing runs the deferred reload once and settles the tab.
+    app.service_reload().unwrap();
+    assert!(!app.reload_pending);
+    assert!(app.entries.iter().any(|e| e.path == "a.rs"), "the reload filled the tree");
+
+    // A second service is a no-op: the flag is consumed.
+    let before = app.entries.len();
+    r.write("b.rs", "fn b() {}\n");
+    app.service_reload().unwrap();
+    assert_eq!(app.entries.len(), before, "no pending flag, no reload");
+}
+
+#[test]
 fn switching_tabs_restores_each_tab_selection() {
     use herdr_reviewr::app::Tab;
     use herdr_reviewr::diff::View;
@@ -2061,6 +2090,7 @@ fn switching_tabs_restores_each_tab_selection() {
 
     // In All files, open README.md.
     app.set_tab(Tab::AllFiles).unwrap();
+    app.service_reload().unwrap();
     let readme_row = file_row_of(&app, "README.md").expect("README.md at the top level");
     app.select_file(readme_row).unwrap();
     assert_eq!(app.diff_path.as_deref(), Some("README.md"));
@@ -2068,6 +2098,7 @@ fn switching_tabs_restores_each_tab_selection() {
 
     // Back to Changes: its own selection and diff are restored, not All files'.
     app.set_tab(Tab::Changes).unwrap();
+    app.service_reload().unwrap();
     assert_eq!(app.tab, Tab::Changes);
     assert_eq!(app.entries.len(), 1, "Changes still lists only the changed file");
     assert_eq!(app.diff_path, changes_open);
@@ -2075,6 +2106,7 @@ fn switching_tabs_restores_each_tab_selection() {
 
     // Forward again: All files restored README.md, not the Changes selection.
     app.set_tab(Tab::AllFiles).unwrap();
+    app.service_reload().unwrap();
     assert_eq!(app.diff_path.as_deref(), Some("README.md"));
     assert_eq!(app.diff.view, View::File);
 }
@@ -2104,6 +2136,7 @@ fn changed_count_and_staleness_stay_scope_based_on_all_files() {
     app.store.add(comment.clone());
 
     app.set_tab(Tab::AllFiles).unwrap();
+    app.service_reload().unwrap();
     assert!(app.entries.len() >= 2, "All files lists the whole worktree");
     assert_eq!(app.changed_count(), 1, "the count is the changeset, not the worktree total");
     assert!(
@@ -2136,6 +2169,7 @@ fn all_files_annotates_changed_files_only() {
     r.write("a.rs", "ONE\n"); // a.rs changed, b.rs unchanged
     let mut app = app_on(&r);
     app.set_tab(Tab::AllFiles).unwrap();
+    app.service_reload().unwrap();
     assert!(
         matches!(annotation_of(&app, "a.rs"), Some(Some(a)) if a.change == ChangeKind::Modified),
         "a changed file carries its marker"
@@ -2160,6 +2194,7 @@ fn switching_scope_on_all_files_remarks_in_place() {
     r.write("a.rs", "ONE\n"); // one uncommitted change
     let mut app = app_on(&r);
     app.set_tab(Tab::AllFiles).unwrap();
+    app.service_reload().unwrap();
     app.focus = Focus::Files;
     app.move_cursor(1).unwrap();
     let cursor = app.file_cursor;
@@ -2189,6 +2224,7 @@ fn all_files_lazily_loads_an_expanded_ignored_directory() {
     r.write("target/sub/y.o", "y\n");
     let mut app = app_on(&r);
     app.set_tab(Tab::AllFiles).unwrap();
+    app.service_reload().unwrap();
     app.focus = Focus::Files;
 
     // target/ is a collapsed, ignored placeholder; its contents are not loaded yet.
@@ -2226,6 +2262,7 @@ fn content_comment_is_stale_only_when_its_file_is_deleted() {
     r.commit_all("init");
     let mut app = app_on(&r);
     app.set_tab(Tab::AllFiles).unwrap();
+    app.service_reload().unwrap();
     let row = file_row_of(&app, "a.rs").expect("a.rs at the top level");
     app.select_file(row).unwrap();
     app.focus = Focus::Diff;
@@ -2256,12 +2293,14 @@ fn the_tabs_keep_independent_selections() {
     assert!(app.diff_path.is_none(), "Changes opens nothing with an empty changeset");
 
     app.set_tab(Tab::AllFiles).unwrap();
+    app.service_reload().unwrap();
     let row = file_row_of(&app, "a.rs").unwrap();
     app.select_file(row).unwrap();
     assert_eq!(app.diff_path.as_deref(), Some("a.rs"), "viewing a.rs in All files");
 
     // Back to Changes: nothing carries over, so its own (empty) state stands.
     app.set_tab(Tab::Changes).unwrap();
+    app.service_reload().unwrap();
     assert!(app.diff_path.is_none(), "the All files selection does not carry into Changes");
 }
 
@@ -2273,6 +2312,7 @@ fn a_file_view_comment_exports_as_path_line_with_a_context_snippet() {
     r.commit_all("init");
     let mut app = app_on(&r);
     app.set_tab(Tab::AllFiles).unwrap();
+    app.service_reload().unwrap();
     let row = file_row_of(&app, "a.rs").expect("a.rs listed");
     app.select_file(row).unwrap();
     app.focus = Focus::Diff;
@@ -2301,6 +2341,7 @@ fn an_oversize_file_in_all_files_degrades_to_a_notice() {
     r.commit_all("init");
     let mut app = app_on(&r);
     app.set_tab(Tab::AllFiles).unwrap();
+    app.service_reload().unwrap();
     let row = file_row_of(&app, "big.bin").expect("big.bin listed");
     app.select_file(row).unwrap();
     assert_eq!(app.diff.state, FileState::TooLarge, "an over-budget file is not read whole");
@@ -2318,6 +2359,7 @@ fn switching_to_an_empty_file_view_focuses_the_tree() {
     let mut app = app_on(&r);
     app.focus = Focus::Diff; // reader is in the diff pane on the deletion
     app.set_tab(Tab::AllFiles).unwrap();
+    app.service_reload().unwrap();
     assert!(app.visible.is_empty(), "the deleted file's content view is empty");
     assert_eq!(app.focus, Focus::Files, "an empty read pane focuses the tree, not traps the keys");
 }
@@ -2341,6 +2383,7 @@ fn a_diff_comment_does_not_render_in_the_file_view() {
 
     // In All files, open a.rs as content: the diff-anchored comment must not bleed in.
     app.set_tab(Tab::AllFiles).unwrap();
+    app.service_reload().unwrap();
     let row = file_row_of(&app, "a.rs").expect("a.rs listed");
     app.select_file(row).unwrap();
     assert_eq!(app.diff.view, View::File);
@@ -2360,6 +2403,7 @@ fn editing_a_comment_on_all_files_opens_the_file_view() {
     r.commit_all("init");
     let mut app = app_on(&r);
     app.set_tab(Tab::AllFiles).unwrap();
+    app.service_reload().unwrap();
     // A content comment on a.rs.
     let arow = file_row_of(&app, "a.rs").expect("a.rs listed");
     app.select_file(arow).unwrap();
@@ -2405,8 +2449,10 @@ fn changing_scope_on_all_files_snaps_the_changes_diff_to_the_top() {
 
     // Change scope while on All files, then return to Changes.
     app.set_tab(Tab::AllFiles).unwrap();
+    app.service_reload().unwrap();
     app.set_scope(Scope::Branch).unwrap();
     app.set_tab(Tab::Changes).unwrap();
+    app.service_reload().unwrap();
 
     assert!(app.entries.iter().any(|e| e.path == "a.rs"), "a.rs is in the branch changeset");
     assert_eq!(app.diff_scroll, 0, "an explicit scope switch snaps the Changes diff to the top");
@@ -2430,6 +2476,7 @@ fn the_pr_tab_detour_preserves_each_file_tab_state() {
 
     // All files can open b.rs, which Changes can never show (b.rs is unchanged).
     app.set_tab(Tab::AllFiles).unwrap();
+    app.service_reload().unwrap();
     app.select_file(file_row(&app, "b.rs")).unwrap();
     assert_eq!(app.diff_path.as_deref(), Some("b.rs"));
 
@@ -2439,10 +2486,12 @@ fn the_pr_tab_detour_preserves_each_file_tab_state() {
 
     // Returning to All files restores b.rs (active file tab unchanged → no swap).
     app.set_tab(Tab::AllFiles).unwrap();
+    app.service_reload().unwrap();
     assert_eq!(app.diff_path.as_deref(), Some("b.rs"), "All files restored after the PR detour");
 
     // Returning to Changes swaps its state back — a.rs, never All files' b.rs.
     app.set_tab(Tab::Changes).unwrap();
+    app.service_reload().unwrap();
     assert_eq!(app.tab, Tab::Changes);
     assert_eq!(app.diff_path.as_deref(), Some("a.rs"), "Changes restored without bleeding b.rs");
 }
@@ -2736,6 +2785,7 @@ fn markdown_app() -> (Repo, App) {
     r.commit_all("init");
     let mut app = app_on(&r);
     app.set_tab(Tab::AllFiles).unwrap();
+    app.service_reload().unwrap();
     assert_eq!(app.diff_path.as_deref(), Some("README.md"), "first file opens");
     (r, app)
 }
@@ -2758,6 +2808,7 @@ fn the_markdown_preview_toggles_on_a_markdown_file_in_either_tab() {
 
     // `All files` previews the same file the same way.
     app.set_tab(Tab::AllFiles).unwrap();
+    app.service_reload().unwrap();
     app.toggle_preview();
     assert!(app.preview_active(), "a markdown file previews in All files");
     app.toggle_preview();
@@ -2839,12 +2890,15 @@ fn a_tab_switch_restores_the_preview_choice() {
     assert!(app.preview_active());
 
     app.set_tab(Tab::Changes).unwrap();
+    app.service_reload().unwrap();
     assert!(!app.preview_active(), "the Changes tab holds its own choice, not All files'");
     app.set_tab(Tab::AllFiles).unwrap();
+    app.service_reload().unwrap();
     assert!(app.preview_active(), "the tab restores its preview choice");
 
     app.set_tab(Tab::Pr).unwrap();
     app.set_tab(Tab::AllFiles).unwrap();
+    app.service_reload().unwrap();
     assert!(app.preview_active(), "a PR round-trip also restores it");
 }
 
@@ -2913,6 +2967,7 @@ fn the_toggle_carries_the_reading_position_block_aligned() {
     r.commit_all("init");
     let mut app = app_on(&r);
     app.set_tab(Tab::AllFiles).unwrap();
+    app.service_reload().unwrap();
     assert_eq!(app.diff_path.as_deref(), Some("doc.md"));
     app.note_diff_width(80);
     app.focus = Focus::Diff;
@@ -2962,6 +3017,7 @@ fn a_degraded_markdown_file_never_previews() {
     r.commit_all("init");
     let mut app = app_on(&r);
     app.set_tab(Tab::AllFiles).unwrap();
+    app.service_reload().unwrap();
     assert_eq!(app.diff_path.as_deref(), Some("empty.md"));
     app.toggle_preview();
     assert!(!app.preview_active(), "a file showing a notice or nothing never previews");
@@ -3110,6 +3166,7 @@ fn each_file_tab_holds_its_own_diff_preview_choice() {
 
     // All files opens the same file with its own choice, still source.
     app.set_tab(Tab::AllFiles).unwrap();
+    app.service_reload().unwrap();
     assert_eq!(app.diff_path.as_deref(), Some("doc.md"));
     assert!(!app.preview_active(), "All files holds its own choice, still source");
 
@@ -3117,5 +3174,6 @@ fn each_file_tab_holds_its_own_diff_preview_choice() {
     app.toggle_preview();
     assert!(app.preview_active(), "All files previews");
     app.set_tab(Tab::Changes).unwrap();
+    app.service_reload().unwrap();
     assert!(app.preview_active(), "Changes kept its own preview choice");
 }

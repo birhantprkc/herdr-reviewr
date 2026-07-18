@@ -505,6 +505,17 @@ fn event_loop(
             let painted_frame = PaintedFrameSnapshot::capture(app);
             terminal.draw(|f| ui::render(f, app))?;
 
+            // A tab switch painted its stashed frame above; run the deferred reload now and
+            // repaint before accepting input, so the switch is instant and the fresh state is
+            // one frame behind it. A failed refresh reports and keeps the stale frame — the
+            // same contract as a failed poll (specs/tui.md).
+            if app.reload_pending {
+                if let Err(e) = app.service_reload() {
+                    app.status = format!("refresh failed: {e}");
+                }
+                continue;
+            }
+
             // Record user and fallback refreshes before consuming worker results. A trigger that
             // arrived during completion verification supersedes that completion before it can
             // paint, while the generation still coalesces repeated triggers into one fresh fetch.

@@ -1,7 +1,7 @@
 //! Perceived-latency benchmark: times the exact blocking calls reviewr's UI thread
 //! runs for tab switches and file switches, against a real repo.
 //!
-//! Usage: cargo run --release --example bench_latency -- <repo-path> [label]
+//! Usage: `cargo run --release --example bench_latency -- <repo-path> [label]`
 
 use std::path::PathBuf;
 use std::time::Instant;
@@ -92,8 +92,7 @@ fn main() {
         .iter()
         .rev()
         .find(|(s, _)| *s < 1_000_000)
-        .map(|(_, p)| p.clone())
-        .unwrap_or_else(|| median_file.clone());
+        .map_or_else(|| median_file.clone(), |(_, p)| p.clone());
     let large_kb = sized.iter().find(|(_, p)| *p == large_file).unwrap().0 / 1024;
 
     // All files tab: set_file_view = fs read + highlight (cold), cache hit (warm).
