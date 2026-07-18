@@ -1,7 +1,8 @@
 //! The world snapshot: the derived state one refresh produces, built from git alone.
 //!
-//! `build` reads nothing from `App`, so the same call runs synchronously today and behind
-//! the worker later (specs/tui.md Refresh). Reconciling a snapshot into place state stays
+//! `build` reads nothing from `App`, so the same call runs synchronously (startup, scope
+//! switches, first visits) and behind the worker (polls, `r`, return visits)
+//! (specs/tui.md Refresh). Reconciling a snapshot into place state stays
 //! in `App::reconcile_world`, the one home for the Continuity rules (specs/overview.md).
 
 use std::collections::{HashMap, HashSet};
@@ -191,7 +192,7 @@ impl TurnHost {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct WorldRequest {
     /// Sample the agent's status — set by the poll alone (specs/tui.md).
-    pub sample: bool,
+    pub sample_turn: bool,
     /// Re-reveal the cursor when the result lands — user-initiated switches only.
     pub reveal: bool,
 }

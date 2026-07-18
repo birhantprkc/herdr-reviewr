@@ -136,7 +136,11 @@ const STATUS_TTL: Duration = Duration::from_secs(4);
 /// changes with no local signal (a reviewer's comment). Local pushes and `gh` PR actions refresh
 /// sooner, on the agent's turn-end, so this cadence is the slow safety net (specs/forge-host.md).
 const PR_POLL: Duration = Duration::from_mins(1);
-const INDICATOR_DELAY: Duration = Duration::from_millis(300);
+/// How long an ambient refresh must stay in flight before the tab-strip glyph shows —
+/// routine refreshes stay invisible; a commanded one (`r`) shows immediately (specs/tui.md).
+const INDICATOR_DELAY: Duration = Duration::from_millis(200);
+/// Once lit, the glyph holds at least this long, so a fast landing still reads.
+const INDICATOR_MIN_SHOW: Duration = Duration::from_millis(300);
 const PR_SHUTDOWN_GRACE: Duration = Duration::from_millis(500);
 
 #[derive(Debug)]
@@ -479,6 +483,12 @@ fn world_indicator(inflight: Option<(Duration, bool)>) -> bool {
 
 /// The wake while a world job is in flight: tight for a building job so its landing paints
 /// near the build's own speed, the fetch cadence for a sample-only one.
+/// Whether a lit glyph may go dark: only once the minimum display has passed, so the
+/// acknowledgment is perceptible rather than a two-frame blink (specs/tui.md).
+fn glyph_clears(lit_for: Duration) -> bool {
+    lit_for >= INDICATOR_MIN_SHOW
+}
+
 fn world_wake(builds: bool) -> Duration {
     Duration::from_millis(if builds { 15 } else { 100 })
 }
@@ -512,6 +522,8 @@ fn event_loop(
     );
     let mut world_generation = 0_u64;
     let mut world_inflight: Option<(Instant, bool)> = None;
+    // When the tab-strip glyph turned on — the minimum-display clock (specs/tui.md).
+    let mut glyph_since: Option<Instant> = None;
     let mut config_epoch = 0_u64;
     let mut status_at = Instant::now();
     let mut last_status = String::new();
@@ -556,13 +568,29 @@ fn event_loop(
                 app.set_pr_refreshing(true);
                 pr.wait_started = None;
             }
-            // The tab-strip refresh glyph: each tab shows only its own refresh past the
-            // delay (specs/tui.md).
-            app.refresh_indicator = if app.tab == crate::app::Tab::Pr {
+            // The tab-strip refresh glyph (specs/tui.md): a commanded refresh lights it
+            // immediately, an ambient one past the appear delay, each tab only for its own
+            // refresh. Once lit it holds a minimum, so a fast landing still reads.
+            if std::mem::take(&mut app.refresh_commanded) {
+                glyph_since.get_or_insert_with(Instant::now);
+            }
+            let glyph_due = if app.tab == crate::app::Tab::Pr {
                 app.pr_refreshing()
             } else {
                 world_indicator(world_inflight.map(|(started, builds)| (started.elapsed(), builds)))
             };
+            let mut glyph_wake = None;
+            if glyph_due {
+                glyph_since.get_or_insert_with(Instant::now);
+            } else if let Some(lit) = glyph_since {
+                if glyph_clears(lit.elapsed()) {
+                    glyph_since = None;
+                } else {
+                    // Wake at the hold boundary, so the glyph goes dark on time when idle.
+                    glyph_wake = Some(INDICATOR_MIN_SHOW.saturating_sub(lit.elapsed()));
+                }
+            }
+            app.refresh_indicator = glyph_since.is_some();
             // Expire a stale status line: restart the timer when the message changes, and clear
             // it once it has lingered past the TTL, so a notification doesn't stay up forever.
             if app.status != last_status {
@@ -617,7 +645,7 @@ fn event_loop(
                 let job = crate::world::WorldJob {
                     generation: world_generation,
                     input: app.world_input(),
-                    sample_turn: request.sample,
+                    sample_turn: request.sample_turn,
                     reveal: request.reveal,
                 };
                 // A sample-only job (the `PR` tab's poll) builds no snapshot: it neither
@@ -747,6 +775,9 @@ fn event_loop(
             }
             if let Some((_, builds)) = world_inflight {
                 timeout = timeout.min(world_wake(builds));
+            }
+            if let Some(wake) = glyph_wake {
+                timeout = timeout.min(wake.max(Duration::from_millis(15)));
             }
             if let Some(started) = pr.wait_started {
                 timeout = timeout.min(INDICATOR_DELAY.saturating_sub(started.elapsed()));
@@ -1110,7 +1141,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> 
     if app.tab == crate::app::Tab::Pr {
         match (action, key.code) {
             (Some(K::Quit), _) => app.should_quit = true,
-            (Some(K::Refresh), _) => app.pr_pending = true,
+            (Some(K::Refresh), _) => {
+                app.pr_pending = true;
+                app.refresh_commanded = true;
+            }
             (Some(K::TabChanges), _) => app.set_tab(crate::app::Tab::Changes)?,
             (Some(K::TabAllFiles), _) => app.set_tab(crate::app::Tab::AllFiles)?,
             (Some(K::OpenPr), _) => app.pr_open(),
@@ -1148,7 +1182,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> 
     if let Some(action) = action {
         match action {
             K::Quit => app.should_quit = true,
-            K::Refresh => app.request_world_refresh(false, false),
+            K::Refresh => {
+                app.request_world_refresh(false, false);
+                app.refresh_commanded = true;
+            }
             K::TabChanges => app.set_tab(crate::app::Tab::Changes)?,
             K::TabAllFiles => app.set_tab(crate::app::Tab::AllFiles)?,
             K::TabPr => app.set_tab(crate::app::Tab::Pr)?,
@@ -1368,7 +1405,7 @@ pub fn handle_mouse(
 mod refresh_tests {
     use super::{
         ActiveFetch, PaintedFrameSnapshot, PrCoordinator, PrEffect, PrRefresh, TaggedPr,
-        apply_plugin_config_observation, apply_pr_probe_result, drain_pr_shutdown,
+        apply_plugin_config_observation, apply_pr_probe_result, drain_pr_shutdown, glyph_clears,
         handle_blocked_event, handle_resize, ready_app, schedule_poll_probe, world_indicator,
         world_wake,
     };
@@ -1382,11 +1419,18 @@ mod refresh_tests {
             !world_indicator(Some((Duration::from_millis(500), false))),
             "sample-only jobs never light it"
         );
-        assert!(!world_indicator(Some((Duration::from_millis(200), true))), "below the delay");
+        assert!(!world_indicator(Some((Duration::from_millis(100), true))), "below the delay");
         assert!(
-            world_indicator(Some((Duration::from_millis(300), true))),
+            world_indicator(Some((Duration::from_millis(200), true))),
             "a building job past the delay lights it"
         );
+    }
+
+    #[test]
+    fn the_lit_glyph_holds_its_minimum_display() {
+        use std::time::Duration;
+        assert!(!glyph_clears(Duration::from_millis(100)), "a fast landing keeps the glyph lit");
+        assert!(glyph_clears(Duration::from_millis(300)), "past the hold it goes dark");
     }
 
     #[test]

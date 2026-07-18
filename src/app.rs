@@ -294,9 +294,12 @@ pub struct App {
     /// The world refresh request awaiting dispatch, if any; the event loop hands it to
     /// the worker after the frame paints (specs/tui.md).
     pub world_request: Option<crate::world::WorldRequest>,
-    /// Whether the active tab's refresh has been in flight past the indicator delay —
-    /// drives the tab-strip glyph, maintained by the event loop (specs/tui.md).
+    /// Whether the tab-strip glyph paints this frame — maintained by the event loop's
+    /// appear-delay and minimum-display clocks (specs/tui.md).
     pub refresh_indicator: bool,
+    /// Set by `r`: the next refresh is commanded, so the glyph lights immediately
+    /// instead of waiting out the ambient appear delay (specs/tui.md).
+    pub refresh_commanded: bool,
     /// Whether the active file tab has ever completed a reload (stash counterpart:
     /// `TabStash::visited`). Gates the first-visit synchronous load in [`Self::set_tab`].
     tab_visited: bool,
@@ -410,6 +413,7 @@ impl App {
             pr_pending: false,
             world_request: None,
             refresh_indicator: false,
+            refresh_commanded: false,
             tab_visited: false,
             highlighter: Highlighter::new(theme.syntax),
             palette: theme.palette,
@@ -930,9 +934,9 @@ impl App {
     /// Queue a world refresh for the event loop to dispatch after the frame paints.
     /// `sample` rides the poll's status sample along; `reveal` re-reveals the cursor when
     /// the result lands, for user-initiated switches only (specs/tui.md).
-    pub fn request_world_refresh(&mut self, sample: bool, reveal: bool) {
+    pub fn request_world_refresh(&mut self, sample_turn: bool, reveal: bool) {
         let request = self.world_request.get_or_insert(crate::world::WorldRequest::default());
-        request.sample |= sample;
+        request.sample_turn |= sample_turn;
         request.reveal |= reveal;
     }
 
@@ -2860,7 +2864,7 @@ mod tests {
         let mut recovered = App::new(PathBuf::from("."), Scope::Uncommitted, None);
         recovered.carry_authored_state_from(&mut old);
         let request = recovered.world_request.expect("the pending refresh survives the swap");
-        assert!(request.sample, "the poll's sample flag survives the recovery swap");
+        assert!(request.sample_turn, "the poll's sample flag survives the recovery swap");
         assert!(request.reveal, "the switch's reveal flag survives the recovery swap");
     }
 
