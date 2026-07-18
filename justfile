@@ -39,6 +39,14 @@ qa-install:
     cargo build --release
     ./scripts/qa-install.sh
 
+# restore the released binary the last `just qa-install` replaced
+qa-restore:
+    #!/usr/bin/env sh
+    set -eu
+    bin="$(ls -d "$HOME"/.config/herdr/plugins/github/persiyanov.reviewr-*/bin/herdr-reviewr | head -1)"
+    ./scripts/swap-binary.sh "$bin.release-backup" "$bin"
+    echo "restored release binary at $bin"
+
 # everything CI runs, locally
 ci: fmt-check lint test
     cargo build --release
