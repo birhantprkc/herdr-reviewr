@@ -39,6 +39,11 @@ install:
     cp target/release/herdr-reviewr bin/herdr-reviewr
     [ "$(uname)" = "Darwin" ] && codesign --force --sign - bin/herdr-reviewr || true
 
+# build release and swap it into the GitHub-installed plugin for local QA (docs/qa-install.md)
+qa-install:
+    cargo build --release
+    ./scripts/qa-install.sh
+
 # everything CI runs, locally
 ci: fmt-check lint test
     cargo build --release
