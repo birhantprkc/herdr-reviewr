@@ -6,7 +6,7 @@ Last edited: 2026-07-20
 
 # Search
 
-Full-screen fuzzy file and code search over the worktree, opened with `/` from any tab.
+Full-screen file and code search over the worktree, opened with `/` from any tab.
 
 ## Overview
 
@@ -18,7 +18,7 @@ above a full-width live preview. `tab` flips between the two search modes, keepi
 │ > registry resolve█                                       files 3 │ code 37+ │
 │ ┌ results ────────────────────────────────────────────────────────────────┐ │
 │ │ src/llm_registry.py                                                     │ │
-│ │ ▌ 41: def resolve(self, name):                                     def  │ │
+│ │ ▌ 41: def resolve(self, name):                                          │ │
 │ │   88: return registry.resolve(name, strict=True)                        │ │
 │ │ src/app.py                                                              │ │
 │ │   12: registry.resolve(x)                                               │ │
@@ -42,8 +42,8 @@ results.
 
 - Matching, ranking, and indexing are engine-owned. reviewr never re-orders, merges, or
   interleaves results.
-- The query grammar is the engine's: plain, regex, and fuzzy matching with auto-detection,
-  globs, `!` exclusions, and `git:` filters.
+- The query matches file names fuzzily and code literally, narrowed by globs, `!`
+  exclusions, and `git:` filters. The grammar is the engine's.
 - Ranking improves with use: opening a result records the access in the engine's frecency
   store. The store lives in reviewr's cache directory, never the worktree.
 - Search covers tracked and untracked files. Ignored files and `.git` are not searchable.
@@ -98,8 +98,6 @@ is useful before the first keystroke.
 - A file's first match emits a header row in the file-list row look, then its match rows.
 - A match row is `line:` dimmed, then the matched line, its leading indentation dropped so
   the match text aligns at the left.
-- A match the engine classifies as a definition wears a dim `def` badge — the way to
-  spot the definition among usages.
 - A match row longer than the pane clips around its first matched span, keeping the
   emphasis visible.
 - The pick lands only on match rows in `Code` mode, only on file rows in `Files` mode.
@@ -168,8 +166,8 @@ file's current length. Focus lands on the read pane.
 
 - No changeset-scoped search. Roadmap (`overview.md`).
 - No search within the open diff. Also roadmap.
-- No symbol table. The engine's definition-first ranking is the whole symbol story.
-- No manual grep-mode cycling. The engine's auto-detection is the mode story.
+- No symbol table or definition classification.
+- No regex or fuzzy code search. Code matching is literal.
 - No keyboard resize of the search split. The divider drags the share.
 - No multi-select or export of results.
 - No commenting from the preview. Open the result and comment in the review views.

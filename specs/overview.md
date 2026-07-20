@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-06-23
-Last edited: 2026-07-19
+Last edited: 2026-07-20
 ---
 
 # herdr-reviewr
@@ -48,7 +48,7 @@ to move the work forward.
 - Export of all comments to the agent input or the clipboard.
 - Poll-based refresh plus a manual refresh key.
 - Keyboard and mouse input (`input.md`).
-- Full-screen search over the worktree: fuzzy files and code with a live preview, ranking owned by the engine (`search.md`).
+- Full-screen search over the worktree: fuzzy file names and literal code with a live preview, ranking owned by the engine (`search.md`).
 
 ## Roadmap
 

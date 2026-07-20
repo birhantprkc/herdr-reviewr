@@ -1883,9 +1883,8 @@ fn search_preview_line(
     }
 }
 
-/// A code match row: `line:` dimmed, then the matched line, with a dim `def` badge on an
-/// engine-classified definition. A too-wide row clips the line around its first matched
-/// span, keeping the emphasis visible (specs/search.md).
+/// A code match row: `line:` dimmed, then the matched line. A too-wide row clips the line
+/// around its first matched span, keeping the emphasis visible (specs/search.md).
 fn search_code_row(
     hit: &crate::search::CodeHit,
     width: usize,
@@ -1893,9 +1892,7 @@ fn search_code_row(
     p: &Palette,
 ) -> ListItem<'static> {
     let locator = format!("{:>5}: ", hit.line);
-    let badge_w = if hit.def { DEF_BADGE.width() + 1 } else { 0 };
-    let content_w = width.saturating_sub(badge_w);
-    let avail = content_w.saturating_sub(locator.width());
+    let avail = width.saturating_sub(locator.width());
     // Expand tabs before the width and clip math run on the line (see `expand_tabs`).
     let (text, match_spans) = expand_tabs(hit.text.trim_end(), &hit.spans);
     let text = text.as_str();
@@ -1938,23 +1935,8 @@ fn search_code_row(
         spans.push(Span::styled(prefix.to_string(), Style::default().fg(p.overlay0)));
     }
     spans.extend(emphasized_spans(shown, &shifted, p.match_hl, |_| text_style(p)));
-    if hit.def {
-        // The badge stays visible on a clipped row: the content truncates to its own
-        // columns first, then the badge right-aligns into the reserved tail.
-        truncate_spans(&mut spans, content_w);
-        let used: usize = spans.iter().map(Span::width).sum();
-        let pad = content_w.saturating_sub(used) + 1;
-        spans.push(Span::raw(" ".repeat(pad)));
-        spans.push(Span::styled(
-            DEF_BADGE,
-            Style::default().fg(p.overlay1).add_modifier(Modifier::ITALIC),
-        ));
-    }
     selectable_row(spans, width, fill)
 }
-
-/// The definition badge on an engine-classified definition row (specs/search.md).
-const DEF_BADGE: &str = "def";
 
 /// Expand tabs to four spaces, shifting the match byte spans to keep them over the same
 /// characters. The engine reports match offsets into the raw line; a tab is zero display
@@ -1979,33 +1961,6 @@ fn expand_tabs(text: &str, spans: &[(u32, u32)]) -> (String, Vec<(u32, u32)>) {
     let spans =
         spans.iter().map(|&(s, e)| (s + shift(s as usize), e + shift(e as usize))).collect();
     (out, spans)
-}
-
-/// Truncate `spans` to at most `max_cols` display columns, on a char boundary.
-fn truncate_spans(spans: &mut Vec<Span<'static>>, max_cols: usize) {
-    let mut used = 0usize;
-    for i in 0..spans.len() {
-        let w = spans[i].width();
-        if used + w <= max_cols {
-            used += w;
-            continue;
-        }
-        let budget = max_cols - used;
-        let mut cut = 0;
-        let mut cols = 0;
-        for (j, c) in spans[i].content.char_indices() {
-            let cw = UnicodeWidthChar::width(c).unwrap_or(0);
-            if cols + cw > budget {
-                break;
-            }
-            cols += cw;
-            cut = j + c.len_utf8();
-        }
-        let kept = spans[i].content[..cut].to_string();
-        spans[i] = Span::styled(kept, spans[i].style);
-        spans.truncate(i + 1);
-        return;
-    }
 }
 
 /// Split `text` into spans, laying the match highlight `hl` behind the engine's matched

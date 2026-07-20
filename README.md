@@ -26,7 +26,7 @@ One persistent pane, pointed at a git worktree:
   `path:start-end — comment`. Add context, hit enter.
 - **File viewer** — the whole worktree, any file's current content in the pane.
 - **Search** — `/` from any tab opens one screen over the worktree: fuzzy file names and live
-  code grep, definitions ranked first, powered by [fff](https://github.com/dmtrKovalenko/fff).
+  code grep, powered by [fff](https://github.com/dmtrKovalenko/fff).
   Pick a result and land on its line.
 - **PR view** — the branch's pull request without leaving the pane, read-only, rendered as
   styled markdown.

@@ -3334,7 +3334,7 @@ mod search_overlay {
     }
 
     fn code_hit(path: &str, line: u64, text: &str) -> CodeHit {
-        CodeHit { path: path.into(), line, text: text.into(), spans: vec![], def: false }
+        CodeHit { path: path.into(), line, text: text.into(), spans: vec![] }
     }
 
     fn open(app: &mut App, keymap: &Keymap) {
@@ -3792,8 +3792,9 @@ mod search_overlay {
         assert_eq!(app.search.as_ref().unwrap().query, "n", "plain n still types");
     }
 
-    /// The preview builds when the pick settles: a retarget only marks it stale, the
-    /// settle call builds it, and a code pick carries its hit (specs/search.md Preview).
+    /// The preview follows the pick on settle: a retarget doesn't rebuild until the settle
+    /// call, which lands on the new pick and carries a code pick's hit; an unchanged pick is
+    /// not rebuilt (specs/search.md Preview).
     #[test]
     fn preview_builds_on_settle_with_hit() {
         let repo = Repo::init();
@@ -3813,22 +3814,37 @@ mod search_overlay {
             1,
         );
         press(&mut app, &keymap, KeyCode::Tab);
-        let s = app.search.as_ref().unwrap();
-        assert!(s.preview_stale, "the landing marks the preview stale");
-        assert!(s.preview.is_none(), "nothing builds before the settle");
+        assert!(app.search.as_ref().unwrap().preview.is_none(), "nothing builds before the settle");
 
         app.build_search_preview();
-        let s = app.search.as_ref().unwrap();
-        assert!(!s.preview_stale);
-        let pv = s.preview.as_ref().unwrap();
-        assert_eq!(pv.path, "a.rs");
-        assert_eq!(pv.hit.as_ref().unwrap().0, 2, "the code pick carries its hit line");
-        assert!(pv.center.get(), "the renderer centers the hit once per build");
+        {
+            let pv = app.search.as_ref().unwrap().preview.as_ref().unwrap();
+            assert_eq!(pv.path, "a.rs");
+            assert_eq!(pv.hit.as_ref().unwrap().0, 2, "the code pick carries its hit line");
+            assert!(pv.center.get(), "the renderer centers the hit once per build");
+        }
 
         press(&mut app, &keymap, KeyCode::Down);
-        assert!(app.search.as_ref().unwrap().preview_stale, "a pick move marks it stale");
+        assert_eq!(
+            app.search.as_ref().unwrap().preview.as_ref().unwrap().path,
+            "a.rs",
+            "the preview lags the moved pick until it settles",
+        );
         app.build_search_preview();
-        assert_eq!(app.search.as_ref().unwrap().preview.as_ref().unwrap().path, "b.rs");
+        assert_eq!(
+            app.search.as_ref().unwrap().preview.as_ref().unwrap().path,
+            "b.rs",
+            "the settle rebuilds onto the new pick",
+        );
+
+        // Idempotent: a settle with the pick unchanged does not rebuild — a rebuild would
+        // re-center, so the cleared center flag must survive.
+        app.scroll_search_preview(1);
+        app.build_search_preview();
+        assert!(
+            !app.search.as_ref().unwrap().preview.as_ref().unwrap().center.get(),
+            "an unchanged pick is not rebuilt on settle",
+        );
     }
 
     /// A landed poll repaints the previewed file in place — same scroll, fresh content —

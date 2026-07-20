@@ -174,11 +174,10 @@ pub struct SearchOverlay {
     pub scroll: std::cell::Cell<usize>,
     pub results: crate::search::SearchResults,
     pub phase: SearchPhase,
-    /// The settled preview. `None` until the first build, or while nothing is pickable.
+    /// The settled preview of the picked result. `None` until the first build, or while
+    /// nothing is pickable. The event loop rebuilds it once input settles, whenever it no
+    /// longer matches the pick — a sweep never waits on a build (specs/search.md).
     pub preview: Option<SearchPreview>,
-    /// Set by every pick retarget; the event loop rebuilds the preview once the pick
-    /// settles — a sweep never waits on a build (specs/search.md).
-    pub preview_stale: bool,
 }
 
 impl SearchOverlay {
@@ -192,7 +191,6 @@ impl SearchOverlay {
             results: crate::search::SearchResults::default(),
             phase: SearchPhase::Indexing,
             preview: None,
-            preview_stale: false,
         }
     }
 
@@ -2627,7 +2625,6 @@ impl App {
             };
             s.pick = 0;
             s.scroll.set(0);
-            s.preview_stale = true;
         }
     }
 
@@ -2638,11 +2635,7 @@ impl App {
         if let Some(s) = self.search.as_mut()
             && s.phase == SearchPhase::Ready
         {
-            let next = step(s.pick, delta, s.picks());
-            if next != s.pick {
-                s.pick = next;
-                s.preview_stale = true;
-            }
+            s.pick = step(s.pick, delta, s.picks());
         }
     }
 
@@ -2658,7 +2651,6 @@ impl App {
                 s.phase = SearchPhase::Ready;
                 s.pick = 0;
                 s.scroll.set(0);
-                s.preview_stale = true;
             }
             SearchOutcome::Indexing => s.phase = SearchPhase::Indexing,
             SearchOutcome::Failed(e) => {
@@ -2670,26 +2662,35 @@ impl App {
         }
     }
 
-    /// Build the picked result's preview, once the pick has settled — the event loop
-    /// calls this only with no input pending, so a sweep never waits on it
-    /// (specs/search.md Preview).
+    /// Rebuild the picked result's preview when it no longer matches the pick — idempotent,
+    /// so the event loop can call it every settled frame. It runs only with no input pending,
+    /// so a pick sweep never waits on it (specs/search.md Preview).
     pub fn build_search_preview(&mut self) {
         let Some(s) = self.search.as_ref() else { return };
-        if !s.preview_stale {
+        // The pick's target, or `None` when nothing is pickable (off `Ready`, or empty).
+        let picked = (s.phase == SearchPhase::Ready).then(|| s.picked()).flatten();
+        // Skip when the settled preview already shows this pick — the compare is by reference,
+        // so the common no-change frame allocates nothing. A pick move or a landed set makes it
+        // differ (rebuild); a poll refreshes the diff in place without moving the pick (skip).
+        let shows_pick = match (s.preview.as_ref(), picked.as_ref()) {
+            (None, None) => true,
+            (Some(pv), Some(PickedResult::File(f))) => pv.hit.is_none() && pv.path == f.path,
+            (Some(pv), Some(PickedResult::Code(c))) => {
+                pv.path == c.path
+                    && pv.hit.as_ref().is_some_and(|(l, sp)| *l == c.line && sp == &c.spans)
+            }
+            _ => false,
+        };
+        if shows_pick {
             return;
         }
-        // The pick's target, or `None` when nothing is pickable (off `Ready`, or empty).
-        let target =
-            (s.phase == SearchPhase::Ready).then(|| s.picked()).flatten().map(
-                |picked| match picked {
-                    PickedResult::File(f) => (f.path.clone(), None),
-                    PickedResult::Code(c) => (c.path.clone(), Some((c.line, c.spans.clone()))),
-                },
-            );
+        let target = picked.map(|picked| match picked {
+            PickedResult::File(f) => (f.path.clone(), None),
+            PickedResult::Code(c) => (c.path.clone(), Some((c.line, c.spans.clone()))),
+        });
         let Some((path, hit)) = target else {
             if let Some(s) = self.search.as_mut() {
                 s.preview = None;
-                s.preview_stale = false;
             }
             return;
         };
@@ -2704,7 +2705,6 @@ impl App {
                 scroll: std::cell::Cell::new(0),
                 center: std::cell::Cell::new(true),
             });
-            s.preview_stale = false;
         }
     }
 

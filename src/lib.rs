@@ -636,13 +636,11 @@ fn event_loop(
             // keep revealing so the anchored line stays above the growing box.
             let size = terminal.size()?;
             let area = Rect::new(0, 0, size.width, size.height);
-            // Build the search preview only once the pick has settled: with input still
-            // queued the build defers, so a pick sweep never waits on it
+            // Rebuild the search preview only once input has settled: with input still queued
+            // the build defers, so a pick sweep never waits on it. `build_search_preview` is
+            // idempotent — it rebuilds only when the preview no longer matches the pick
             // (specs/search.md Preview).
-            if app.mode == crate::app::Mode::Search
-                && app.search.as_ref().is_some_and(|s| s.preview_stale)
-                && !event::poll(Duration::ZERO)?
-            {
+            if app.mode == crate::app::Mode::Search && !event::poll(Duration::ZERO)? {
                 app.build_search_preview();
             }
             let viewport = ui::diff_viewport_height(area, app);
@@ -727,6 +725,9 @@ fn event_loop(
                     // A dead worker's first, specific error stays up; only a phase that
                     // never saw one gets the generic message.
                     s.phase = crate::app::SearchPhase::Error("search worker unavailable".into());
+                    // Drop the last preview, like a failed completion, so no stale file shows
+                    // under the error (specs/search.md).
+                    s.preview = None;
                 }
             }
             if let Some(path) = app.search_track.take()
@@ -1424,7 +1425,6 @@ pub fn handle_mouse(
                             app.search_open_pick()?;
                         } else if let Some(s) = app.search.as_mut() {
                             s.pick = pick;
-                            s.preview_stale = true;
                         }
                     }
                     _ => {}

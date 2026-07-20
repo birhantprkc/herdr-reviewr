@@ -58,9 +58,6 @@ pub struct CodeHit {
     pub text: String,
     /// Byte spans into `text` the engine matched — the emphasis input.
     pub spans: Vec<(u32, u32)>,
-    /// The engine classified this line as a definition — the `def` badge
-    /// (specs/search.md).
-    pub def: bool,
 }
 
 /// One query's results, both groups. `file_total` is the engine's full match count;
@@ -171,7 +168,6 @@ impl Engine {
             &GrepSearchOptions {
                 page_limit: CODE_LIMIT,
                 time_budget_ms: GREP_BUDGET_MS,
-                classify_definitions: true,
                 ..Default::default()
             },
         );
@@ -189,7 +185,6 @@ impl Engine {
                 line: m.line_number,
                 text: m.line_content.clone(),
                 spans: m.match_byte_offsets.iter().copied().collect(),
-                def: m.is_definition,
             })
             .collect();
         let code_more = grep.next_file_offset != 0;

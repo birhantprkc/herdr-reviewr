@@ -1669,14 +1669,12 @@ mod search_screen_render {
                         line: 1,
                         text: "fn resolve() {}".into(),
                         spans: vec![(3, 6)],
-                        def: true,
                     },
                     CodeHit {
                         path: "src/registry.rs".into(),
                         line: 2,
                         text: "registry.resolve()".into(),
                         spans: vec![(0, 3)],
-                        def: false,
                     },
                 ],
                 file_total: 4,
@@ -1695,13 +1693,12 @@ mod search_screen_render {
         assert!(out.contains("─ preview"), "the divider row carries the preview title");
         assert!(out.contains("pick") && out.contains("open"), "the screen's footer shows");
 
-        // Code mode: grouped rows under a header, `line:` locators, the badge, the clip.
+        // Code mode: grouped rows under a header, `line:` locators, the clip.
         key(&mut app, KeyCode::Tab);
         let out = render(&app);
         assert!(out.contains("> reg"), "the flip keeps the query");
         assert!(out.contains("1: fn resolve"), "a match row shows its line number");
         assert!(out.contains("2: registry.resolve"), "grouped rows keep engine order");
-        assert!(out.contains("def"), "an engine-classified definition wears the badge");
         assert!(out.contains("… more"), "a cut-short grep shows there is more");
         let header_rows =
             out.lines().filter(|l| l.contains("src/registry.rs") && !l.contains(':')).count();
@@ -1818,7 +1815,6 @@ mod search_screen_render {
                     line: 30,
                     text: "line_30".into(),
                     spans: vec![(0, 7)],
-                    def: false,
                 }],
                 file_total: 0,
                 code_more: false,
@@ -1872,7 +1868,6 @@ mod search_screen_render {
                     line: 30,
                     text: "fn resolve() {}".into(),
                     spans: vec![(3, 10)], // "resolve" within the trimmed line
-                    def: true,
                 }],
                 file_total: 0,
                 code_more: false,
@@ -2048,7 +2043,6 @@ mod search_screen_render {
                     line: 1,
                     text: "alpha".into(),
                     spans: vec![(0, 5)],
-                    def: false,
                 }],
                 file_total: 0,
                 code_more: false,
@@ -2086,8 +2080,7 @@ mod search_row_emphasis {
     }
 
     /// A code row too wide for the pane clips around its first matched span, keeping the
-    /// `line:` locator, marking the cut head with `…`, and keeping the `def` badge
-    /// (specs/search.md).
+    /// `line:` locator and marking the cut head with `…` (specs/search.md).
     #[test]
     fn clipped_code_row_keeps_and_emphasizes_the_match() {
         let repo = Repo::init();
@@ -2097,18 +2090,11 @@ mod search_row_emphasis {
         enter_tab(&mut app, Tab::AllFiles);
         handle_key(&mut app, KeyEvent::from(KeyCode::Char('/')), AREA, default_keymap()).unwrap();
 
-        // A long head of `x`s pushes the match past the pane; a long tail after
-        // `needle_marker` (13 bytes) overflows the post-clip content, so the `def` badge must
-        // survive a real tail truncation, not just the head elision.
-        let text = format!("{}needle_marker{}", "x".repeat(200), "y".repeat(200));
+        // A long head of `x`s pushes the match past the pane, so the row clips around the
+        // first matched span (`needle_marker`, 13 bytes) rather than the un-shown head.
+        let text = format!("{}needle_marker tail", "x".repeat(200));
         let start = 200u32;
-        let hit = CodeHit {
-            path: "a.rs".into(),
-            line: 1,
-            text,
-            spans: vec![(start, start + 13)],
-            def: true,
-        };
+        let hit = CodeHit { path: "a.rs".into(), line: 1, text, spans: vec![(start, start + 13)] };
         land_search_completion(&mut app, code_only(hit), 1);
         handle_key(&mut app, KeyEvent::from(KeyCode::Tab), AREA, default_keymap()).unwrap();
 
@@ -2120,7 +2106,6 @@ mod search_row_emphasis {
             .expect("the clipped row keeps the first matched span visible");
         assert!(row.contains("1:"), "the line locator survives the clip: {row}");
         assert!(row.contains("…x"), "the cut head is marked with an ellipsis: {row}");
-        assert!(row.trim_end().ends_with("def"), "the badge survives the tail truncation: {row}");
 
         let y = out.lines().position(|l| l.contains("needle_marker")).unwrap() as u16;
         // Cell column = char count before the token (every cell here is one column wide).
@@ -2160,7 +2145,6 @@ mod search_row_emphasis {
             line: 1,
             text: "\t\tneedle here".into(),
             spans: vec![(2, 8)],
-            def: false,
         };
         land_search_completion(&mut app, code_only(hit), 1);
         handle_key(&mut app, KeyEvent::from(KeyCode::Tab), AREA, default_keymap()).unwrap();
@@ -2200,7 +2184,6 @@ mod search_row_emphasis {
             line: 1,
             text: format!("{head}needle tail"),
             spans: vec![(start, start + 6)],
-            def: false,
         };
         land_search_completion(&mut app, code_only(hit), 1);
         handle_key(&mut app, KeyEvent::from(KeyCode::Tab), AREA, default_keymap()).unwrap();
