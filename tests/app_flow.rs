@@ -3316,7 +3316,9 @@ mod search_overlay {
     use herdr_reviewr::app::{App, Focus, Mode, SearchPhase, Tab};
     use herdr_reviewr::keymap::{Keymap, default_keymap};
     use herdr_reviewr::land_search_completion;
-    use herdr_reviewr::search::{CodeHit, FileHit, SearchCompletion, SearchJob, SearchResults};
+    use herdr_reviewr::search::{
+        CodeHit, FileHit, SearchCompletion, SearchJob, SearchOutcome, SearchResults,
+    };
     use ratatui::crossterm::event::KeyCode;
 
     fn results(files: Vec<FileHit>, code: Vec<CodeHit>) -> SearchResults {
@@ -3324,7 +3326,7 @@ mod search_overlay {
     }
 
     fn done(generation: u64, results: SearchResults) -> SearchCompletion {
-        SearchCompletion { generation, results: Some(results), error: None }
+        SearchCompletion { generation, outcome: SearchOutcome::Ready(results) }
     }
 
     fn file_hit(path: &str) -> FileHit {
@@ -3600,10 +3602,15 @@ mod search_overlay {
         open(&mut app, &keymap);
 
         land_search_completion(&mut app, done(1, results(vec![file_hit("a.rs")], Vec::new())), 1);
-        let error = SearchCompletion { generation: 2, results: None, error: Some("boom".into()) };
+        app.build_search_preview();
+        assert!(app.search.as_ref().unwrap().preview.is_some(), "a preview builds for the pick");
+        let error =
+            SearchCompletion { generation: 2, outcome: SearchOutcome::Failed("boom".into()) };
         land_search_completion(&mut app, error, 2);
         assert_eq!(app.search.as_ref().unwrap().phase, SearchPhase::Error("boom".into()));
         assert!(!app.search.as_ref().unwrap().results.files.is_empty(), "results held");
+        // The stale preview clears, so no unrelated file shows below the red error.
+        assert!(app.search.as_ref().unwrap().preview.is_none(), "the error drops the preview");
 
         press(&mut app, &keymap, KeyCode::Enter);
         assert_eq!(app.mode, Mode::Search, "enter opens nothing off an error frame");
@@ -3967,9 +3974,10 @@ mod search_overlay {
                 .recv_timeout(deadline - std::time::Instant::now())
                 .expect("the worker answers before the deadline");
             assert_eq!(completion.generation, 1);
-            assert_eq!(completion.error, None);
-            if let Some(results) = completion.results {
-                break results;
+            match completion.outcome {
+                SearchOutcome::Ready(results) => break results,
+                SearchOutcome::Indexing => {}
+                SearchOutcome::Failed(e) => panic!("the engine failed: {e}"),
             }
         };
 

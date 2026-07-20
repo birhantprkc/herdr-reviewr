@@ -25,7 +25,7 @@ One persistent pane, pointed at a git worktree:
 - **Send** — one keystroke drops every comment into the agent's input as
   `path:start-end — comment`. Add context, hit enter.
 - **File viewer** — the whole worktree, any file's current content in the pane.
-- **Search** — `/` in All files opens one bar over the worktree: fuzzy file names and live
+- **Search** — `/` from any tab opens one screen over the worktree: fuzzy file names and live
   code grep, definitions ranked first, powered by [fff](https://github.com/dmtrKovalenko/fff).
   Pick a result and land on its line.
 - **PR view** — the branch's pull request without leaving the pane, read-only, rendered as
@@ -124,7 +124,7 @@ The keys below are defaults. You can rebind every action, even to several keys a
 | `Ctrl+U` `Ctrl+D` | Move a half-page |
 | `Tab` | Switch focus between the navigator and read pane |
 | `→` `←` | Expand or collapse a directory or fold, or scroll the diff sideways |
-| `/` | Search files and code (All files) — type to filter, then pick a result with `↑` `↓` and open it with `enter` |
+| `/` | Search files and code from any tab — type to filter, then pick a result with `↑` `↓` and open it with `enter` |
 | `w` | Toggle line wrap |
 | `m` | Toggle the markdown preview of a `.md` file (Changes or All files) |
 | `p` | Move the navigator clockwise: right / bottom / left / top |

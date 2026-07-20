@@ -1624,7 +1624,7 @@ mod search_screen_render {
     use herdr_reviewr::app::{App, Mode, Tab};
     use herdr_reviewr::keymap::default_keymap;
     use herdr_reviewr::land_search_completion;
-    use herdr_reviewr::search::{CodeHit, FileHit, SearchCompletion, SearchResults};
+    use herdr_reviewr::search::{CodeHit, FileHit, SearchCompletion, SearchOutcome, SearchResults};
     use herdr_reviewr::{handle_key, handle_mouse, ui};
     use ratatui::crossterm::event::{
         KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -1646,7 +1646,7 @@ mod search_screen_render {
     }
 
     fn land(app: &mut App, results: SearchResults) {
-        let completion = SearchCompletion { generation: 1, results: Some(results), error: None };
+        let completion = SearchCompletion { generation: 1, outcome: SearchOutcome::Ready(results) };
         land_search_completion(app, completion, 1);
     }
 
@@ -1996,6 +1996,73 @@ mod search_screen_render {
         let band = out.lines().find(|l| l.contains("TAIL")).expect("the caret end stays visible");
         assert!(!band.contains("HEAD"), "the overflowing head scrolls off the band: {band:?}");
     }
+
+    #[test]
+    fn a_changed_file_result_shows_its_marker_and_stats() {
+        // A Files result on an uncommitted file wears the same change marker and stats as the
+        // file list, alongside the match highlight (specs/search.md).
+        let repo = Repo::init();
+        repo.write("a.rs", "one\n");
+        repo.commit_all("c");
+        repo.write("a.rs", "one\ntwo\n"); // uncommitted: one added line
+        let mut app = open_on_all_files(&repo);
+        land(
+            &mut app,
+            SearchResults {
+                files: vec![FileHit { path: "a.rs".into(), spans: vec![(0, 1)] }],
+                code: Vec::new(),
+                file_total: 1,
+                code_more: false,
+            },
+        );
+        let buf = render_size(&app, 140, 40);
+        let out = dump(&buf);
+        let row = out.lines().find(|l| l.contains("a.rs")).expect("the file row renders");
+        assert!(row.contains("+1"), "the changed file's stats render on its row: {row:?}");
+        // The match highlight coexists with the marker and stats.
+        let y = out.lines().position(|l| l.contains("a.rs")).unwrap() as u16;
+        let x = row.find("a.rs").unwrap() as u16;
+        assert_eq!(
+            buf.cell((x, y)).expect("cell").style().bg,
+            Some(app.palette().match_hl),
+            "the match highlight lands on the matched path character",
+        );
+    }
+
+    #[test]
+    fn a_poll_refreshes_the_open_preview_in_place() {
+        // A landed poll rebuilds the previewed file's diff in place, so the preview follows
+        // the worktree while the held results stay as queried (specs/search.md, overview.md
+        // Continuity). Exercises the real reload → reconcile_world → refresh_search_preview
+        // wiring, not the method in isolation.
+        let repo = Repo::init();
+        repo.write("a.rs", "alpha\n");
+        repo.commit_all("c");
+        let mut app = open_on_all_files(&repo);
+        land(
+            &mut app,
+            SearchResults {
+                files: Vec::new(),
+                code: vec![CodeHit {
+                    path: "a.rs".into(),
+                    line: 1,
+                    text: "alpha".into(),
+                    spans: vec![(0, 5)],
+                    def: false,
+                }],
+                file_total: 0,
+                code_more: false,
+            },
+        );
+        key(&mut app, KeyCode::Tab);
+        app.build_search_preview();
+        assert!(render(&app).contains("alpha"), "the preview shows the file's content");
+
+        // The worktree changes, then a poll lands through the synchronous reload path.
+        repo.write("a.rs", "alpha\nBETA_LINE\n");
+        app.reload().unwrap();
+        assert!(render(&app).contains("BETA_LINE"), "the poll refreshed the preview in place");
+    }
 }
 
 // Style-level emphasis coverage for the match rows (specs/search.md).
@@ -2006,23 +2073,16 @@ mod search_row_emphasis {
     use herdr_reviewr::handle_key;
     use herdr_reviewr::keymap::default_keymap;
     use herdr_reviewr::land_search_completion;
-    use herdr_reviewr::search::{CodeHit, SearchCompletion, SearchResults};
+    use herdr_reviewr::search::{CodeHit, SearchCompletion, SearchOutcome, SearchResults};
     use ratatui::crossterm::event::{KeyCode, KeyEvent};
     use ratatui::layout::Rect;
 
     const AREA: Rect = Rect { x: 0, y: 0, width: 140, height: 40 };
 
     fn code_only(hit: CodeHit) -> SearchCompletion {
-        SearchCompletion {
-            generation: 1,
-            results: Some(SearchResults {
-                files: Vec::new(),
-                code: vec![hit],
-                file_total: 0,
-                code_more: false,
-            }),
-            error: None,
-        }
+        let results =
+            SearchResults { files: Vec::new(), code: vec![hit], file_total: 0, code_more: false };
+        SearchCompletion { generation: 1, outcome: SearchOutcome::Ready(results) }
     }
 
     /// A code row too wide for the pane clips around its first matched span, keeping the
@@ -2037,8 +2097,10 @@ mod search_row_emphasis {
         enter_tab(&mut app, Tab::AllFiles);
         handle_key(&mut app, KeyEvent::from(KeyCode::Char('/')), AREA, default_keymap()).unwrap();
 
-        // A long head of `x`s pushes the match past the pane; `needle_marker` is 13 bytes.
-        let text = format!("{}needle_marker", "x".repeat(200));
+        // A long head of `x`s pushes the match past the pane; a long tail after
+        // `needle_marker` (13 bytes) overflows the post-clip content, so the `def` badge must
+        // survive a real tail truncation, not just the head elision.
+        let text = format!("{}needle_marker{}", "x".repeat(200), "y".repeat(200));
         let start = 200u32;
         let hit = CodeHit {
             path: "a.rs".into(),
@@ -2058,17 +2120,25 @@ mod search_row_emphasis {
             .expect("the clipped row keeps the first matched span visible");
         assert!(row.contains("1:"), "the line locator survives the clip: {row}");
         assert!(row.contains("…x"), "the cut head is marked with an ellipsis: {row}");
-        assert!(row.trim_end().ends_with("def"), "the badge survives the clip: {row}");
+        assert!(row.trim_end().ends_with("def"), "the badge survives the tail truncation: {row}");
 
         let y = out.lines().position(|l| l.contains("needle_marker")).unwrap() as u16;
-        // Cell column = char count before the needle (every cell here is one column wide).
+        // Cell column = char count before the token (every cell here is one column wide).
         let byte = row.find("needle_marker").unwrap();
         let x = row[..byte].chars().count() as u16;
-        let style = buf.cell((x, y)).expect("cell").style();
         assert_eq!(
-            style.bg,
+            buf.cell((x, y)).expect("cell").style().bg,
             Some(app.palette().match_hl),
-            "the matched span wears the match highlight: {style:?}"
+            "the matched span wears the match highlight",
+        );
+        // A cell in the clipped `…x` head keeps the selection fill, not the match highlight —
+        // the band covers the match only, never spilling left across the cut.
+        let ell = row.find('…').unwrap();
+        let head_x = row[..ell].chars().count() as u16 + 1;
+        assert_ne!(
+            buf.cell((head_x, y)).expect("cell").style().bg,
+            Some(app.palette().match_hl),
+            "the clipped head is not highlighted",
         );
     }
 
@@ -2121,9 +2191,10 @@ mod search_row_emphasis {
         enter_tab(&mut app, Tab::AllFiles);
         handle_key(&mut app, KeyEvent::from(KeyCode::Char('/')), AREA, default_keymap()).unwrap();
 
-        // A wide multi-byte head (each `é` is two bytes) forces the clip's char-boundary walk.
-        let head = "é".repeat(200);
-        let start = head.len() as u32;
+        // A wide multi-byte head (each `中` is 3 bytes, 2 columns) forces the clip's
+        // char-boundary walk onto boundaries a byte/column confusion would land off.
+        let head = "中".repeat(200);
+        let start = head.len() as u32; // 600 bytes in
         let hit = CodeHit {
             path: "a.rs".into(),
             line: 1,
@@ -2134,7 +2205,21 @@ mod search_row_emphasis {
         land_search_completion(&mut app, code_only(hit), 1);
         handle_key(&mut app, KeyEvent::from(KeyCode::Tab), AREA, default_keymap()).unwrap();
 
-        let out = dump(&render_size(&app, 140, 40));
-        assert!(out.contains("needle"), "a clipped multibyte row paints without panicking: {out}");
+        let buf = render_size(&app, 140, 40);
+        let out = dump(&buf);
+        let y = out
+            .lines()
+            .position(|l| l.contains("needle"))
+            .expect("the clipped multibyte row paints without panicking") as u16;
+        // The highlight starts exactly on the match, not shifted onto the multibyte head:
+        // the first highlighted cell on the row is `needle`'s `n`.
+        let hx = (0..buf.area.width)
+            .find(|&x| buf.cell((x, y)).expect("cell").style().bg == Some(app.palette().match_hl))
+            .expect("the match is highlighted");
+        assert_eq!(
+            buf.cell((hx, y)).expect("cell").symbol(),
+            "n",
+            "the match highlight lands on the match, past the multibyte head",
+        );
     }
 }

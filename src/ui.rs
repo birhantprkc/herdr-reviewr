@@ -616,13 +616,10 @@ fn render_file_list(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(List::new(items), inner);
 }
 
-/// A file row: `<indent><marker> <name> <stats>` — the marker colored by kind, the basename
-/// bright with its parent directories dimmed, and the `+a −d` stats right-aligned against the
-/// pane edge. A name too wide for the row keeps its tail behind a leading `…/`. An unannotated
-/// row (an unchanged `All files` file) drops the marker and stats, showing just the name.
-/// `emphasis` byte ranges into `name` wear the match highlight (the search screen's matched
-/// characters); a head-elided name remaps them onto the shown text, dropping only a span that
-/// falls entirely in the elided head, which has nowhere to show (specs/search.md).
+/// The fields [`file_row_item`] renders. `emphasis` byte ranges into `name` wear the match
+/// highlight (the search screen's matched characters); a head-elided name remaps them onto the
+/// shown text, dropping only a span that falls entirely in the elided head, which has nowhere
+/// to show (specs/search.md).
 struct FileRowSpec<'a> {
     indent: &'a str,
     annotation: Option<&'a Annotation>,
@@ -631,6 +628,10 @@ struct FileRowSpec<'a> {
     emphasis: &'a [(u32, u32)],
 }
 
+/// A file row: `<indent><marker> <name> <stats>` — the marker colored by kind, the basename
+/// bright with its parent directories dimmed, and the `+a −d` stats right-aligned against the
+/// pane edge. A name too wide for the row keeps its tail behind a leading `…/`. An unannotated
+/// row (an unchanged `All files` file) drops the marker and stats, showing just the name.
 fn file_row_item(
     row: &FileRowSpec<'_>,
     width: usize,
@@ -710,23 +711,18 @@ fn stats_spans(additions: u32, deletions: u32, p: &Palette) -> Vec<Span<'static>
     spans
 }
 
-/// Shorten `name` to `max` columns by eliding its head behind a leading `…`, preferring to
-/// cut at a path separator so a partial directory name never shows.
 /// Remap match byte spans from the full `name` onto the possibly head-elided `shown`
 /// (`…/tail`). A span inside the kept tail shifts onto its shown position, past the ellipsis;
 /// one entirely in the dropped head is lost — it has nowhere to show (specs/search.md).
-/// Identity when `shown == name`.
 fn remap_emphasis(spans: &[(u32, u32)], name: &str, shown: &str) -> Vec<(u32, u32)> {
     if spans.is_empty() {
         return Vec::new();
     }
-    if shown == name {
-        return spans.to_vec();
-    }
-    // `shown` is `…` + a suffix of `name`; place the kept suffix's bytes past the ellipsis.
-    let Some(tail) = shown.strip_prefix('…') else { return Vec::new() };
+    // `shown` is `elide_head(name)`: `name` itself (no leading `…`, so the spans map straight
+    // through) or `…` + a suffix of `name`. Place the kept suffix's bytes past the ellipsis.
+    let Some(tail) = shown.strip_prefix('…') else { return spans.to_vec() };
     let prefix = '…'.len_utf8() as u32;
-    let tail_start = name.len().saturating_sub(tail.len()) as u32;
+    let tail_start = (name.len() - tail.len()) as u32;
     spans
         .iter()
         .filter(|&&(_, e)| e > tail_start)
@@ -734,6 +730,8 @@ fn remap_emphasis(spans: &[(u32, u32)], name: &str, shown: &str) -> Vec<(u32, u3
         .collect()
 }
 
+/// Shorten `name` to `max` columns by eliding its head behind a leading `…`, preferring to
+/// cut at a path separator so a partial directory name never shows.
 fn elide_head(name: &str, max: usize) -> String {
     if name.width() <= max {
         return name.to_string();
@@ -1922,7 +1920,9 @@ fn search_code_row(
             remaining -= unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
             cut = i + c.len_utf8();
         }
-        (cut, "…")
+        // At a very thin width the walk can keep the whole head (cut stays 0); mark the cut
+        // only when one was actually made, so an un-truncated line wears no `…`.
+        (cut, if cut > 0 { "…" } else { "" })
     } else {
         (0, "")
     };

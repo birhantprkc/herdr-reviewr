@@ -73,14 +73,24 @@ pub struct SearchResults {
     pub code_more: bool,
 }
 
-/// A finished query: the tag it ran for, and either results or the not-yet-warm marker.
+/// A finished query's outcome — the three states the overlay's phases mirror, at the wire
+/// layer (specs/search.md).
+#[derive(Debug)]
+pub enum SearchOutcome {
+    /// Results for the query; the previously landed set stays painted until this lands.
+    Ready(SearchResults),
+    /// The engine's first scan is still running — the overlay shows `indexing…` and the
+    /// worker re-runs the query when the scan lands.
+    Indexing,
+    /// The engine failed; its message shows in the results pane.
+    Failed(String),
+}
+
+/// A finished query: the tag it ran for, and its outcome.
 #[derive(Debug)]
 pub struct SearchCompletion {
     pub generation: u64,
-    /// `None` while the engine's first scan is still running — the overlay shows
-    /// `indexing…` and the worker re-runs the query when the scan lands (specs/search.md).
-    pub results: Option<SearchResults>,
-    pub error: Option<String>,
+    pub outcome: SearchOutcome,
 }
 
 /// The engine, initialized once on the worker thread.
@@ -220,8 +230,8 @@ pub fn spawn(
                     // Report on the first query, then exit: without an engine every later
                     // request would fail the same way.
                     if let Ok(SearchJob::Query { generation, .. }) = rx.recv() {
-                        let _ =
-                            tx.send(SearchCompletion { generation, results: None, error: Some(e) });
+                        let outcome = SearchOutcome::Failed(e);
+                        let _ = tx.send(SearchCompletion { generation, outcome });
                     }
                     return;
                 }
@@ -269,15 +279,15 @@ pub fn spawn(
                 };
                 if !engine.warm() {
                     pending = Some((generation, query));
-                    let _ = tx.send(SearchCompletion { generation, results: None, error: None });
+                    let outcome = SearchOutcome::Indexing;
+                    let _ = tx.send(SearchCompletion { generation, outcome });
                     continue;
                 }
-                let completion = match engine.run(&query) {
-                    Ok(results) => {
-                        SearchCompletion { generation, results: Some(results), error: None }
-                    }
-                    Err(e) => SearchCompletion { generation, results: None, error: Some(e) },
+                let outcome = match engine.run(&query) {
+                    Ok(results) => SearchOutcome::Ready(results),
+                    Err(e) => SearchOutcome::Failed(e),
                 };
+                let completion = SearchCompletion { generation, outcome };
                 if tx.send(completion).is_err() {
                     break;
                 }

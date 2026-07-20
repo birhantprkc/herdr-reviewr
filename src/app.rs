@@ -2631,6 +2631,7 @@ impl App {
         }
     }
 
+    /// `↓`/`↑`, `ctrl+n`/`p`: move the pick by `delta`, only while `Ready` (specs/search.md).
     pub fn search_move(&mut self, delta: isize) {
         // Off `Ready` the screen paints a message, not rows, so there is nothing to
         // move onto — the same guard `search_open_pick` and `build_search_preview` uphold.
@@ -2649,20 +2650,23 @@ impl App {
     /// query is in flight the previous results stay painted. A landed set resets the pick
     /// to the first result row (specs/search.md).
     pub fn apply_search_completion(&mut self, completion: crate::search::SearchCompletion) {
+        use crate::search::SearchOutcome;
         let Some(s) = self.search.as_mut() else { return };
-        if let Some(e) = completion.error {
-            s.phase = SearchPhase::Error(e);
-            return;
-        }
-        match completion.results {
-            Some(results) => {
+        match completion.outcome {
+            SearchOutcome::Ready(results) => {
                 s.results = results;
                 s.phase = SearchPhase::Ready;
                 s.pick = 0;
                 s.scroll.set(0);
                 s.preview_stale = true;
             }
-            None => s.phase = SearchPhase::Indexing,
+            SearchOutcome::Indexing => s.phase = SearchPhase::Indexing,
+            SearchOutcome::Failed(e) => {
+                s.phase = SearchPhase::Error(e);
+                // Drop the last preview so the pane falls back to its notice — a stale file
+                // under a red error reads as a result (specs/search.md).
+                s.preview = None;
+            }
         }
     }
 
@@ -2713,9 +2717,9 @@ impl App {
         }
     }
 
-    /// A landed poll's preview reconcile: rebuild the previewed file in place, keeping
-    /// the scroll — the hit line clamps at paint (specs/search.md, `overview.md`
-    /// Continuity).
+    /// A landed poll's preview reconcile: rebuild the previewed file in place, keeping the
+    /// scroll. The renderer clamps the scroll and bands the hit only while its line still
+    /// exists (specs/search.md, `overview.md` Continuity).
     pub fn refresh_search_preview(&mut self) {
         let Some(path) =
             self.search.as_ref().and_then(|s| s.preview.as_ref()).map(|p| p.path.clone())

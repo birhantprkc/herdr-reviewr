@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-07-18
-Last edited: 2026-07-19
+Last edited: 2026-07-20
 ---
 
 # Search
@@ -110,6 +110,7 @@ Both modes share the rest:
 
 - Matched characters wear a highlight where the engine reports them. Rows carry no syntax
   color — the highlight leads in the list, the preview carries the color.
+- A match hidden in a path's elided head has no cell on the row, so it is not marked.
 - The list scrolls to keep the pick visible, so every result is reachable.
 - A clipped list ends with a dim `… more`. The engine's full count lives in the chip.
 - A layout change keeps the pick and rescrolls it visible.
@@ -124,8 +125,8 @@ content, syntax highlighted (`diff-view.md`). The pane title names the previewed
 - A `Code` pick centers its hit line in the pane, bands it like a cursor row, and
   emphasizes the match. A `Files` pick previews from the top.
 - `PageUp` / `PageDown` scroll the preview. A moved preview re-centers on the next pick.
-- A poll that changes the previewed file repaints the preview in place, the hit line
-  clamped (`overview.md` Continuity).
+- A poll that changes the previewed file repaints it in place, the scroll clamped to the
+  new length. The hit band shows only while its line still exists (`overview.md` Continuity).
 - With nothing to preview — no results, or a deleted file — the pane shows a dim notice.
 - A file the File view degrades to a notice (binary, too large) previews as that notice.
 
