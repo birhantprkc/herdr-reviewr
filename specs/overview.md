@@ -1,7 +1,7 @@
 ---
-Status: Draft
+Status: Current
 Created: 2026-06-23
-Last edited: 2026-07-17
+Last edited: 2026-07-19
 ---
 
 # herdr-reviewr
@@ -48,6 +48,7 @@ to move the work forward.
 - Export of all comments to the agent input or the clipboard.
 - Poll-based refresh plus a manual refresh key.
 - Keyboard and mouse input (`input.md`).
+- Full-screen search over the worktree: fuzzy files and code with a live preview, ranking owned by the engine (`search.md`).
 
 ## Roadmap
 
@@ -56,6 +57,7 @@ Named so the architecture stays open to them. None is part of this design.
 - Reviewed-file state: marking a file reviewed and greying it in the list.
 - Hopping between the agent's changed files while browsing `All files`.
 - A side-by-side split diff view for wide panes.
+- Search on `Changes`, scoped to the changeset.
 - Search within the diff, and live theme switching.
 
 ## Continuity
@@ -100,6 +102,7 @@ Newer content paints over the old in place, reconciling the reviewer's place as 
 - [theme](./theme.md)
 - [file-list](./file-list.md)
 - [input](./input.md)
+- [search](./search.md)
 - [tui](./tui.md)
 - [pr-tab](./pr-tab.md)
 - [herdr-host](./herdr-host.md)

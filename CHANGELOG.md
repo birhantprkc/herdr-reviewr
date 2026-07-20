@@ -6,6 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Search.** `/` on All files opens a search bar over the whole worktree: fuzzy file names
+  and live code grep in one list, definitions ranked first, results in engine order. Pick a
+  result and land in the file on its line. Matching, ranking, and indexing come from
+  [fff](https://github.com/dmtrKovalenko/fff); ranking improves as you pick, and the frecency
+  store lives in the cache directory, never the worktree.
+
 ## [0.20.1] — 2026-07-18
 
 ### Changed

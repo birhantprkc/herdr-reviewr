@@ -107,3 +107,4 @@ Every layout change preserves the focused pane and each pane's cursor or selecti
 - [file-list](./file-list.md)
 - [pr-tab](./pr-tab.md)
 - [review-model](./review-model.md)
+- [search](./search.md)

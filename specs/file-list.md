@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-06-24
-Last edited: 2026-07-14
+Last edited: 2026-07-18
 ---
 
 # File list
@@ -91,3 +91,4 @@ The list is a flat sequence of visible rows over the tree.
 - [review-model](./review-model.md)
 - [input](./input.md)
 - [tui](./tui.md)
+- [search](./search.md)

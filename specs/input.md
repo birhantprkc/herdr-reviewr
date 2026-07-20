@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-07-17
-Last edited: 2026-07-17
+Last edited: 2026-07-19
 ---
 
 # Input
@@ -46,6 +46,7 @@ The keymap is rebindable per action through `[keybindings]` in the plugin config
 | `delete`                                                 | delete the comment under the cursor         | `d`                                         | —                             |
 | `next-comment` / `prev-comment`                          | jump to next / previous comment             | `n` / `N`                                   | —                             |
 | `comments`                                               | list and manage all comments                | `l`                                         | —                             |
+| `search`                                                 | open the search screen (`search.md`)        | `/`                                         | —                             |
 | `send`                                                   | send all comments to the agent              | `s` / `S`                                   | click `Send`                  |
 | `copy`                                                   | copy all comments to the clipboard          | `y` / `Y`                                   | —                             |
 | `open-pr`                                                | open the PR in the browser (`pr-tab.md`)    | `o`                                         | click the status chip         |
@@ -126,14 +127,15 @@ The actions follow the cursor:
 
 - An armed crossing outranks the cursor's own action, since only the footer says the next press leaves the file.
 - `u/b/t scope` shows in every `Changes` and `All files` context, except where it is itself the primary.
+- `search` shows in every context, on every tab (`search.md`).
 - Movement keys are never shown. The armed crossing is the one exception.
-- The comment editor and the comments list show their own actions.
+- The comment editor, the comments list, and the search screen show their own actions.
 - The changed-file count and line totals live in the header. The footer carries only the comment count, inside `s send N`.
 - On `PR` the bar carries the PR state line and `o open ↗` per `pr-tab.md`, then navigation.
 
 ### Comment editor
 
-A plain-text field that edits at the caret, not only at the end. An empty box shows a dim `Leave a comment…` placeholder. `e` preloads the existing text with the caret at the end.
+A plain-text field that edits at the caret, not only at the end. The search input shares these controls, without the newline inserts (`search.md`). An empty box shows a dim `Leave a comment…` placeholder. `e` preloads the existing text with the caret at the end.
 
 ```
 ┌ comment · llm_registry.py:41 ───────────┐
@@ -155,7 +157,7 @@ A plain-text field that edits at the caret, not only at the end. An empty box sh
 | `Enter` / `Esc`                                 | save / cancel, cancel discards the draft         |
 
 - A paste arrives whole via bracketed paste. A multi-line paste keeps its newlines. `\r\n` and `\r` normalize to `\n`.
-- A paste outside the comment editor is ignored. It never starts or mutates a comment.
+- A paste outside the comment editor and the search input is ignored. It never starts or mutates a comment.
 - Movement, insertion, and deletion are character-wise. Multi-byte and wide characters count as whole characters.
 - `↑`/`↓` move by wrapped rows. `Home`/`End` and the kill keys act on the logical line, the run of text between explicit newlines.
 - `Alt+b`/`Alt+f` always survive as ESC-prefixed sequences. The modified arrows work where the terminal delivers them. The character arrows, `Home`/`End`, and `Ctrl+A`/`Ctrl+E` always work.
@@ -173,3 +175,4 @@ A plain-text field that edits at the caret, not only at the end. An empty box sh
 - [diff-view](./diff-view.md)
 - [review-model](./review-model.md)
 - [pr-tab](./pr-tab.md)
+- [search](./search.md)

@@ -13,6 +13,8 @@ categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 anyhow = "1"
+dirs = "5"
+fff-search = { version = "0.10.0", features = ["definitions"] }
 pulldown-cmark = { version = "0.13.4", default-features = false }
 ratatui = "0.30"
 serde = { version = "1", features = ["derive"] }

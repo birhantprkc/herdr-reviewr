@@ -24,6 +24,7 @@ pub mod log;
 pub mod markdown;
 pub mod model;
 pub mod proc;
+pub mod search;
 pub mod theme;
 pub mod turn;
 pub mod ui;
@@ -475,22 +476,41 @@ pub fn land_world_completion(
     true
 }
 
+/// Land one search completion. A stale generation is discarded whole — a result set
+/// paints only while it matches the query as typed (specs/search.md). Returns whether the
+/// completion matched the live generation, mirroring [`land_world_completion`].
+pub fn land_search_completion(
+    app: &mut App,
+    completion: crate::search::SearchCompletion,
+    generation: u64,
+) -> bool {
+    if completion.generation != generation {
+        return false;
+    }
+    app.apply_search_completion(completion);
+    true
+}
+
 /// Whether a file tab's in-flight refresh shows the tab-strip glyph: past the delay, and
 /// only for a job that builds a snapshot — a sample-only job never lights it (specs/tui.md).
 fn world_indicator(inflight: Option<(Duration, bool)>) -> bool {
     inflight.is_some_and(|(elapsed, builds)| builds && elapsed >= INDICATOR_DELAY)
 }
 
-/// The wake while a world job is in flight: tight for a building job so its landing paints
-/// near the build's own speed, the fetch cadence for a sample-only one.
 /// Whether a lit glyph may go dark: only once the minimum display has passed, so the
 /// acknowledgment is perceptible rather than a two-frame blink (specs/tui.md).
 fn glyph_clears(lit_for: Duration) -> bool {
     lit_for >= INDICATOR_MIN_SHOW
 }
 
+/// The tight wake while a worker owes a completion, so its landing paints near the
+/// build's own speed — shared by the world and search workers.
+const WORKER_TIGHT_WAKE: Duration = Duration::from_millis(15);
+
+/// The wake while a world job is in flight: tight for a building job so its landing paints
+/// near the build's own speed, the fetch cadence for a sample-only one.
 fn world_wake(builds: bool) -> Duration {
-    Duration::from_millis(if builds { 15 } else { 100 })
+    if builds { WORKER_TIGHT_WAKE } else { Duration::from_millis(100) }
 }
 
 /// Draw, then wait up to the poll deadline for input; refresh on each tick.
@@ -522,6 +542,14 @@ fn event_loop(
     );
     let mut world_generation = 0_u64;
     let mut world_inflight: Option<(Instant, bool)> = None;
+    // The search worker spawns on the first overlay open, so a session that never
+    // searches never pays for the engine's index (specs/search.md).
+    let mut search_worker: Option<(
+        mpsc::Sender<crate::search::SearchJob>,
+        mpsc::Receiver<crate::search::SearchCompletion>,
+    )> = None;
+    let mut search_generation = 0_u64;
+    let mut search_inflight = false;
     // When the tab-strip glyph turned on — the minimum-display clock (specs/tui.md).
     let mut glyph_since: Option<Instant> = None;
     let mut config_epoch = 0_u64;
@@ -608,6 +636,15 @@ fn event_loop(
             // keep revealing so the anchored line stays above the growing box.
             let size = terminal.size()?;
             let area = Rect::new(0, 0, size.width, size.height);
+            // Build the search preview only once the pick has settled: with input still
+            // queued the build defers, so a pick sweep never waits on it
+            // (specs/search.md Preview).
+            if app.mode == crate::app::Mode::Search
+                && app.search.as_ref().is_some_and(|s| s.preview_stale)
+                && !event::poll(Duration::ZERO)?
+            {
+                app.build_search_preview();
+            }
             let viewport = ui::diff_viewport_height(area, app);
             let effective = if app.composing() {
                 let box_h = ui::composer_height(app, ui::diff_inner_width(area, app));
@@ -635,6 +672,67 @@ fn event_loop(
                     world_inflight = None;
                 }
                 continue;
+            }
+
+            // A search completion paints only while it matches the query as typed: a stale
+            // generation is discarded whole (specs/search.md).
+            if let Some((_, rx)) = &search_worker
+                && let Ok(completion) = rx.try_recv()
+            {
+                if land_search_completion(app, completion, search_generation) {
+                    // A warming engine answers `indexing…` and re-runs by itself, so
+                    // the tight wake stays on until real results land.
+                    search_inflight = app
+                        .search
+                        .as_ref()
+                        .is_some_and(|s| s.phase == crate::app::SearchPhase::Indexing);
+                }
+                // Repaint at once, like a world landing — without this the results sit
+                // computed but unpainted until the next wake (policies/ux-responsiveness.md).
+                continue;
+            }
+            // A closed overlay owes no landing: without this, a still-warming engine's
+            // periodic `indexing…` completions would re-arm the tight wake after `esc`
+            // and spin the loop until the cold scan finishes.
+            if app.search.is_none() {
+                search_inflight = false;
+            }
+
+            // Dispatch the queued query after the frame above painted, so typing paints at
+            // input speed and the results land behind it (specs/search.md).
+            if std::mem::take(&mut app.search_dirty)
+                && app.mode == crate::app::Mode::Search
+                && app.config_error().is_none()
+            {
+                let (tx, _) = search_worker.get_or_insert_with(|| {
+                    let (job_tx, job_rx) = mpsc::channel();
+                    let (res_tx, res_rx) = mpsc::channel();
+                    crate::search::spawn(
+                        app.repo.clone(),
+                        crate::search::cache_dir(),
+                        job_rx,
+                        res_tx,
+                    );
+                    (job_tx, res_rx)
+                });
+                search_generation = search_generation.wrapping_add(1);
+                let query = app.search.as_ref().map(|s| s.query.clone()).unwrap_or_default();
+                search_inflight = tx
+                    .send(crate::search::SearchJob::Query { generation: search_generation, query })
+                    .is_ok();
+                if !search_inflight
+                    && let Some(s) = app.search.as_mut()
+                    && !matches!(s.phase, crate::app::SearchPhase::Error(_))
+                {
+                    // A dead worker's first, specific error stays up; only a phase that
+                    // never saw one gets the generic message.
+                    s.phase = crate::app::SearchPhase::Error("search worker unavailable".into());
+                }
+            }
+            if let Some(path) = app.search_track.take()
+                && let Some((tx, _)) = &search_worker
+            {
+                let _ = tx.send(crate::search::SearchJob::Track { path });
             }
 
             // Dispatch the queued refresh after the frame above painted, so a switch stays
@@ -775,6 +873,9 @@ fn event_loop(
             }
             if let Some((_, builds)) = world_inflight {
                 timeout = timeout.min(world_wake(builds));
+            }
+            if search_inflight {
+                timeout = timeout.min(WORKER_TIGHT_WAKE);
             }
             if let Some(wake) = glyph_wake {
                 timeout = timeout.min(wake.max(Duration::from_millis(15)));
@@ -1067,15 +1168,42 @@ fn apply_plugin_config_observation(
 const PAGE: isize = 15;
 const HALF_PAGE: isize = 8;
 
+/// Apply one readline-style editing key to the active field — the comment draft or the
+/// search query — so the two input surfaces stay in lockstep, edited by one control set
+/// (`specs/input.md`). The caller handles its own mode keys first and delegates the rest
+/// here. `word` requests a word-wise horizontal move (Alt/Ctrl + arrow, terminal-dependent).
+fn apply_text_edit(app: &mut App, code: KeyCode, ctrl: bool, alt: bool, word: bool) {
+    use KeyCode::{Backspace, Char, Delete, End, Home, Left, Right};
+    match code {
+        Char('w') if ctrl => app.input_delete_word(),
+        Char('a') if ctrl => app.caret_home(),
+        Char('e') if ctrl => app.caret_end(),
+        Char('u') if ctrl => app.input_kill_to_start(),
+        Char('k') if ctrl => app.input_kill_to_end(),
+        // Word-jump: `Alt+b`/`Alt+f` (readline; survives as ESC-prefixed, unlike modified
+        // arrows, which many terminals/multiplexers strip) and modified arrows where they are
+        // delivered. These precede the plain-character insert below.
+        Char('b') if alt => app.caret_word_left(),
+        Char('f') if alt => app.caret_word_right(),
+        Left if word => app.caret_word_left(),
+        Right if word => app.caret_word_right(),
+        Left => app.caret_left(),
+        Right => app.caret_right(),
+        Home => app.caret_home(),
+        End => app.caret_end(),
+        Delete => app.input_delete_forward(),
+        Backspace => app.input_backspace(),
+        Char(c) if !ctrl => app.input_push(c),
+        _ => {}
+    }
+}
+
 /// Map one key press onto `App` through `keymap` — the keymap of the frame on screen, so a
 /// stale hint never dispatches a different action than it advertised (`specs/config.md`).
 /// Public for the dispatch tests; the event loop is the runtime caller.
 pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Result<()> {
     use crate::keymap::Action as K;
-    use KeyCode::{
-        Backspace, Char, Delete, Down, End, Enter, Esc, Home, Left, PageDown, PageUp, Right, Tab,
-        Up,
-    };
+    use KeyCode::{Char, Down, Enter, Esc, Left, PageDown, PageUp, Right, Tab, Up};
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
     // A keypress cancels the gesture but keeps consuming its drag events until mouse-up.
@@ -1093,28 +1221,32 @@ pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> 
             Enter if alt_or_shift => app.input_push('\n'),
             Enter => app.submit_comment(),
             Char('j') if ctrl => app.input_push('\n'),
-            Char('w') if ctrl => app.input_delete_word(),
-            Char('a') if ctrl => app.caret_home(),
-            Char('e') if ctrl => app.caret_end(),
-            Char('u') if ctrl => app.input_kill_to_start(),
-            Char('k') if ctrl => app.input_kill_to_end(),
-            // Word-jump: `Alt+b`/`Alt+f` (readline; survives as ESC-prefixed, unlike modified
-            // arrows, which many terminals/multiplexers strip) and modified arrows where they
-            // are delivered. These precede the plain-character insert below.
-            Char('b') if alt => app.caret_word_left(),
-            Char('f') if alt => app.caret_word_right(),
-            Left if word => app.caret_word_left(),
-            Right if word => app.caret_word_right(),
-            Left => app.caret_left(),
-            Right => app.caret_right(),
+            // The box wraps, so `↑`/`↓` walk display rows here rather than editing text.
             Up => app.caret = ui::caret_vertical(&app.input, app.caret, cw, false),
             Down => app.caret = ui::caret_vertical(&app.input, app.caret, cw, true),
-            Home => app.caret_home(),
-            End => app.caret_end(),
-            Delete => app.input_delete_forward(),
-            Backspace => app.input_backspace(),
-            Char(c) if !ctrl => app.input_push(c),
-            _ => {}
+            code => apply_text_edit(app, code, ctrl, alt, word),
+        }
+        return Ok(());
+    }
+
+    // The search screen: the query edits with the comment editor's caret controls,
+    // newlines excluded — every edit re-queries off the frame loop. `tab` flips the
+    // mode; the page keys scroll the preview (specs/search.md).
+    if app.mode == Mode::Search {
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let word = alt || ctrl;
+        match key.code {
+            Esc => app.close_search(),
+            Enter => app.search_open_pick()?,
+            Tab => app.search_flip(),
+            PageDown => app.scroll_search_preview(PAGE),
+            PageUp => app.scroll_search_preview(-PAGE),
+            // The single-line query has no rows, so `↑`/`↓` (and `ctrl+n`/`p`) move the pick.
+            Down => app.search_move(1),
+            Up => app.search_move(-1),
+            Char('n') if ctrl => app.search_move(1),
+            Char('p') if ctrl => app.search_move(-1),
+            code => apply_text_edit(app, code, ctrl, alt, word),
         }
         return Ok(());
     }
@@ -1148,6 +1280,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> 
             (Some(K::TabChanges), _) => app.set_tab(crate::app::Tab::Changes)?,
             (Some(K::TabAllFiles), _) => app.set_tab(crate::app::Tab::AllFiles)?,
             (Some(K::OpenPr), _) => app.pr_open(),
+            (Some(K::Search), _) => app.open_search(),
             (Some(K::NavigatorPosition), _) => app.cycle_navigator_position(),
             (Some(K::NavigatorGrow), _) => app.resize_navigator(4),
             (Some(K::NavigatorShrink), _) => app.resize_navigator(-4),
@@ -1215,6 +1348,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> 
             K::NextComment => app.jump_comment(1),
             K::PrevComment => app.jump_comment(-1),
             K::Comments => app.open_list(),
+            K::Search => app.open_search(),
             // `edit`/`delete` off the diff, and `open-pr` off the `PR` tab, are inert.
             K::Edit | K::Delete | K::OpenPr => {}
         }
@@ -1261,6 +1395,54 @@ pub fn handle_mouse(
     heights: &[usize],
     keymap: &Keymap,
 ) -> Result<()> {
+    // On the search screen: chips flip, a click picks (a second click on the picked row
+    // opens), the wheel moves the pick over results and scrolls the preview, and the
+    // divider drags search's own share (specs/search.md Keys). A cancelled divider
+    // gesture still owns its remaining drag and mouse-up events like in every modal.
+    if app.mode == Mode::Search {
+        use ui::SearchTarget as T;
+        match m.kind {
+            MouseEventKind::Drag(MouseButton::Left) if app.divider_drag_active() => {
+                // The share maps the pointer's row into the band-to-footer span the two
+                // panes divide, matching `search_layout`'s geometry.
+                let l = ui::search_layout(ui::body_rect(area), app);
+                let axis_len = l.results.height + l.preview.height;
+                let offset = m.row.saturating_sub(l.results.y);
+                app.drag_search_divider(axis_len, offset);
+            }
+            MouseEventKind::Drag(MouseButton::Left) if app.divider_drag_captured() => {}
+            MouseEventKind::Up(MouseButton::Left) if app.divider_drag_captured() => {
+                app.finish_divider_drag();
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                match ui::search_target(app, area, m.column, m.row) {
+                    Some(T::Chips) => app.search_flip(),
+                    Some(T::Divider) => app.start_divider_drag(),
+                    Some(T::Row(pick)) => {
+                        let picked = app.search.as_ref().is_some_and(|s| s.pick == pick);
+                        if picked {
+                            app.search_open_pick()?;
+                        } else if let Some(s) = app.search.as_mut() {
+                            s.pick = pick;
+                            s.preview_stale = true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
+                let delta: isize = if m.kind == MouseEventKind::ScrollDown { 1 } else { -1 };
+                match ui::search_target(app, area, m.column, m.row) {
+                    Some(T::Row(_) | T::Results) => app.search_move(delta),
+                    Some(T::Preview | T::Divider) => app.scroll_search_preview(delta * 3),
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+        return Ok(());
+    }
+
     // A modal captures new mouse gestures, but a divider gesture cancelled by the key that
     // opened it still owns its remaining drag and mouse-up events.
     if app.composing() || app.mode == Mode::List {

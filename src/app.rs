@@ -26,6 +26,11 @@ const DEFAULT_STACK_PCT: u16 = 25;
 const MIN_NAVIGATOR_PCT: u16 = 15;
 const MAX_SIDE_PCT: u16 = 60;
 const MAX_STACK_PCT: u16 = 50;
+/// The search screen's results-pane share: half the body by default, dragged within
+/// wide bounds — the geometry's minimum pane sizes clamp the rest (specs/search.md).
+const DEFAULT_SEARCH_PCT: u16 = 50;
+const MIN_SEARCH_PCT: u16 = 10;
+const MAX_SEARCH_PCT: u16 = 90;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum DividerDrag {
@@ -113,6 +118,106 @@ pub enum Mode {
     },
     /// Browsing the comments-list overlay.
     List,
+    /// The search screen, replacing the body from any tab (specs/search.md). Its state
+    /// lives in [`App::search`].
+    Search,
+}
+
+/// The search screen's mode: which result set the list shows (specs/search.md).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SearchMode {
+    /// The engine's path matches, one row per file.
+    Files,
+    /// The engine's content matches, grouped by file.
+    Code,
+}
+
+/// Where the search overlay stands with the engine (specs/search.md).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum SearchPhase {
+    /// The engine's first scan is still running: the overlay shows `indexing…`.
+    Indexing,
+    /// Results are painted; stale ones stay up while a newer query is in flight.
+    Ready,
+    /// The engine failed; the message shows inside the overlay.
+    Error(String),
+}
+
+/// The picked result's file rendered as the read pane's File view, hit-centered
+/// (specs/search.md Preview).
+#[derive(Debug)]
+pub struct SearchPreview {
+    pub path: String,
+    pub diff: crate::diff::FileDiff,
+    /// A `Code` pick's hit: the 1-based line and its matched byte spans, banded and
+    /// emphasized by the renderer. A `Files` pick previews from the top.
+    pub hit: Option<(u64, Vec<(u32, u32)>)>,
+    /// Top visible row. The renderer centers the hit here once per build, then
+    /// `PageUp`/`PageDown` move it freely.
+    pub scroll: std::cell::Cell<usize>,
+    /// Cleared by the renderer after it centers the hit for this build.
+    pub center: std::cell::Cell<bool>,
+}
+
+/// The search screen's state: the query as typed, the mode, the pick, the last landed
+/// results, and the settled preview. Dropped whole on close — a query is cheap, unlike a
+/// comment draft.
+#[derive(Debug)]
+pub struct SearchOverlay {
+    pub query: String,
+    /// The caret into `query`: a char index, edited by the shared caret ops (`input.md`).
+    pub caret: usize,
+    pub search_mode: SearchMode,
+    /// The picked row, indexed into the active mode's result set.
+    pub pick: usize,
+    /// Top visible result row, kept by the renderer so the pick stays in view.
+    pub scroll: std::cell::Cell<usize>,
+    pub results: crate::search::SearchResults,
+    pub phase: SearchPhase,
+    /// The settled preview. `None` until the first build, or while nothing is pickable.
+    pub preview: Option<SearchPreview>,
+    /// Set by every pick retarget; the event loop rebuilds the preview once the pick
+    /// settles — a sweep never waits on a build (specs/search.md).
+    pub preview_stale: bool,
+}
+
+impl SearchOverlay {
+    fn new() -> Self {
+        Self {
+            query: String::new(),
+            caret: 0,
+            search_mode: SearchMode::Files,
+            pick: 0,
+            scroll: std::cell::Cell::new(0),
+            results: crate::search::SearchResults::default(),
+            phase: SearchPhase::Indexing,
+            preview: None,
+            preview_stale: false,
+        }
+    }
+
+    /// How many rows the pick can land on in the active mode.
+    pub fn picks(&self) -> usize {
+        match self.search_mode {
+            SearchMode::Files => self.results.files.len(),
+            SearchMode::Code => self.results.code.len(),
+        }
+    }
+
+    /// The picked result in the active mode.
+    pub fn picked(&self) -> Option<PickedResult<'_>> {
+        match self.search_mode {
+            SearchMode::Files => self.results.files.get(self.pick).map(PickedResult::File),
+            SearchMode::Code => self.results.code.get(self.pick).map(PickedResult::Code),
+        }
+    }
+}
+
+/// One picked search result, borrowed from the overlay's results.
+#[derive(Debug)]
+pub enum PickedResult<'a> {
+    File(&'a crate::search::FileHit),
+    Code(&'a crate::search::CodeHit),
 }
 
 /// A footer action — what the bar offers for the current context. Semantic only: the renderer
@@ -133,6 +238,14 @@ pub enum FooterAction {
     },
     ExpandDir,
     CollapseDir,
+    /// Open the search screen — offered in every context, on every tab (specs/search.md).
+    Search,
+    /// The search screen's own bar: flip, pick, open, close (specs/search.md). The flip
+    /// label names the destination mode, derived from the current mode at render time.
+    FlipSearchMode,
+    PickResult,
+    OpenResult,
+    CloseSearch,
     /// Switch focus between the file list and the diff; the label names the destination pane.
     TogglePane,
     /// Toggle the markdown preview; the label names the destination view (`m preview`
@@ -262,6 +375,9 @@ pub struct App {
     pub navigator_position: crate::config::NavigatorPosition,
     pub navigator_side_pct: u16,
     pub navigator_stack_pct: u16,
+    /// The search screen's results-pane share — search's own session value, separate
+    /// from the review layout's shares (specs/search.md).
+    pub search_pct: u16,
     divider_drag: DividerDrag,
     pub select_anchor: Option<usize>,
     pub store: CommentStore,
@@ -294,6 +410,13 @@ pub struct App {
     /// The world refresh request awaiting dispatch, if any; the event loop hands it to
     /// the worker after the frame paints (specs/tui.md).
     pub world_request: Option<crate::world::WorldRequest>,
+    /// The search overlay's state while `mode == Mode::Search`, `None` otherwise.
+    pub search: Option<SearchOverlay>,
+    /// Set by every query edit (and the open); the event loop dispatches the query to the
+    /// search worker after the frame paints, tagged latest-wins (specs/search.md).
+    pub search_dirty: bool,
+    /// A picked path awaiting its frecency record; the event loop hands it to the worker.
+    pub search_track: Option<String>,
     /// Whether the tab-strip glyph paints this frame — maintained by the event loop's
     /// appear-delay and minimum-display clocks (specs/tui.md).
     pub refresh_indicator: bool,
@@ -393,6 +516,7 @@ impl App {
             navigator_position: crate::config::NavigatorPosition::Right,
             navigator_side_pct: DEFAULT_SIDE_PCT,
             navigator_stack_pct: DEFAULT_STACK_PCT,
+            search_pct: DEFAULT_SEARCH_PCT,
             divider_drag: DividerDrag::Idle,
             select_anchor: None,
             store: CommentStore::new(),
@@ -412,6 +536,9 @@ impl App {
             reveal_pr_nav: std::cell::Cell::new(true),
             pr_pending: false,
             world_request: None,
+            search: None,
+            search_dirty: false,
+            search_track: None,
             refresh_indicator: false,
             refresh_commanded: false,
             tab_visited: false,
@@ -477,6 +604,9 @@ impl App {
     /// Block the sidebar on one whole-file configuration failure.
     pub fn set_config_error(&mut self, error: String) {
         self.cancel_divider_drag();
+        // The search overlay closes when the config view takes over; recovery restores
+        // the tab beneath it, and the query is not restored (specs/search.md).
+        self.close_search();
         self.config = PluginConfigState::Blocked { error };
         self.pr_pending = false;
     }
@@ -507,13 +637,16 @@ impl App {
         self.list_cursor = old.list_cursor;
         self.navigator_side_pct = old.navigator_side_pct;
         self.navigator_stack_pct = old.navigator_stack_pct;
+        self.search_pct = old.search_pct;
         // A tab switch requested its refresh and recovery landed first: the carried fields
         // below may reinstate the stale stashed frame, so the pending request must survive
         // the swap or that frame never refreshes until the next poll.
         self.world_request = old.world_request.take();
         let old_mode = old.mode.clone();
         match old_mode {
-            Mode::Normal => {}
+            // `set_config_error` closes the search overlay before the mode is stored, so
+            // `Search` never reaches recovery; the query is not restored (specs/search.md).
+            Mode::Normal | Mode::Search => {}
             Mode::List | Mode::Composing { .. } => {
                 self.scope = old.scope;
                 self.tab = old.tab;
@@ -730,6 +863,9 @@ impl App {
             }
             self.load_read();
         }
+        // A landed poll repaints the search preview in place — never the results, which
+        // describe the worktree when their query ran (specs/search.md).
+        self.refresh_search_preview();
         self.tab_visited = true;
     }
 
@@ -751,7 +887,7 @@ impl App {
     /// so opening a file from the tree and from a comment edit can't drift apart.
     fn open_path_in_tab(&mut self, path: String, previous_path: Option<String>) {
         match self.tab {
-            Tab::AllFiles => self.set_file_view(path),
+            Tab::AllFiles => self.set_file_view(&path),
             // `Changes` (the `PR` tab never opens a file in the read pane).
             _ => self.set_diff(path, previous_path),
         }
@@ -787,39 +923,47 @@ impl App {
 
     /// Build the File view for `path`: its current worktree content as `Context` rows, no
     /// folds. The `All files` read pane (specs/diff-view.md). Content is scope-independent.
-    fn set_file_view(&mut self, path: String) {
+    fn set_file_view(&mut self, path: &str) {
         // Opening a different file starts in source; a same-file refresh keeps the
         // preview choice and its scroll (specs/diff-view.md).
-        if self.diff_path.as_deref() != Some(path.as_str()) {
+        if self.diff_path.as_deref() != Some(path) {
             self.preview = false;
             self.preview_scroll = 0;
             self.preview_max_scroll.set(usize::MAX);
         }
-        self.diff_path = Some(path.clone());
+        self.diff_path = Some(path.to_string());
         self.expanded_folds.clear(); // the File view has no folds
-        // Check the on-disk size before reading: an over-budget blob (a model weight, a vendored
-        // bundle) is one keystroke away in `All files`, and reading it whole would spike the UI
-        // thread before `build_file`'s budget could discard it (specs/diff-view.md).
-        let oversize = std::fs::metadata(self.repo.join(&path))
-            .is_ok_and(|m| crate::diff::over_byte_budget(m.len() as usize));
-        self.diff = if oversize {
-            self.preview_text.clear();
-            FileDiff::too_large_notice(path)
+        let (diff, content) = self.file_view(path);
+        // Keep the preview's render input current without a per-frame rebuild. A file the
+        // source view degrades to a notice never previews (specs/diff-view.md), so its
+        // content is not held either.
+        if self.markdown_file() && diff.state == crate::diff::FileState::Normal {
+            self.preview_text = content;
         } else {
-            let content = worktree_content(&self.repo, &path);
-            let diff = self.cache.get_file(path, &content, &self.highlighter);
-            // Keep the preview's render input current without a per-frame rebuild. A file
-            // the source view degrades to a notice never previews (specs/diff-view.md),
-            // so its content is not held either.
-            if self.markdown_file() && diff.state == crate::diff::FileState::Normal {
-                self.preview_text = content;
-            } else {
-                self.preview_text.clear();
-            }
-            diff
-        };
+            self.preview_text.clear();
+        }
+        self.diff = diff;
         self.rebuild_visible();
         self.settle_read();
+    }
+
+    /// Build the read pane's File view for `path`: an over-budget blob (a model weight, a
+    /// vendored bundle) previews as the too-large notice without a read — reading it whole
+    /// would spike the UI thread before `build_file`'s budget could discard it — else the
+    /// worktree content is highlighted through the shared content-hash cache. Returns the
+    /// diff and the content read (empty for the notice), for a caller that also keeps the
+    /// raw content (specs/diff-view.md). The one build the source view and the search
+    /// preview share.
+    fn file_view(&mut self, path: &str) -> (FileDiff, String) {
+        let oversize = std::fs::metadata(self.repo.join(path))
+            .is_ok_and(|m| crate::diff::over_byte_budget(m.len() as usize));
+        if oversize {
+            (FileDiff::too_large_notice(path.to_string()), String::new())
+        } else {
+            let content = worktree_content(&self.repo, path);
+            let diff = self.cache.get_file(path.to_string(), &content, &self.highlighter);
+            (diff, content)
+        }
     }
 
     /// Clamp the cursor, scroll, and selection to the rebuilt `visible`, keeping the reader's
@@ -1279,6 +1423,17 @@ impl App {
         };
         let pct = (u32::from(navigator_len) * 100 / u32::from(axis_len)) as u16;
         self.set_navigator_share(pct);
+    }
+
+    /// Set the search screen's results share from a captured drag on its divider. The
+    /// review layout's shares are untouched (specs/search.md).
+    pub fn drag_search_divider(&mut self, axis_len: u16, offset: u16) {
+        if !self.divider_drag_active() || axis_len == 0 {
+            return;
+        }
+        let offset = offset.min(axis_len);
+        let pct = (u32::from(offset) * 100 / u32::from(axis_len)) as u16;
+        self.search_pct = pct.clamp(MIN_SEARCH_PCT, MAX_SEARCH_PCT);
     }
 
     /// Clamp and store one share through the active axis's single bounds/ownership contract.
@@ -2102,31 +2257,48 @@ impl App {
         self.mode = Mode::Composing { editing: Some(i) };
     }
 
-    // --- comment editor: a character caret into `input`; edits happen at the caret ---------
-    // `caret` is a char index in `0..=input.chars().count()`. Edits round-trip through a
-    // `Vec<char>` (comments are short), so every op is character-wise and multi-byte safe.
+    // --- text editing: a character caret into the active field ----------------------------
+    // The comment editor and the search input share one control set (specs/input.md,
+    // specs/search.md). `caret` is a char index in `0..=text.chars().count()`. Edits
+    // round-trip through a `Vec<char>` (both fields are short), so every op is
+    // character-wise and multi-byte safe.
 
-    /// Run a character-wise edit on the comment input: collect `input` into a `Vec<char>` with
-    /// the caret as an in-range index, hand both to `f`, then reassemble and re-clamp the caret.
-    /// A no-op when not composing. Every mutating `input_*` op routes through here, so the
-    /// guard / collect / reassemble lives once instead of seven times.
-    fn edit_input(&mut self, f: impl FnOnce(&mut Vec<char>, &mut usize)) {
-        if !self.composing() {
-            return;
+    /// The mode's editable text and caret: the comment draft while composing, the search
+    /// query while the overlay is open, nothing otherwise.
+    fn active_field(&mut self) -> Option<(&mut String, &mut usize)> {
+        match self.mode {
+            Mode::Composing { .. } => Some((&mut self.input, &mut self.caret)),
+            Mode::Search => self.search.as_mut().map(|s| (&mut s.query, &mut s.caret)),
+            Mode::Normal | Mode::List => None,
         }
-        let mut v: Vec<char> = self.input.chars().collect();
-        let mut caret = self.caret.min(v.len());
-        f(&mut v, &mut caret);
-        self.caret = caret.min(v.len());
-        self.input = v.into_iter().collect();
     }
 
-    /// Move the caret with a function of the current `Vec<char>` view; a no-op when not composing.
-    /// The read-only sibling of [`edit_input`](Self::edit_input) for the `caret_*` motions.
+    /// Run a character-wise edit on the active field: collect it into a `Vec<char>` with
+    /// the caret as an in-range index, hand both to `f`, then reassemble and re-clamp the
+    /// caret. Every mutating `input_*` op routes through here, so the guard / collect /
+    /// reassemble lives once instead of seven times. A changed search query re-queries
+    /// (specs/search.md).
+    fn edit_input(&mut self, f: impl FnOnce(&mut Vec<char>, &mut usize)) {
+        let searching = self.mode == Mode::Search;
+        let Some((text, caret_ref)) = self.active_field() else { return };
+        let mut v: Vec<char> = text.chars().collect();
+        let mut caret = (*caret_ref).min(v.len());
+        f(&mut v, &mut caret);
+        *caret_ref = caret.min(v.len());
+        let edited: String = v.into_iter().collect();
+        let changed = *text != edited;
+        *text = edited;
+        if searching && changed {
+            self.search_dirty = true;
+        }
+    }
+
+    /// Move the caret with a function of the current `Vec<char>` view; a no-op without an
+    /// active field. The read-only sibling of [`edit_input`](Self::edit_input).
     fn move_caret(&mut self, f: impl FnOnce(&[char], usize) -> usize) {
-        if self.composing() {
-            let v: Vec<char> = self.input.chars().collect();
-            self.caret = f(&v, self.caret.min(v.len()));
+        if let Some((text, caret)) = self.active_field() {
+            let v: Vec<char> = text.chars().collect();
+            *caret = f(&v, (*caret).min(v.len()));
         }
     }
 
@@ -2139,8 +2311,13 @@ impl App {
     }
 
     /// Insert pasted `text` at the caret as one unit, normalizing `\r\n`/`\r` to `\n`.
+    /// The single-line search input takes newlines as spaces (specs/search.md).
     pub fn input_paste(&mut self, text: &str) {
-        let norm: Vec<char> = text.replace("\r\n", "\n").replace('\r', "\n").chars().collect();
+        let mut norm = text.replace("\r\n", "\n").replace('\r', "\n");
+        if self.mode == Mode::Search {
+            norm = norm.replace('\n', " ");
+        }
+        let norm: Vec<char> = norm.chars().collect();
         self.edit_input(|v, caret| {
             let n = norm.len();
             v.splice(*caret..*caret, norm);
@@ -2307,7 +2484,7 @@ impl App {
                 };
                 Some(c.location())
             }
-            Mode::Normal | Mode::List => None,
+            Mode::Normal | Mode::List | Mode::Search => None,
         }
     }
 
@@ -2410,6 +2587,205 @@ impl App {
         }
     }
 
+    // --- Search overlay (specs/search.md) ------------------------------------------------
+
+    /// The active scope's annotation for `path` — the search overlay's file rows wear the
+    /// same marker and stats as the file list (specs/search.md).
+    pub(crate) fn changed_annotation(&self, path: &str) -> Option<&Annotation> {
+        self.changed.get(path)
+    }
+
+    /// `/`: open the search screen, from any tab, from either pane (specs/search.md).
+    pub fn open_search(&mut self) {
+        // A navigator-divider drag held from the review view must not become a search-split
+        // resize: cancel it so its remaining drag events are consumed, not acted on — the
+        // search divider only drags a gesture it started itself (specs/input.md).
+        self.cancel_divider_drag();
+        self.search = Some(SearchOverlay::new());
+        self.mode = Mode::Search;
+        // The empty query runs too: the warm engine answers it with its frecency-ranked
+        // files, so the screen is useful before the first keystroke.
+        self.search_dirty = true;
+    }
+
+    /// `esc`: drop the screen whole, place untouched (specs/search.md).
+    pub fn close_search(&mut self) {
+        if self.mode == Mode::Search {
+            self.mode = Mode::Normal;
+        }
+        self.search = None;
+        self.search_dirty = false;
+    }
+
+    /// `tab`: flip the mode, keeping the query. The held results paint at once and the
+    /// pick lands on the new mode's first result row (specs/search.md).
+    pub fn search_flip(&mut self) {
+        if let Some(s) = self.search.as_mut() {
+            s.search_mode = match s.search_mode {
+                SearchMode::Files => SearchMode::Code,
+                SearchMode::Code => SearchMode::Files,
+            };
+            s.pick = 0;
+            s.scroll.set(0);
+            s.preview_stale = true;
+        }
+    }
+
+    pub fn search_move(&mut self, delta: isize) {
+        // Off `Ready` the screen paints a message, not rows, so there is nothing to
+        // move onto — the same guard `search_open_pick` and `build_search_preview` uphold.
+        if let Some(s) = self.search.as_mut()
+            && s.phase == SearchPhase::Ready
+        {
+            let next = step(s.pick, delta, s.picks());
+            if next != s.pick {
+                s.pick = next;
+                s.preview_stale = true;
+            }
+        }
+    }
+
+    /// Land one completion. The dispatcher already dropped stale generations; while a
+    /// query is in flight the previous results stay painted. A landed set resets the pick
+    /// to the first result row (specs/search.md).
+    pub fn apply_search_completion(&mut self, completion: crate::search::SearchCompletion) {
+        let Some(s) = self.search.as_mut() else { return };
+        if let Some(e) = completion.error {
+            s.phase = SearchPhase::Error(e);
+            return;
+        }
+        match completion.results {
+            Some(results) => {
+                s.results = results;
+                s.phase = SearchPhase::Ready;
+                s.pick = 0;
+                s.scroll.set(0);
+                s.preview_stale = true;
+            }
+            None => s.phase = SearchPhase::Indexing,
+        }
+    }
+
+    /// Build the picked result's preview, once the pick has settled — the event loop
+    /// calls this only with no input pending, so a sweep never waits on it
+    /// (specs/search.md Preview).
+    pub fn build_search_preview(&mut self) {
+        let Some(s) = self.search.as_ref() else { return };
+        if !s.preview_stale {
+            return;
+        }
+        // The pick's target, or `None` when nothing is pickable (off `Ready`, or empty).
+        let target =
+            (s.phase == SearchPhase::Ready).then(|| s.picked()).flatten().map(
+                |picked| match picked {
+                    PickedResult::File(f) => (f.path.clone(), None),
+                    PickedResult::Code(c) => (c.path.clone(), Some((c.line, c.spans.clone()))),
+                },
+            );
+        let Some((path, hit)) = target else {
+            if let Some(s) = self.search.as_mut() {
+                s.preview = None;
+                s.preview_stale = false;
+            }
+            return;
+        };
+        // A deleted file reads empty and previews empty; an over-budget file previews as the
+        // File view's notice (specs/search.md).
+        let diff = self.file_view(&path).0;
+        if let Some(s) = self.search.as_mut() {
+            s.preview = Some(SearchPreview {
+                path,
+                diff,
+                hit,
+                scroll: std::cell::Cell::new(0),
+                center: std::cell::Cell::new(true),
+            });
+            s.preview_stale = false;
+        }
+    }
+
+    /// `PageUp`/`PageDown`: scroll the settled preview. The renderer clamps; the next
+    /// pick re-centers (specs/search.md).
+    pub fn scroll_search_preview(&mut self, delta: isize) {
+        if let Some(p) = self.search.as_ref().and_then(|s| s.preview.as_ref()) {
+            p.center.set(false);
+            p.scroll.set(p.scroll.get().saturating_add_signed(delta));
+        }
+    }
+
+    /// A landed poll's preview reconcile: rebuild the previewed file in place, keeping
+    /// the scroll — the hit line clamps at paint (specs/search.md, `overview.md`
+    /// Continuity).
+    pub fn refresh_search_preview(&mut self) {
+        let Some(path) =
+            self.search.as_ref().and_then(|s| s.preview.as_ref()).map(|p| p.path.clone())
+        else {
+            return;
+        };
+        let diff = self.file_view(&path).0;
+        if let Some(pv) = self.search.as_mut().and_then(|s| s.preview.as_mut()) {
+            pv.diff = diff;
+        }
+    }
+
+    /// `enter`: open the picked result in `All files` whatever tab the search left — the
+    /// file in the read pane, the navigator selection onto it, ancestors expanded; a code
+    /// pick lands the cursor on its line, clamped into the file's current length. A
+    /// vanished path opens nothing and the screen stays (specs/search.md).
+    pub fn search_open_pick(&mut self) -> Result<()> {
+        let Some(s) = self.search.as_ref() else { return Ok(()) };
+        // Off `Ready`, the painted screen shows no rows — held results are stale and
+        // invisible, so nothing opens (specs/search.md).
+        if s.phase != SearchPhase::Ready {
+            return Ok(());
+        }
+        let (path, line) = match s.picked() {
+            Some(PickedResult::File(f)) => (f.path.clone(), None),
+            Some(PickedResult::Code(c)) => (c.path.clone(), Some(c.line)),
+            None => return Ok(()),
+        };
+        if !self.repo.join(&path).is_file() {
+            return Ok(());
+        }
+        self.close_search();
+        // Opening is a deliberate leave: the origin tab stashes its place on the switch,
+        // kept for `1`/`2`/`3` (specs/search.md).
+        if self.tab != Tab::AllFiles {
+            self.set_tab(Tab::AllFiles)?;
+        }
+        // The pick feeds the engine's frecency store, so ranking improves with use.
+        self.search_track = Some(path.clone());
+        let mut expanded = false;
+        let mut dir = path.as_str();
+        while let Some((parent, _)) = dir.rsplit_once('/') {
+            expanded |= self.set_dir_expanded(parent, true);
+            dir = parent;
+        }
+        if expanded {
+            // Re-flatten the rows only: the picked file is already in `entries` (search
+            // never returns an ignored path), so the worktree walk `apply_dir_change`
+            // runs for lazy ignored children would block the pick for nothing
+            // (policies/ux-responsiveness.md).
+            self.rebuild_file_rows();
+        }
+        self.reset_diff_view();
+        // A same-file pick must land on the hit line in source, not behind an open
+        // markdown preview (`set_file_view` keeps the choice for a same-path open).
+        self.preview = false;
+        self.set_file_view(&path);
+        if let Some(fi) = self.file_row_of_path(&path) {
+            self.file_cursor = fi;
+            self.reveal_files = true;
+        }
+        self.focus = Focus::Diff;
+        if let Some(line) = line {
+            let last = self.visible.len().saturating_sub(1);
+            self.diff_cursor = (line.saturating_sub(1) as usize).min(last);
+        }
+        self.reveal_diff = true;
+        Ok(())
+    }
+
     pub fn open_list(&mut self) {
         if !self.store.is_empty() {
             self.list_cursor = 0;
@@ -2449,6 +2825,25 @@ impl App {
                     (A::DeleteComment, Normal),
                 ];
             }
+            Mode::Search => {
+                // With nothing pickable — warming, errored, or no matches — only the
+                // mode flip and the exit are offered, so the bar never lists a key that
+                // would not work (specs/search.md).
+                let pickable = self
+                    .search
+                    .as_ref()
+                    .is_some_and(|s| s.phase == SearchPhase::Ready && s.picks() > 0);
+                return if pickable {
+                    vec![
+                        (A::FlipSearchMode, Primary),
+                        (A::PickResult, Normal),
+                        (A::OpenResult, Normal),
+                        (A::CloseSearch, Normal),
+                    ]
+                } else {
+                    vec![(A::FlipSearchMode, Primary), (A::CloseSearch, Normal)]
+                };
+            }
             Mode::Normal => {}
         }
 
@@ -2460,6 +2855,7 @@ impl App {
             if self.pr_snapshot().is_some() {
                 out.push((A::OpenPr, Primary));
             }
+            out.push((A::Search, Normal));
             out.push((A::NavigatorPosition, Orientation));
             out.push((A::Tabs, Orientation));
             out.push((A::Refresh, Orientation));
@@ -2526,6 +2922,9 @@ impl App {
         if !out.iter().any(|&(a, _)| a == A::Scope) {
             out.push((A::Scope, Normal));
         }
+
+        // Search opens from any tab, so its hint rides every context (specs/search.md).
+        out.push((A::Search, Normal));
 
         // Once a comment is written, sending is the next relevant move — just below the primary
         // (every branch above pushed a primary, so index 1 is in range).

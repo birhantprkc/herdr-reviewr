@@ -1616,3 +1616,525 @@ fn an_anchor_in_a_comment_body_jumps_past_the_snippet_offset() {
     assert!(!out.contains("+    new"), "the snippet scrolled away:\n{out}");
     assert!(!out.contains("jump go"), "the body's top scrolled away:\n{out}");
 }
+
+// Search screen rendering (specs/search.md).
+mod search_screen_render {
+    use super::{common, dump, render, render_size};
+    use common::{Repo, app_on, enter_tab};
+    use herdr_reviewr::app::{App, Mode, Tab};
+    use herdr_reviewr::keymap::default_keymap;
+    use herdr_reviewr::land_search_completion;
+    use herdr_reviewr::search::{CodeHit, FileHit, SearchCompletion, SearchResults};
+    use herdr_reviewr::{handle_key, handle_mouse, ui};
+    use ratatui::crossterm::event::{
+        KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
+    use ratatui::layout::Rect;
+
+    const AREA: Rect = Rect { x: 0, y: 0, width: 140, height: 40 };
+
+    fn open_on_all_files(repo: &Repo) -> App {
+        let mut app = app_on(repo);
+        enter_tab(&mut app, Tab::AllFiles);
+        handle_key(&mut app, KeyEvent::from(KeyCode::Char('/')), AREA, default_keymap()).unwrap();
+        assert_eq!(app.mode, Mode::Search);
+        app
+    }
+
+    fn key(app: &mut App, code: KeyCode) {
+        handle_key(app, KeyEvent::from(code), AREA, default_keymap()).unwrap();
+    }
+
+    fn land(app: &mut App, results: SearchResults) {
+        let completion = SearchCompletion { generation: 1, results: Some(results), error: None };
+        land_search_completion(app, completion, 1);
+    }
+
+    #[test]
+    fn screen_shows_band_chips_and_both_modes() {
+        let repo = Repo::init();
+        repo.write("src/registry.rs", "fn resolve() {}\nregistry.resolve()\n");
+        repo.commit_all("c");
+        let mut app = open_on_all_files(&repo);
+        for c in "reg".chars() {
+            key(&mut app, KeyCode::Char(c));
+        }
+        land(
+            &mut app,
+            SearchResults {
+                files: vec![FileHit { path: "src/registry.rs".into(), spans: vec![(4, 7)] }],
+                code: vec![
+                    CodeHit {
+                        path: "src/registry.rs".into(),
+                        line: 1,
+                        text: "fn resolve() {}".into(),
+                        spans: vec![(3, 6)],
+                        def: true,
+                    },
+                    CodeHit {
+                        path: "src/registry.rs".into(),
+                        line: 2,
+                        text: "registry.resolve()".into(),
+                        spans: vec![(0, 3)],
+                        def: false,
+                    },
+                ],
+                file_total: 4,
+                code_more: true,
+            },
+        );
+
+        // Files mode: the band, both chips with live counts, path rows, the Files clip.
+        let out = render(&app);
+        let band = out.lines().find(|l| l.contains("> reg")).expect("the band row renders");
+        assert!(band.contains("files 4 │ code 2+"), "both chips carry a live count: {band}");
+        assert!(!band.contains('⇥'), "the chips drop the flip glyph — the footer owns the key");
+        assert!(out.contains("src/registry.rs"), "a path match renders as a file row");
+        assert!(out.contains("… more"), "a clipped list marks that there is more");
+        assert!(out.contains("─ results"), "the results pane carries a titled rule");
+        assert!(out.contains("─ preview"), "the divider row carries the preview title");
+        assert!(out.contains("pick") && out.contains("open"), "the screen's footer shows");
+
+        // Code mode: grouped rows under a header, `line:` locators, the badge, the clip.
+        key(&mut app, KeyCode::Tab);
+        let out = render(&app);
+        assert!(out.contains("> reg"), "the flip keeps the query");
+        assert!(out.contains("1: fn resolve"), "a match row shows its line number");
+        assert!(out.contains("2: registry.resolve"), "grouped rows keep engine order");
+        assert!(out.contains("def"), "an engine-classified definition wears the badge");
+        assert!(out.contains("… more"), "a cut-short grep shows there is more");
+        let header_rows =
+            out.lines().filter(|l| l.contains("src/registry.rs") && !l.contains(':')).count();
+        assert!(header_rows >= 1, "the file emits one header row: {out}");
+    }
+
+    #[test]
+    fn screen_shows_indexing_until_warm() {
+        let repo = Repo::init();
+        repo.write("a.rs", "fn a() {}\n");
+        repo.commit_all("c");
+        let app = open_on_all_files(&repo);
+        let out = render(&app);
+        assert!(out.contains("indexing…"), "the screen reads indexing… before the first scan");
+        assert!(out.contains("files │ code"), "the count slots stay empty while warming");
+    }
+
+    #[test]
+    fn no_matches_only_where_the_engine_looked() {
+        let repo = Repo::init();
+        repo.write("a.rs", "fn a() {}\n");
+        repo.commit_all("c");
+        let mut app = open_on_all_files(&repo);
+        land(&mut app, SearchResults::default());
+        let out = render(&app);
+        assert!(out.contains("no matches"), "an empty warm Files result reads no matches");
+
+        // An empty query lists nothing in Code mode — no copy at all (specs/search.md).
+        key(&mut app, KeyCode::Tab);
+        let out = render(&app);
+        assert!(!out.contains("no matches"), "an empty query in Code mode lists nothing");
+    }
+
+    #[test]
+    fn click_picks_then_opens_and_chip_click_flips() {
+        let repo = Repo::init();
+        repo.write("a.rs", "one\ntwo\n");
+        repo.write("b.rs", "three\n");
+        repo.commit_all("c");
+        let mut app = open_on_all_files(&repo);
+        land(
+            &mut app,
+            SearchResults {
+                files: vec![
+                    FileHit { path: "a.rs".into(), spans: vec![] },
+                    FileHit { path: "b.rs".into(), spans: vec![] },
+                ],
+                code: Vec::new(),
+                file_total: 2,
+                code_more: false,
+            },
+        );
+        // Paint once so the screen scroll settles, then resolve rows the frame mapped.
+        let _ = dump(&render_size(&app, 140, 40));
+        let hit_row = |app: &App, pick: usize| {
+            (0..40u16)
+                .find(|&y| ui::search_target(app, AREA, 30, y) == Some(ui::SearchTarget::Row(pick)))
+                .expect("the result row is clickable")
+        };
+        let click = |app: &mut App, row: u16| {
+            let event = MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 30,
+                row,
+                modifiers: KeyModifiers::NONE,
+            };
+            handle_mouse(app, event, AREA, &[], default_keymap()).unwrap();
+        };
+
+        // A click on an unpicked row picks it; a second click opens it (specs/search.md).
+        let row = hit_row(&app, 1);
+        click(&mut app, row);
+        assert_eq!(app.mode, Mode::Search, "the first click only picks");
+        assert_eq!(app.search.as_ref().unwrap().pick, 1);
+        click(&mut app, row);
+        assert_eq!(app.mode, Mode::Normal, "the second click opens the pick");
+        assert_eq!(app.diff_path.as_deref(), Some("b.rs"));
+
+        // A chip click flips the mode.
+        let mut app = open_on_all_files(&repo);
+        let _ = dump(&render_size(&app, 140, 40));
+        let band_y = ui::body_rect(AREA).y;
+        let chip_x = (0..140u16)
+            .find(|&x| ui::search_target(&app, AREA, x, band_y) == Some(ui::SearchTarget::Chips))
+            .expect("the chips are clickable");
+        let event = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: chip_x,
+            row: band_y,
+            modifiers: KeyModifiers::NONE,
+        };
+        handle_mouse(&mut app, event, AREA, &[], default_keymap()).unwrap();
+        assert_eq!(
+            app.search.as_ref().unwrap().search_mode,
+            herdr_reviewr::app::SearchMode::Code,
+            "a chip click flips the mode"
+        );
+    }
+
+    #[test]
+    fn preview_centers_and_bands_the_hit() {
+        let repo = Repo::init();
+        let lines: Vec<String> = (1..=60).map(|i| format!("line_{i}")).collect();
+        let body = lines.join("\n") + "\n";
+        repo.write("a.rs", &body);
+        repo.commit_all("c");
+        let mut app = open_on_all_files(&repo);
+        land(
+            &mut app,
+            SearchResults {
+                files: Vec::new(),
+                code: vec![CodeHit {
+                    path: "a.rs".into(),
+                    line: 30,
+                    text: "line_30".into(),
+                    spans: vec![(0, 7)],
+                    def: false,
+                }],
+                file_total: 0,
+                code_more: false,
+            },
+        );
+        key(&mut app, KeyCode::Tab);
+        app.build_search_preview();
+
+        let buf = render_size(&app, 140, 40);
+        let out = dump(&buf);
+        assert!(out.contains("─ preview · a.rs"), "the pane title names the previewed file");
+        let y = out
+            .lines()
+            .position(|l| l.contains("30 line_30"))
+            .expect("the hit line is visible with its number") as u16;
+        let x = out.lines().nth(y as usize).unwrap().find("line_30").unwrap() as u16;
+        let style = buf.cell((x, y)).expect("cell").style();
+        assert_eq!(
+            style.bg,
+            Some(app.palette().match_hl),
+            "the hit's matched span wears the match highlight: {style:?}"
+        );
+        assert!(!out.contains(" 1 line_1\n"), "the hit is centered, not previewed from the top");
+
+        // PageDown moves the pane; the scroll survives the next paint.
+        key(&mut app, KeyCode::PageDown);
+        let scrolled = app.search.as_ref().unwrap().preview.as_ref().unwrap().scroll.get();
+        let _ = render_size(&app, 140, 40);
+        assert!(scrolled > 0, "PageDown scrolls the preview");
+    }
+
+    #[test]
+    fn preview_highlight_lands_on_the_match_under_indentation() {
+        // The worker trims each grep line's leading indentation and reports offsets into the
+        // trimmed text; the preview keeps the true indentation, so the highlight must shift
+        // over it and still cover the match, not slide left into the whitespace or the
+        // preceding tokens (specs/search.md).
+        let repo = Repo::init();
+        let mut lines: Vec<String> = (1..=60).map(|i| format!("let x{i} = {i};")).collect();
+        lines[29] = "    fn resolve() {}".to_string(); // line 30, four-space indented
+        repo.write("a.rs", &(lines.join("\n") + "\n"));
+        repo.commit_all("c");
+        let mut app = open_on_all_files(&repo);
+        land(
+            &mut app,
+            SearchResults {
+                files: Vec::new(),
+                // As the worker emits it: the trimmed line, offsets into the trimmed text.
+                code: vec![CodeHit {
+                    path: "a.rs".into(),
+                    line: 30,
+                    text: "fn resolve() {}".into(),
+                    spans: vec![(3, 10)], // "resolve" within the trimmed line
+                    def: true,
+                }],
+                file_total: 0,
+                code_more: false,
+            },
+        );
+        key(&mut app, KeyCode::Tab);
+        app.build_search_preview();
+
+        let buf = render_size(&app, 140, 40);
+        let out = dump(&buf);
+        // The results row above is correctly trimmed; assert on the preview row, which keeps
+        // the true indentation — that is where the trimmed spans had to be shifted.
+        let preview_at =
+            out.lines().position(|l| l.contains("─ preview")).expect("the preview divider");
+        let below = out
+            .lines()
+            .skip(preview_at + 1)
+            .position(|l| l.contains("fn resolve() {}"))
+            .expect("the hit line previews with its indentation");
+        let y = (preview_at + 1 + below) as u16;
+        let line = out.lines().nth(y as usize).unwrap();
+        let rx = line.find("resolve").unwrap() as u16;
+        assert_eq!(
+            buf.cell((rx, y)).unwrap().style().bg,
+            Some(app.palette().match_hl),
+            "the highlight lands on the match under indentation",
+        );
+        // The indentation and the preceding `fn ` keep the cursor band, not the match highlight.
+        let fx = line.find("fn ").unwrap() as u16;
+        assert_ne!(
+            buf.cell((fx, y)).unwrap().style().bg,
+            Some(app.palette().match_hl),
+            "the highlight did not slide left into the un-trimmed indentation",
+        );
+    }
+
+    #[test]
+    fn tiny_screen_keeps_the_band() {
+        let repo = Repo::init();
+        repo.write("a.rs", "one\n");
+        repo.commit_all("c");
+        let mut app = open_on_all_files(&repo);
+        land(
+            &mut app,
+            SearchResults {
+                files: vec![FileHit { path: "a.rs".into(), spans: vec![] }],
+                code: Vec::new(),
+                file_total: 1,
+                code_more: false,
+            },
+        );
+        app.build_search_preview();
+        let out = dump(&render_size(&app, 24, 6));
+        assert!(out.contains('>'), "the input band keeps its one row at tiny sizes");
+    }
+
+    #[test]
+    fn empty_query_shows_a_placeholder_and_no_preview() {
+        let repo = Repo::init();
+        repo.write("a.rs", "one\n");
+        repo.commit_all("c");
+        let app = open_on_all_files(&repo);
+        // Warm but no results landed yet: the band teaches, the preview isn't blank.
+        let out = render(&app);
+        assert!(out.contains("Search files and code…"), "the empty query shows a placeholder");
+        let mut app = app;
+        land(&mut app, SearchResults::default());
+        let out = render(&app);
+        assert!(out.contains("no preview"), "nothing to preview shows a dim notice, not a blank");
+    }
+
+    #[test]
+    fn an_elided_file_result_still_highlights_the_visible_match() {
+        // A head-elided path must still mark a match that survives in the shown tail — the
+        // highlight is unconditional, remapped across the elision, not dropped (specs/search.md).
+        let repo = Repo::init();
+        let path = "aaaaaaaaaaaaaaaaaaaa/bbbbbbbbbbbbbbbbbbbb/target_match.rs";
+        repo.write(path, "x\n");
+        repo.commit_all("c");
+        let mut app = open_on_all_files(&repo);
+        let at = path.find("target").unwrap() as u32;
+        land(
+            &mut app,
+            SearchResults {
+                files: vec![FileHit { path: path.into(), spans: vec![(at, at + 6)] }],
+                code: Vec::new(),
+                file_total: 1,
+                code_more: false,
+            },
+        );
+        // A pane narrow enough to head-elide the long path onto its tail.
+        let buf = render_size(&app, 44, 20);
+        let out = dump(&buf);
+        let y = out
+            .lines()
+            .position(|l| l.contains('…') && l.contains("target"))
+            .expect("the elided path row shows its tail") as u16;
+        let line = out.lines().nth(y as usize).unwrap();
+        let tx = line.find("target").unwrap() as u16;
+        assert_eq!(
+            buf.cell((tx, y)).unwrap().style().bg,
+            Some(app.palette().match_hl),
+            "the match highlight survives the head-elision on the visible tail",
+        );
+    }
+
+    #[test]
+    fn long_query_scrolls_to_keep_the_caret_visible() {
+        let repo = Repo::init();
+        repo.write("a.rs", "one\n");
+        repo.commit_all("c");
+        let mut app = open_on_all_files(&repo);
+        land(&mut app, SearchResults::default()); // warm, so the chips have a fixed width
+        // The caret sits at the end of the query; a band narrower than the query must
+        // scroll its head off and keep the tail (and caret) on screen.
+        let query = "aaaaHEAD_bbbbccccddddeeeeffffgggg_TAILzzzz";
+        for c in query.chars() {
+            key(&mut app, KeyCode::Char(c));
+        }
+        let out = dump(&render_size(&app, 44, 12));
+        let band = out.lines().find(|l| l.contains("TAIL")).expect("the caret end stays visible");
+        assert!(!band.contains("HEAD"), "the overflowing head scrolls off the band: {band:?}");
+    }
+}
+
+// Style-level emphasis coverage for the match rows (specs/search.md).
+mod search_row_emphasis {
+    use super::{common, dump, render_size};
+    use common::{Repo, app_on, enter_tab};
+    use herdr_reviewr::app::Tab;
+    use herdr_reviewr::handle_key;
+    use herdr_reviewr::keymap::default_keymap;
+    use herdr_reviewr::land_search_completion;
+    use herdr_reviewr::search::{CodeHit, SearchCompletion, SearchResults};
+    use ratatui::crossterm::event::{KeyCode, KeyEvent};
+    use ratatui::layout::Rect;
+
+    const AREA: Rect = Rect { x: 0, y: 0, width: 140, height: 40 };
+
+    fn code_only(hit: CodeHit) -> SearchCompletion {
+        SearchCompletion {
+            generation: 1,
+            results: Some(SearchResults {
+                files: Vec::new(),
+                code: vec![hit],
+                file_total: 0,
+                code_more: false,
+            }),
+            error: None,
+        }
+    }
+
+    /// A code row too wide for the pane clips around its first matched span, keeping the
+    /// `line:` locator, marking the cut head with `…`, and keeping the `def` badge
+    /// (specs/search.md).
+    #[test]
+    fn clipped_code_row_keeps_and_emphasizes_the_match() {
+        let repo = Repo::init();
+        repo.write("a.rs", "fn a() {}\n");
+        repo.commit_all("c");
+        let mut app = app_on(&repo);
+        enter_tab(&mut app, Tab::AllFiles);
+        handle_key(&mut app, KeyEvent::from(KeyCode::Char('/')), AREA, default_keymap()).unwrap();
+
+        // A long head of `x`s pushes the match past the pane; `needle_marker` is 13 bytes.
+        let text = format!("{}needle_marker", "x".repeat(200));
+        let start = 200u32;
+        let hit = CodeHit {
+            path: "a.rs".into(),
+            line: 1,
+            text,
+            spans: vec![(start, start + 13)],
+            def: true,
+        };
+        land_search_completion(&mut app, code_only(hit), 1);
+        handle_key(&mut app, KeyEvent::from(KeyCode::Tab), AREA, default_keymap()).unwrap();
+
+        let buf = render_size(&app, 140, 40);
+        let out = dump(&buf);
+        let row = out
+            .lines()
+            .find(|l| l.contains("needle_marker"))
+            .expect("the clipped row keeps the first matched span visible");
+        assert!(row.contains("1:"), "the line locator survives the clip: {row}");
+        assert!(row.contains("…x"), "the cut head is marked with an ellipsis: {row}");
+        assert!(row.trim_end().ends_with("def"), "the badge survives the clip: {row}");
+
+        let y = out.lines().position(|l| l.contains("needle_marker")).unwrap() as u16;
+        // Cell column = char count before the needle (every cell here is one column wide).
+        let byte = row.find("needle_marker").unwrap();
+        let x = row[..byte].chars().count() as u16;
+        let style = buf.cell((x, y)).expect("cell").style();
+        assert_eq!(
+            style.bg,
+            Some(app.palette().match_hl),
+            "the matched span wears the match highlight: {style:?}"
+        );
+    }
+
+    /// A tab-indented code row expands its tabs to spaces, so the indentation shows and
+    /// the emphasis lands on the matched word, not shifted by the collapsed tabs
+    /// (specs/search.md).
+    #[test]
+    fn tab_indented_code_row_expands_and_emphasizes() {
+        let repo = Repo::init();
+        repo.write("a.rs", "fn a() {}\n");
+        repo.commit_all("c");
+        let mut app = app_on(&repo);
+        enter_tab(&mut app, Tab::AllFiles);
+        handle_key(&mut app, KeyEvent::from(KeyCode::Char('/')), AREA, default_keymap()).unwrap();
+
+        // Two leading tabs, then `needle` — the match is at bytes 2..8 of the raw line.
+        let hit = CodeHit {
+            path: "a.rs".into(),
+            line: 1,
+            text: "\t\tneedle here".into(),
+            spans: vec![(2, 8)],
+            def: false,
+        };
+        land_search_completion(&mut app, code_only(hit), 1);
+        handle_key(&mut app, KeyEvent::from(KeyCode::Tab), AREA, default_keymap()).unwrap();
+
+        let buf = render_size(&app, 140, 40);
+        let out = dump(&buf);
+        let y = out.lines().position(|l| l.contains("needle")).unwrap();
+        let row = out.lines().nth(y).unwrap();
+        // Eight spaces of expanded indent sit between the locator and `needle`.
+        assert!(row.contains("1:         needle"), "tabs expand to spaces: {row:?}");
+        let x = row.find("needle").unwrap() as u16;
+        let style = buf.cell((x, y as u16)).expect("cell").style();
+        assert_eq!(
+            style.bg,
+            Some(app.palette().match_hl),
+            "the highlight tracks the word past the expanded tabs: {style:?}"
+        );
+    }
+
+    /// A multi-byte head forced through the clip path must paint, not panic — the
+    /// engine's span offsets are bytes and the cut walks char boundaries.
+    #[test]
+    fn clipped_multibyte_code_row_paints() {
+        let repo = Repo::init();
+        repo.write("a.rs", "fn a() {}\n");
+        repo.commit_all("c");
+        let mut app = app_on(&repo);
+        enter_tab(&mut app, Tab::AllFiles);
+        handle_key(&mut app, KeyEvent::from(KeyCode::Char('/')), AREA, default_keymap()).unwrap();
+
+        // A wide multi-byte head (each `é` is two bytes) forces the clip's char-boundary walk.
+        let head = "é".repeat(200);
+        let start = head.len() as u32;
+        let hit = CodeHit {
+            path: "a.rs".into(),
+            line: 1,
+            text: format!("{head}needle tail"),
+            spans: vec![(start, start + 6)],
+            def: false,
+        };
+        land_search_completion(&mut app, code_only(hit), 1);
+        handle_key(&mut app, KeyEvent::from(KeyCode::Tab), AREA, default_keymap()).unwrap();
+
+        let out = dump(&render_size(&app, 140, 40));
+        assert!(out.contains("needle"), "a clipped multibyte row paints without panicking: {out}");
+    }
+}

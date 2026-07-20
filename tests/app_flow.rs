@@ -3307,3 +3307,701 @@ fn the_worker_coalesces_queued_jobs_keeping_their_flags() {
     assert!(res_rx.recv().is_err(), "exactly one completion lands for the coalesced pair");
     worker.join().unwrap();
 }
+
+// --- Search overlay (specs/search.md) --------------------------------------------------
+
+mod search_overlay {
+    use super::{common, press};
+    use common::{Repo, app_on, enter_tab};
+    use herdr_reviewr::app::{App, Focus, Mode, SearchPhase, Tab};
+    use herdr_reviewr::keymap::{Keymap, default_keymap};
+    use herdr_reviewr::land_search_completion;
+    use herdr_reviewr::search::{CodeHit, FileHit, SearchCompletion, SearchJob, SearchResults};
+    use ratatui::crossterm::event::KeyCode;
+
+    fn results(files: Vec<FileHit>, code: Vec<CodeHit>) -> SearchResults {
+        SearchResults { file_total: files.len(), files, code, code_more: false }
+    }
+
+    fn done(generation: u64, results: SearchResults) -> SearchCompletion {
+        SearchCompletion { generation, results: Some(results), error: None }
+    }
+
+    fn file_hit(path: &str) -> FileHit {
+        FileHit { path: path.into(), spans: Vec::new() }
+    }
+
+    fn code_hit(path: &str, line: u64, text: &str) -> CodeHit {
+        CodeHit { path: path.into(), line, text: text.into(), spans: vec![], def: false }
+    }
+
+    fn open(app: &mut App, keymap: &Keymap) {
+        press(app, keymap, KeyCode::Char('/'));
+        assert_eq!(app.mode, Mode::Search, "the search screen opens");
+    }
+
+    #[test]
+    fn slash_opens_from_any_tab() {
+        let repo = Repo::init();
+        repo.write("a.rs", "fn a() {}\n");
+        repo.commit_all("c");
+        let keymap = default_keymap().clone();
+        let mut app = app_on(&repo);
+
+        // Every tab's footer carries the hint, and `/` opens from each (specs/search.md).
+        for tab in [Tab::Changes, Tab::Pr, Tab::AllFiles] {
+            enter_tab(&mut app, tab);
+            let actions: Vec<_> = app.footer_actions().into_iter().map(|(a, _)| a).collect();
+            assert!(
+                actions.contains(&herdr_reviewr::app::FooterAction::Search),
+                "the {tab:?} footer carries the search hint: {actions:?}"
+            );
+            open(&mut app, &keymap);
+            assert!(app.search_dirty, "the open dispatches the empty query");
+            press(&mut app, &keymap, KeyCode::Esc);
+            assert_eq!(app.tab, tab, "esc returns to the tab it left");
+        }
+    }
+
+    #[test]
+    fn flip_keeps_query_and_lands_pick_on_first_row() {
+        use herdr_reviewr::app::SearchMode;
+        let repo = Repo::init();
+        for f in ["a.rs", "b.rs", "c.rs"] {
+            repo.write(f, "one\n");
+        }
+        repo.commit_all("c");
+        let keymap = default_keymap().clone();
+        let mut app = app_on(&repo);
+        enter_tab(&mut app, Tab::AllFiles);
+        open(&mut app, &keymap);
+        for c in "one".chars() {
+            press(&mut app, &keymap, KeyCode::Char(c));
+        }
+        // Files has three rows, Code just one: flipping onto the shorter set must reset
+        // the pick, or a stale index would point past the code results.
+        land_search_completion(
+            &mut app,
+            done(
+                1,
+                results(
+                    vec![file_hit("a.rs"), file_hit("b.rs"), file_hit("c.rs")],
+                    vec![code_hit("a.rs", 1, "one")],
+                ),
+            ),
+            1,
+        );
+        press(&mut app, &keymap, KeyCode::Down);
+        press(&mut app, &keymap, KeyCode::Down);
+        assert_eq!(app.search.as_ref().unwrap().pick, 2, "the pick moved off the first row");
+
+        press(&mut app, &keymap, KeyCode::Tab);
+        let s = app.search.as_ref().unwrap();
+        assert_eq!(s.search_mode, SearchMode::Code);
+        assert_eq!(s.query, "one", "the flip keeps the query");
+        assert_eq!(s.pick, 0, "the flip lands the pick on the first result row");
+        assert!(s.picked().is_some(), "the reset pick points at a real code result");
+        assert_eq!(s.picks(), 1, "the held code results paint at once");
+
+        // Move within Code, flip back to Files: the pick resets there too.
+        press(&mut app, &keymap, KeyCode::Tab);
+        let s = app.search.as_ref().unwrap();
+        assert_eq!(s.search_mode, SearchMode::Files);
+        assert_eq!(s.pick, 0, "flipping back resets the pick to the first file row");
+    }
+
+    /// A world poll reconciles the preview but never reshapes the results or the pick —
+    /// only an edit re-queries (specs/search.md, overview.md Continuity O6).
+    #[test]
+    fn poll_never_reshapes_results_or_pick() {
+        let repo = Repo::init();
+        repo.write("a.rs", "one\n");
+        repo.write("b.rs", "two\n");
+        repo.commit_all("c");
+        let keymap = default_keymap().clone();
+        let mut app = app_on(&repo);
+        enter_tab(&mut app, Tab::AllFiles);
+        open(&mut app, &keymap);
+        land_search_completion(
+            &mut app,
+            done(3, results(vec![file_hit("a.rs"), file_hit("b.rs")], Vec::new())),
+            3,
+        );
+        press(&mut app, &keymap, KeyCode::Down);
+        let before = app.search.as_ref().unwrap();
+        let (results_before, pick_before) = (before.results.clone(), before.pick);
+
+        // A full synchronous reconcile — the poll path.
+        app.reload().unwrap();
+
+        let after = app.search.as_ref().unwrap();
+        assert_eq!(
+            after.results, results_before,
+            "a poll leaves the result set and counts untouched"
+        );
+        assert_eq!(after.pick, pick_before, "a poll never moves the pick");
+    }
+
+    #[test]
+    fn superseded_result_never_paints() {
+        let repo = Repo::init();
+        repo.write("a.rs", "fn a() {}\n");
+        repo.commit_all("c");
+        let keymap = default_keymap().clone();
+        let mut app = app_on(&repo);
+        enter_tab(&mut app, Tab::AllFiles);
+        open(&mut app, &keymap);
+
+        let stale = done(1, results(vec![file_hit("a.rs")], Vec::new()));
+        assert!(!land_search_completion(&mut app, stale, 2), "stale generation");
+        let s = app.search.as_ref().unwrap();
+        assert!(s.results.files.is_empty(), "a superseded result set never paints");
+        assert_eq!(s.phase, SearchPhase::Indexing);
+
+        let live = done(2, results(vec![file_hit("a.rs")], Vec::new()));
+        assert!(land_search_completion(&mut app, live, 2));
+        assert_eq!(app.search.as_ref().unwrap().results.files.len(), 1);
+    }
+
+    #[test]
+    fn open_lands_on_clamped_line() {
+        let repo = Repo::init();
+        repo.write("a.rs", "one\ntwo\nthree\n");
+        repo.commit_all("c");
+        let keymap = default_keymap().clone();
+        let mut app = app_on(&repo);
+        enter_tab(&mut app, Tab::AllFiles);
+        open(&mut app, &keymap);
+
+        let hit = code_hit("a.rs", 99, "three");
+        land_search_completion(&mut app, done(1, results(Vec::new(), vec![hit])), 1);
+        press(&mut app, &keymap, KeyCode::Tab); // code results live in `Code` mode
+        press(&mut app, &keymap, KeyCode::Enter);
+
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.search.is_none());
+        assert_eq!(app.diff_path.as_deref(), Some("a.rs"));
+        assert_eq!(app.focus, Focus::Diff);
+        assert_eq!(app.diff_cursor, app.visible.len() - 1, "line 99 clamps to the last row");
+        assert_eq!(app.search_track.as_deref(), Some("a.rs"), "the pick feeds frecency");
+    }
+
+    #[test]
+    fn file_pick_moves_selection_and_expands_ancestors() {
+        let repo = Repo::init();
+        repo.write("src/deep/a.rs", "fn a() {}\n");
+        repo.write("top.rs", "fn t() {}\n");
+        repo.commit_all("c");
+        let keymap = default_keymap().clone();
+        let mut app = app_on(&repo);
+        enter_tab(&mut app, Tab::AllFiles);
+        open(&mut app, &keymap);
+
+        land_search_completion(
+            &mut app,
+            done(1, results(vec![file_hit("src/deep/a.rs")], Vec::new())),
+            1,
+        );
+        press(&mut app, &keymap, KeyCode::Enter);
+
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.diff_path.as_deref(), Some("src/deep/a.rs"));
+        let row = &app.file_rows[app.file_cursor];
+        let idx = row.file_index().expect("the selection lands on the file's row");
+        assert_eq!(app.entries[idx].path, "src/deep/a.rs");
+    }
+
+    #[test]
+    fn esc_restores_place_untouched() {
+        let repo = Repo::init();
+        repo.write("a.rs", "one\ntwo\n");
+        repo.write("b.rs", "one\n");
+        repo.commit_all("c");
+        let keymap = default_keymap().clone();
+        let mut app = app_on(&repo);
+        enter_tab(&mut app, Tab::AllFiles);
+        press(&mut app, &keymap, KeyCode::Down);
+        let place = (
+            app.tab,
+            app.focus,
+            app.file_cursor,
+            app.file_scroll,
+            app.diff_cursor,
+            app.diff_scroll,
+            app.diff_path.clone(),
+        );
+
+        open(&mut app, &keymap);
+        for c in "registry".chars() {
+            press(&mut app, &keymap, KeyCode::Char(c));
+        }
+        assert_eq!(app.search.as_ref().unwrap().query, "registry");
+        press(&mut app, &keymap, KeyCode::Esc);
+
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.search.is_none(), "the query drops with the overlay");
+        let after = (
+            app.tab,
+            app.focus,
+            app.file_cursor,
+            app.file_scroll,
+            app.diff_cursor,
+            app.diff_scroll,
+            app.diff_path.clone(),
+        );
+        assert_eq!(place, after, "esc leaves the place exactly as it was");
+    }
+
+    #[test]
+    fn vanished_path_keeps_overlay() {
+        let repo = Repo::init();
+        repo.write("a.rs", "fn a() {}\n");
+        repo.commit_all("c");
+        let keymap = default_keymap().clone();
+        let mut app = app_on(&repo);
+        enter_tab(&mut app, Tab::AllFiles);
+        open(&mut app, &keymap);
+
+        land_search_completion(
+            &mut app,
+            done(1, results(vec![file_hit("missing.rs")], Vec::new())),
+            1,
+        );
+        press(&mut app, &keymap, KeyCode::Enter);
+        assert_eq!(app.mode, Mode::Search, "a vanished path opens nothing, the overlay stays");
+    }
+
+    #[test]
+    fn config_error_closes_overlay_and_drops_query() {
+        let repo = Repo::init();
+        repo.write("a.rs", "fn a() {}\n");
+        repo.commit_all("c");
+        let keymap = default_keymap().clone();
+        let mut app = app_on(&repo);
+        enter_tab(&mut app, Tab::AllFiles);
+        open(&mut app, &keymap);
+        press(&mut app, &keymap, KeyCode::Char('x'));
+
+        app.set_config_error("bad config".into());
+        assert!(app.search.is_none(), "the overlay closes when the config view takes over");
+        assert_ne!(app.mode, Mode::Search);
+    }
+
+    /// An error completion holds the previous results but paints only its message, so
+    /// `enter` must open nothing off the invisible stale rows (specs/search.md).
+    #[test]
+    fn error_phase_makes_stale_results_inert() {
+        let repo = Repo::init();
+        repo.write("a.rs", "one\n");
+        repo.commit_all("c");
+        let keymap = default_keymap().clone();
+        let mut app = app_on(&repo);
+        enter_tab(&mut app, Tab::AllFiles);
+        open(&mut app, &keymap);
+
+        land_search_completion(&mut app, done(1, results(vec![file_hit("a.rs")], Vec::new())), 1);
+        let error = SearchCompletion { generation: 2, results: None, error: Some("boom".into()) };
+        land_search_completion(&mut app, error, 2);
+        assert_eq!(app.search.as_ref().unwrap().phase, SearchPhase::Error("boom".into()));
+        assert!(!app.search.as_ref().unwrap().results.files.is_empty(), "results held");
+
+        press(&mut app, &keymap, KeyCode::Enter);
+        assert_eq!(app.mode, Mode::Search, "enter opens nothing off an error frame");
+        press(&mut app, &keymap, KeyCode::Down);
+        assert_eq!(app.search.as_ref().unwrap().pick, 0, "arrows are inert too");
+    }
+
+    /// With nothing pickable the footer offers only the exit, so it never lists a key
+    /// that would not work (specs/input.md, specs/search.md).
+    #[test]
+    fn footer_offers_only_esc_when_nothing_pickable() {
+        use herdr_reviewr::app::{FooterAction, Tier};
+        let repo = Repo::init();
+        repo.write("a.rs", "one\n");
+        repo.commit_all("c");
+        let keymap = default_keymap().clone();
+        let mut app = app_on(&repo);
+        enter_tab(&mut app, Tab::AllFiles);
+        open(&mut app, &keymap);
+
+        let flip = FooterAction::FlipSearchMode;
+        // Warming: the mode flip and esc only.
+        assert_eq!(
+            app.footer_actions(),
+            vec![(flip, Tier::Primary), (FooterAction::CloseSearch, Tier::Normal)],
+            "indexing offers only the flip and esc"
+        );
+        // Ready but empty: the same.
+        land_search_completion(&mut app, done(1, results(Vec::new(), Vec::new())), 1);
+        assert_eq!(
+            app.footer_actions(),
+            vec![(flip, Tier::Primary), (FooterAction::CloseSearch, Tier::Normal)],
+            "no matches offers only the flip and esc"
+        );
+        // Ready with results: the full bar.
+        land_search_completion(&mut app, done(2, results(vec![file_hit("a.rs")], Vec::new())), 2);
+        let actions: Vec<_> = app.footer_actions().into_iter().map(|(a, _)| a).collect();
+        assert_eq!(
+            actions,
+            vec![
+                flip,
+                FooterAction::PickResult,
+                FooterAction::OpenResult,
+                FooterAction::CloseSearch
+            ]
+        );
+    }
+
+    /// A divider gesture cancelled by `/` still owns its mouse-up: the release frees the
+    /// capture and never resolves into a pick (specs/input.md, specs/search.md).
+    #[test]
+    fn cancelled_divider_drag_releases_on_mouse_up_in_search() {
+        use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::layout::Rect;
+        let repo = Repo::init();
+        repo.write("a.rs", "one\n");
+        repo.commit_all("c");
+        let keymap = default_keymap().clone();
+        let mut app = app_on(&repo);
+        enter_tab(&mut app, Tab::AllFiles);
+
+        let area = Rect::new(0, 0, 120, 40);
+        let body = herdr_reviewr::ui::body_rect(area);
+        let row = body.y + body.height / 2;
+        let divider = (body.x..body.x + body.width)
+            .find(|&col| herdr_reviewr::ui::hit_divider(area, &app, col, row))
+            .unwrap();
+        let heights = vec![1usize; app.visible.len()];
+        let event = |kind, column| MouseEvent { kind, column, row, modifiers: KeyModifiers::NONE };
+        herdr_reviewr::handle_mouse(
+            &mut app,
+            event(MouseEventKind::Down(MouseButton::Left), divider),
+            area,
+            &heights,
+            &keymap,
+        )
+        .unwrap();
+
+        // `/` cancels the gesture and opens the overlay; land a result so a stray pick
+        // would be observable.
+        open(&mut app, &keymap);
+        land_search_completion(&mut app, done(1, results(vec![file_hit("a.rs")], Vec::new())), 1);
+        assert!(app.divider_drag_captured(), "the cancelled gesture still owns its events");
+
+        herdr_reviewr::handle_mouse(
+            &mut app,
+            event(MouseEventKind::Up(MouseButton::Left), divider),
+            area,
+            &heights,
+            &keymap,
+        )
+        .unwrap();
+        assert!(!app.divider_drag_captured(), "mouse-up releases the capture");
+        assert_eq!(app.mode, Mode::Search, "the release never resolves into a pick");
+    }
+
+    /// The query edits with the comment editor's caret controls (specs/search.md):
+    /// word jumps, kills, Home/End, and mid-string inserts, with a paste's newlines
+    /// flattened to spaces.
+    #[test]
+    fn query_edits_with_comment_editor_controls() {
+        use ratatui::crossterm::event::{KeyEvent, KeyModifiers};
+        fn key(app: &mut App, keymap: &Keymap, code: KeyCode, mods: KeyModifiers) {
+            let area = ratatui::layout::Rect::new(0, 0, 120, 40);
+            herdr_reviewr::handle_key(app, KeyEvent::new(code, mods), area, keymap).unwrap();
+        }
+        let repo = Repo::init();
+        repo.write("a.rs", "one\n");
+        repo.commit_all("c");
+        let keymap = default_keymap().clone();
+        let mut app = app_on(&repo);
+        enter_tab(&mut app, Tab::AllFiles);
+        open(&mut app, &keymap);
+        let ctrl = KeyModifiers::CONTROL;
+        let alt = KeyModifiers::ALT;
+        let none = KeyModifiers::NONE;
+
+        for c in "foo bar".chars() {
+            key(&mut app, &keymap, KeyCode::Char(c), none);
+        }
+        key(&mut app, &keymap, KeyCode::Char('w'), ctrl); // delete the word before the caret
+        let q = |app: &App| app.search.as_ref().unwrap().query.clone();
+        let caret = |app: &App| app.search.as_ref().unwrap().caret;
+        assert_eq!(q(&app), "foo ");
+
+        key(&mut app, &keymap, KeyCode::Char('b'), alt); // word left
+        assert_eq!(caret(&app), 0);
+        key(&mut app, &keymap, KeyCode::Char('x'), none); // insert mid-string, at the caret
+        assert_eq!(q(&app), "xfoo ");
+        key(&mut app, &keymap, KeyCode::End, none);
+        key(&mut app, &keymap, KeyCode::Backspace, none);
+        assert_eq!(q(&app), "xfoo");
+        key(&mut app, &keymap, KeyCode::Home, none);
+        key(&mut app, &keymap, KeyCode::Delete, none);
+        assert_eq!(q(&app), "foo");
+        key(&mut app, &keymap, KeyCode::Char('k'), ctrl); // kill to end from the start
+        assert_eq!(q(&app), "");
+        assert!(app.search_dirty, "an edit re-queries");
+
+        app.input_paste("multi\nline");
+        assert_eq!(q(&app), "multi line", "a paste's newlines become spaces");
+    }
+
+    /// `ctrl+n` / `ctrl+p` move the pick, like `↓`/`↑` (specs/search.md Keys). Plain
+    /// `n`/`p` still type into the query.
+    #[test]
+    fn ctrl_n_p_move_the_pick() {
+        use ratatui::crossterm::event::{KeyEvent, KeyModifiers};
+        fn key(app: &mut App, keymap: &Keymap, code: KeyCode, mods: KeyModifiers) {
+            let area = ratatui::layout::Rect::new(0, 0, 120, 40);
+            herdr_reviewr::handle_key(app, KeyEvent::new(code, mods), area, keymap).unwrap();
+        }
+        let repo = Repo::init();
+        repo.write("a.rs", "one\n");
+        repo.commit_all("c");
+        let keymap = default_keymap().clone();
+        let mut app = app_on(&repo);
+        enter_tab(&mut app, Tab::AllFiles);
+        open(&mut app, &keymap);
+        land_search_completion(
+            &mut app,
+            done(
+                1,
+                results(vec![file_hit("a.rs"), file_hit("b.rs"), file_hit("c.rs")], Vec::new()),
+            ),
+            1,
+        );
+        let ctrl = KeyModifiers::CONTROL;
+        let pick = |app: &App| app.search.as_ref().unwrap().pick;
+
+        key(&mut app, &keymap, KeyCode::Char('n'), ctrl);
+        assert_eq!(pick(&app), 1, "ctrl+n moves the pick down");
+        key(&mut app, &keymap, KeyCode::Char('n'), ctrl);
+        assert_eq!(pick(&app), 2);
+        key(&mut app, &keymap, KeyCode::Char('p'), ctrl);
+        assert_eq!(pick(&app), 1, "ctrl+p moves the pick up");
+        // Plain n types into the query.
+        key(&mut app, &keymap, KeyCode::Char('n'), KeyModifiers::NONE);
+        assert_eq!(app.search.as_ref().unwrap().query, "n", "plain n still types");
+    }
+
+    /// The preview builds when the pick settles: a retarget only marks it stale, the
+    /// settle call builds it, and a code pick carries its hit (specs/search.md Preview).
+    #[test]
+    fn preview_builds_on_settle_with_hit() {
+        let repo = Repo::init();
+        repo.write("a.rs", "one\ntwo\nthree\n");
+        repo.write("b.rs", "four\n");
+        repo.commit_all("c");
+        let keymap = default_keymap().clone();
+        let mut app = app_on(&repo);
+        enter_tab(&mut app, Tab::AllFiles);
+        open(&mut app, &keymap);
+        land_search_completion(
+            &mut app,
+            done(
+                1,
+                results(Vec::new(), vec![code_hit("a.rs", 2, "two"), code_hit("b.rs", 1, "four")]),
+            ),
+            1,
+        );
+        press(&mut app, &keymap, KeyCode::Tab);
+        let s = app.search.as_ref().unwrap();
+        assert!(s.preview_stale, "the landing marks the preview stale");
+        assert!(s.preview.is_none(), "nothing builds before the settle");
+
+        app.build_search_preview();
+        let s = app.search.as_ref().unwrap();
+        assert!(!s.preview_stale);
+        let pv = s.preview.as_ref().unwrap();
+        assert_eq!(pv.path, "a.rs");
+        assert_eq!(pv.hit.as_ref().unwrap().0, 2, "the code pick carries its hit line");
+        assert!(pv.center.get(), "the renderer centers the hit once per build");
+
+        press(&mut app, &keymap, KeyCode::Down);
+        assert!(app.search.as_ref().unwrap().preview_stale, "a pick move marks it stale");
+        app.build_search_preview();
+        assert_eq!(app.search.as_ref().unwrap().preview.as_ref().unwrap().path, "b.rs");
+    }
+
+    /// A landed poll repaints the previewed file in place — same scroll, fresh content —
+    /// and a deleted previewed file previews empty (specs/search.md Preview).
+    #[test]
+    fn poll_repaints_preview_in_place() {
+        let repo = Repo::init();
+        repo.write("a.rs", "one\ntwo\n");
+        repo.commit_all("c");
+        let keymap = default_keymap().clone();
+        let mut app = app_on(&repo);
+        enter_tab(&mut app, Tab::AllFiles);
+        open(&mut app, &keymap);
+        land_search_completion(&mut app, done(1, results(vec![file_hit("a.rs")], Vec::new())), 1);
+        app.build_search_preview();
+        let rows =
+            |app: &App| app.search.as_ref().unwrap().preview.as_ref().unwrap().diff.rows.len();
+        assert_eq!(rows(&app), 2);
+        app.scroll_search_preview(1);
+
+        repo.write("a.rs", "one\ntwo\nthree\n");
+        app.refresh_search_preview();
+        let s = app.search.as_ref().unwrap();
+        assert_eq!(rows(&app), 3, "the poll's reconcile repaints the preview in place");
+        let pv = s.preview.as_ref().unwrap();
+        assert_eq!(pv.scroll.get(), 1, "the scroll survives the repaint");
+        assert!(!pv.center.get(), "a repaint never re-centers");
+
+        std::fs::remove_file(repo.path().join("a.rs")).unwrap();
+        app.refresh_search_preview();
+        assert_eq!(rows(&app), 0, "a deleted previewed file previews empty");
+    }
+
+    /// Opening a result is a deliberate leave: it lands in `All files` whatever tab the
+    /// search left, and the origin tab keeps its place (specs/search.md Opening).
+    #[test]
+    fn open_from_changes_lands_in_all_files_keeping_origin_place() {
+        let repo = Repo::init();
+        repo.write("a.rs", "one\ntwo\n");
+        repo.write("b.rs", "three\n");
+        repo.commit_all("c");
+        repo.write("a.rs", "one\nchanged\n");
+        let keymap = default_keymap().clone();
+        let mut app = app_on(&repo);
+        assert_eq!(app.tab, Tab::Changes);
+        press(&mut app, &keymap, KeyCode::Down);
+        let origin_cursor = app.diff_cursor;
+
+        open(&mut app, &keymap);
+        land_search_completion(&mut app, done(1, results(vec![file_hit("b.rs")], Vec::new())), 1);
+        press(&mut app, &keymap, KeyCode::Enter);
+        assert_eq!(app.tab, Tab::AllFiles, "the open lands in All files");
+        assert_eq!(app.diff_path.as_deref(), Some("b.rs"));
+        assert_eq!(app.focus, Focus::Diff);
+
+        enter_tab(&mut app, Tab::Changes);
+        assert_eq!(app.diff_cursor, origin_cursor, "the origin tab keeps its place");
+    }
+
+    /// The search divider drags search's own share; the review layout's shares stay
+    /// untouched (specs/search.md).
+    #[test]
+    fn search_divider_drags_only_the_search_share() {
+        let repo = Repo::init();
+        repo.write("a.rs", "one\n");
+        repo.commit_all("c");
+        let keymap = default_keymap().clone();
+        let mut app = app_on(&repo);
+        enter_tab(&mut app, Tab::AllFiles);
+        open(&mut app, &keymap);
+        let side = app.navigator_side_pct;
+        let stack = app.navigator_stack_pct;
+        assert_eq!(app.search_pct, 50, "half the body by default");
+
+        app.start_divider_drag();
+        app.drag_search_divider(40, 30);
+        assert_eq!(app.search_pct, 75);
+        app.finish_divider_drag();
+        assert_eq!(app.navigator_side_pct, side, "the review shares are untouched");
+        assert_eq!(app.navigator_stack_pct, stack);
+    }
+
+    #[test]
+    fn opening_search_mid_navigator_drag_does_not_hijack_it() {
+        // A divider drag held from the review view is cancelled on open, so its remaining
+        // drag events are consumed, not turned into a search-split resize (specs/input.md).
+        let repo = Repo::init();
+        repo.write("a.rs", "one\n");
+        repo.commit_all("c");
+        let mut app = app_on(&repo);
+        enter_tab(&mut app, Tab::AllFiles);
+        app.start_divider_drag();
+        assert!(app.divider_drag_active(), "a navigator drag is in flight");
+        let before = app.search_pct;
+        app.open_search();
+        assert!(!app.divider_drag_active(), "opening search cancels the carried drag");
+        app.drag_search_divider(40, 30);
+        assert_eq!(app.search_pct, before, "the carried gesture never resizes the search split");
+    }
+
+    /// Every path under `root`, relative, `.git` included — the worktree-purity probe.
+    fn all_paths(root: &std::path::Path) -> Vec<String> {
+        fn walk(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<String>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    walk(root, &path, out);
+                } else {
+                    out.push(path.strip_prefix(root).unwrap().to_string_lossy().into_owned());
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(root, root, &mut out);
+        out.sort();
+        out
+    }
+
+    /// The real engine, end to end: spawn the worker, run a query, and check the contract —
+    /// results arrive, ignored files and `.git` never appear, and the worktree gains no
+    /// file (specs/overview.md O1).
+    #[test]
+    fn engine_worker_end_to_end() {
+        let repo = Repo::init();
+        // The match sits behind a tab indent, so the worker's leading-strip is exercised.
+        repo.write("src/alpha.rs", "fn wrap() {\n\t\talpha_marker();\n}\n");
+        repo.write(".gitignore", "ignored.txt\n");
+        repo.commit_all("c");
+        repo.write("ignored.txt", "alpha_marker inside an ignored file\n");
+        let cache = tempfile::TempDir::new().unwrap();
+        let before = all_paths(repo.path());
+
+        let (job_tx, job_rx) = std::sync::mpsc::channel();
+        let (res_tx, res_rx) = std::sync::mpsc::channel();
+        let worker =
+            herdr_reviewr::search::spawn(repo.path_buf(), cache.path().into(), job_rx, res_tx);
+        job_tx.send(SearchJob::Query { generation: 1, query: "alpha_marker".into() }).unwrap();
+
+        // A warming engine answers `indexing…` first and re-runs by itself.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let results = loop {
+            let completion = res_rx
+                .recv_timeout(deadline - std::time::Instant::now())
+                .expect("the worker answers before the deadline");
+            assert_eq!(completion.generation, 1);
+            assert_eq!(completion.error, None);
+            if let Some(results) = completion.results {
+                break results;
+            }
+        };
+
+        let paths: Vec<&str> = results
+            .files
+            .iter()
+            .map(|f| f.path.as_str())
+            .chain(results.code.iter().map(|c| c.path.as_str()))
+            .collect();
+        assert!(paths.contains(&"src/alpha.rs"), "the engine finds the file: {paths:?}");
+        assert!(
+            !paths.iter().any(|p| *p == "ignored.txt" || p.starts_with(".git")),
+            "ignored files and .git are not searchable: {paths:?}"
+        );
+        // The code hit's leading indentation is stripped so the row aligns left
+        // (specs/search.md).
+        let code = results.code.iter().find(|c| c.path == "src/alpha.rs");
+        if let Some(hit) = code {
+            assert!(
+                !hit.text.starts_with([' ', '\t']),
+                "the worker strips the match line's leading indentation: {:?}",
+                hit.text
+            );
+        }
+
+        job_tx.send(SearchJob::Track { path: "src/alpha.rs".into() }).unwrap();
+        drop(job_tx);
+        worker.join().unwrap();
+        assert_eq!(all_paths(repo.path()), before, "search writes nothing to the worktree");
+        assert!(
+            cache.path().join("frecency").exists(),
+            "the frecency store lives under the cache dir"
+        );
+    }
+}
