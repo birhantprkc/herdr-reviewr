@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.37.1] — 2026-09-13
+
 ### Changed
 - **Base picker.** Every branch is a row with its age and role (`pr base`, `default`, `current`),
   the filter is fuzzy, and a typed revision is one more row. Picking the default clears the pick.
