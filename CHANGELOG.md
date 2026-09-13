@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.37.0] — 2026-09-13
+
 ### Added
 - **A collapsed `All files` folder with a changed file under it shows a dot.** A collapsed tree
   tells you which folders to open.
