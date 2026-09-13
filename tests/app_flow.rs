@@ -7424,3 +7424,39 @@ fn all_files_marks_the_run_and_lists_the_worktree() {
     assert_eq!(marked, ["three.rs"], "only the run's files carry a mark");
     assert!(app.entries.iter().any(|e| e.path == "root.rs"), "the tree lists the worktree");
 }
+
+#[test]
+fn the_folder_dot_appears_under_a_poll_without_moving_the_cursor() {
+    // Continuity: the dot is derived state. A poll that adds a change under a collapsed
+    // `All files` folder marks the row and moves the cursor off nothing, even when a new
+    // folder above it shifts its row index.
+    let r = Repo::init();
+    r.write("src/a.rs", "x\n");
+    r.write("src/b.rs", "y\n");
+    r.write("root.rs", "z\n");
+    r.commit_all("init");
+    let mut app = app_on(&r);
+    enter_tab(&mut app, herdr_reviewr::app::Tab::AllFiles);
+    app.focus = Focus::Files;
+    let dir_row = app.file_rows.iter().position(|r| r.dir_path() == Some("src")).unwrap();
+    app.file_cursor = dir_row;
+    let marked = |app: &App| {
+        matches!(
+            app.file_rows[app.file_cursor].kind,
+            herdr_reviewr::file_list::RowKind::Dir { has_change: true, expanded: false, .. }
+        )
+    };
+    assert!(!marked(&app), "a clean worktree marks nothing");
+
+    r.write("src/a.rs", "x2\n");
+    r.write("aaa/one.rs", "1\n"); // a new folder sorting above `src/` shifts its row
+    r.write("aaa/two.rs", "2\n");
+    common::land_world(&mut app);
+    assert_eq!(
+        app.file_rows[app.file_cursor].dir_path(),
+        Some("src"),
+        "the cursor follows the folder by path"
+    );
+    assert_eq!(app.file_cursor, dir_row + 1, "the folder's row moved down one");
+    assert!(marked(&app), "the folder is marked and still collapsed");
+}

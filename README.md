@@ -169,8 +169,8 @@ links, and scroll with the wheel.
 ## The three tabs
 
 - **Changes** — the active scope's changed files with `+/-` stats and totals in the header.
-- **All files** — any file's current content from the whole worktree, comments too. Ignored
-  paths show dimmed.
+- **All files** — any file's current content from the whole worktree, comments too. A collapsed
+  folder with a changed file under it shows a dot. Ignored paths show dimmed.
 - **PR** — a read-only mirror of the branch's pull request (GitHub, Azure DevOps) or merge
   request (GitLab): state, checks, description, and comments, rendered as markdown. reviewr
   never writes to the forge.

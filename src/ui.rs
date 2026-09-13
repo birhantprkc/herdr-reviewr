@@ -27,7 +27,7 @@ use crate::forge;
 use crate::git;
 use crate::herdr::AgentChoice;
 use crate::keymap::Keymap;
-use crate::model::Comment;
+use crate::model::{ChangeKind, Comment};
 use crate::snippet::{snippet_caption_sign, snippet_row_is_comment};
 use crate::theme::Palette;
 
@@ -1527,6 +1527,13 @@ fn render_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
+/// The mark on a collapsed `All files` folder that holds a changed file, right-aligned like a
+/// file row's stats. A dot, not a letter: a folder mixes change kinds.
+const DIR_DOT: &str = "•";
+/// The columns every `All files` folder row keeps free for the dot (a gap and the glyph),
+/// so a folder name elides the same way whether or not the dot is painted.
+const DIR_DOT_RESERVE: usize = 2;
+
 fn render_file_list(frame: &mut Frame, app: &App, area: Rect) {
     let p = app.palette();
     let block = bordered("Files", app.focus == Focus::Files, p);
@@ -1558,7 +1565,7 @@ fn render_file_list(frame: &mut Frame, app: &App, area: Rect) {
             let fill = (i == app.file_cursor).then(|| p.cursor_bg(app.focus == Focus::Files));
             let nest = "  ".repeat(row.depth);
             match &row.kind {
-                RowKind::Dir { expanded, .. } => {
+                RowKind::Dir { expanded, has_change, .. } => {
                     let arrow = if *expanded { "▾ " } else { "▸ " };
                     // A git-ignored directory recedes into a dim, unbolded row.
                     let name_style = if row.ignored {
@@ -1566,10 +1573,30 @@ fn render_file_list(frame: &mut Frame, app: &App, area: Rect) {
                     } else {
                         Style::default().fg(p.dim0).add_modifier(Modifier::BOLD)
                     };
-                    let spans = vec![
-                        Span::styled(format!("{nest}{arrow}"), Style::default().fg(p.dim2)),
-                        Span::styled(format!("{}/", row.name), name_style),
+                    // On `All files` every folder row leaves the dot's columns free, so a
+                    // name that has to elide reads the same expanded or collapsed. `Changes`
+                    // never paints the dot, so it reserves nothing. Elide the bare name, then
+                    // add the slash: eliding `name/` would cut at that slash and leave `…/`.
+                    let reserve = if app.tab == Tab::AllFiles { DIR_DOT_RESERVE } else { 0 };
+                    let lead = format!("{nest}{arrow}");
+                    let budget = width.saturating_sub(lead.width() + reserve + 1).max(1);
+                    let name = format!("{}/", elide_head(&row.name, budget));
+                    let mut spans = vec![
+                        Span::styled(lead, Style::default().fg(p.dim2)),
+                        Span::styled(name, name_style),
                     ];
+                    // A collapsed `All files` folder holding a change wears the dot: the
+                    // question there is which folders to open, and the children are hidden.
+                    // Expanded, its children carry their own markers. On `Changes` every
+                    // folder holds a change, so the dot would say nothing.
+                    if app.tab == Tab::AllFiles && !expanded && *has_change {
+                        let used: usize = spans.iter().map(Span::width).sum();
+                        spans.push(Span::raw(" ".repeat(width.saturating_sub(used + 1))));
+                        // The `M` marker's hue: a folder mixes kinds, and modified is the
+                        // neutral one. Stays that color on a dimmed ignored row.
+                        let hue = kind_color(p, ChangeKind::Modified);
+                        spans.push(Span::styled(DIR_DOT, Style::default().fg(hue)));
+                    }
                     selectable_row(p, spans, width, fill)
                 }
                 RowKind::File { annotation, .. } => {
@@ -1627,7 +1654,7 @@ fn file_row_item(
 
     let mut spans = vec![Span::styled(indent.to_string(), text_style(p))];
     if let Some(a) = annotation {
-        spans.push(Span::styled(marker, Style::default().fg(kind_color(p, a.change.marker()))));
+        spans.push(Span::styled(marker, Style::default().fg(kind_color(p, a.change))));
     }
     // A git-ignored file recedes into a dim basename; its change marker and stats keep their
     // color so a kept ignored file still reads as a change.
@@ -4639,12 +4666,12 @@ fn dim_paragraph<'a>(text: &'a str, p: &Palette) -> Paragraph<'a> {
 }
 
 /// The theme accent for a change marker, matched to the diff's add/remove hues.
-fn kind_color(p: &Palette, marker: char) -> Color {
-    match marker {
-        'A' | '?' => p.green,
-        'D' => p.red,
-        'R' => p.purple,
-        _ => p.yellow,
+fn kind_color(p: &Palette, kind: ChangeKind) -> Color {
+    match kind {
+        ChangeKind::Added | ChangeKind::Untracked => p.green,
+        ChangeKind::Deleted => p.red,
+        ChangeKind::Renamed => p.purple,
+        ChangeKind::Modified => p.yellow,
     }
 }
 

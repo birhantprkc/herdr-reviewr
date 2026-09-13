@@ -5339,7 +5339,8 @@ mod tests {
                 "navigator, on a directory row",
                 Box::new(|a: &mut App| {
                     a.focus = crate::Focus::Files;
-                    a.file_rows[0].kind = RowKind::Dir { path: "src".into(), expanded: true };
+                    a.file_rows[0].kind =
+                        RowKind::Dir { path: "src".into(), expanded: true, has_change: false };
                 }),
                 None,
             ),

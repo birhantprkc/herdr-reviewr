@@ -3911,3 +3911,185 @@ fn a_row_shows_one_ref_by_what_matters_most() {
     let top = out.lines().skip(1).find(|l| l.contains(&shas[3][..7])).unwrap();
     assert!(top.contains("  pr ") && !top.contains("origin/feature"), "{top}");
 }
+
+/// The default-right navigator's first inner column on the 140-wide test frame.
+const FILES_X0: u16 = 140 - 140 * 32 / 100 + 1;
+/// Its last inner column: the frame edge less the right border.
+const FILES_X1: u16 = 140 - 2;
+
+/// The files-pane row holding `token`: its y, and its text from the pane's first inner
+/// column to its last, untrimmed, so a test can check both what a row ends in and where.
+fn files_row_at(buf: &Buffer, token: &str) -> (u16, String) {
+    let row = |y: u16| -> String {
+        (FILES_X0..=FILES_X1).map(|x| buf.cell((x, y)).unwrap().symbol().to_string()).collect()
+    };
+    let y = (0..buf.area.height)
+        .find(|&y| row(y).contains(token))
+        .unwrap_or_else(|| panic!("no files-pane row holds {token:?}"));
+    (y, row(y))
+}
+
+/// The files-pane row holding `token`, trailing padding trimmed.
+fn files_row(app: &App, token: &str) -> String {
+    files_row_at(&render_buffer(app), token).1.trim_end().to_string()
+}
+
+/// Whether the row holding `token` ends in the dot, painted in the pane's last inner column
+/// and in the `M` marker's color (the cell style of `m_marker_fg`).
+fn dot_at_edge(app: &App, token: &str) -> bool {
+    let buf = render_buffer(app);
+    let (y, _) = files_row_at(&buf, token);
+    let cell = buf.cell((FILES_X1, y)).unwrap();
+    cell.symbol() == "•" && cell.style().fg == Some(m_marker_fg(&buf))
+}
+
+/// The color of the `M` marker on the fixtures' edited `zz.rs` row.
+fn m_marker_fg(buf: &Buffer) -> ratatui::style::Color {
+    let (y, text) = files_row_at(buf, "M zz.rs");
+    let x = FILES_X0 + text.find("M zz.rs").unwrap() as u16;
+    buf.cell((x, y)).unwrap().style().fg.expect("the marker is colored")
+}
+
+/// A worktree with `src/{app.rs,ui.rs}` and `docs/{a.md,b.md}` committed and `src/ui.rs`
+/// edited, plus a top-level edited `zz.rs` so an `M` marker is always painted for the color
+/// reference.
+fn dotted_repo() -> Repo {
+    let r = Repo::init();
+    r.write("src/app.rs", "x\n");
+    r.write("src/ui.rs", "y\n");
+    r.write("docs/a.md", "a\n");
+    r.write("docs/b.md", "b\n");
+    r.write("zz.rs", "z\n");
+    r.commit_all("init");
+    r.write("src/ui.rs", "y2\n");
+    r.write("zz.rs", "z2\n");
+    r
+}
+
+#[test]
+fn a_collapsed_all_files_folder_with_a_change_wears_a_dot() {
+    let r = dotted_repo();
+    let mut app = app_on(&r);
+    enter_tab(&mut app, Tab::AllFiles);
+    assert!(dot_at_edge(&app, "src/"), "src/ holds the edit: {:?}", files_row(&app, "src/"));
+    assert!(!files_row(&app, "docs/").contains('•'), "docs/ holds no change");
+    assert!(files_row(&app, "src/").starts_with("▸ src/"), "the chevron is the first column");
+
+    // Expanded, the children carry their own marker and the folder drops the dot.
+    app.focus = Focus::Files;
+    app.file_cursor = app.file_rows.iter().position(|r| r.dir_path() == Some("src")).unwrap();
+    app.expand_dir();
+    assert!(!files_row(&app, "src/").contains('•'), "an expanded folder wears no dot");
+    assert!(files_row(&app, "ui.rs").starts_with("  M ui.rs"), "the child carries the marker");
+}
+
+#[test]
+fn a_kept_change_under_an_ignored_folder_wears_the_same_dot() {
+    // The folder name dims, the dot keeps its color.
+    let r = dotted_repo();
+    r.write(".gitignore", "vendor/\n");
+    r.write("vendor/lib.rs", "v\n");
+    r.write("vendor/other.rs", "o\n");
+    r.git(&["add", "-f", "vendor/lib.rs", "vendor/other.rs", ".gitignore"]);
+    r.commit_all("vendor");
+    r.write("vendor/lib.rs", "v2\n");
+    r.write("zz.rs", "z3\n");
+    let mut app = app_on(&r);
+    enter_tab(&mut app, Tab::AllFiles);
+    assert!(dot_at_edge(&app, "vendor/"), "{:?}", files_row(&app, "vendor/"));
+}
+
+#[test]
+fn a_folder_whose_only_change_has_no_row_wears_no_dot() {
+    // A staged deletion leaves the index, so `All files` has no row for it and the folder
+    // stays quiet: a dot there would open onto nothing. A plain `rm` keeps the index entry,
+    // so its row stays, marked `D`, and the folder wears the dot.
+    let r = dotted_repo();
+    r.write("gone/a.rs", "a\n");
+    r.write("gone/b.rs", "b\n");
+    r.write("rmd/a.rs", "a\n");
+    r.write("rmd/b.rs", "b\n");
+    r.commit_all("more");
+    r.git(&["rm", "-q", "gone/a.rs"]);
+    std::fs::remove_file(r.path_buf().join("rmd/a.rs")).unwrap();
+    r.write("zz.rs", "z3\n");
+    let mut app = app_on(&r);
+    enter_tab(&mut app, Tab::AllFiles);
+    assert!(!files_row(&app, "gone/").contains('•'), "{:?}", files_row(&app, "gone/"));
+    assert!(dot_at_edge(&app, "rmd/"), "{:?}", files_row(&app, "rmd/"));
+}
+
+#[test]
+fn a_collapsed_changes_folder_wears_no_dot_and_reserves_nothing() {
+    // On `Changes` every folder holds a change, so the dot would say nothing, and the row
+    // keeps its full width for the name.
+    let r = dotted_repo();
+    r.write("src/app.rs", "x2\n"); // two changed files keep `src/` a directory row
+    let mut app = app_on(&r);
+    app.focus = Focus::Files;
+    app.file_cursor = app.file_rows.iter().position(|r| r.dir_path() == Some("src")).unwrap();
+    app.collapse_dir();
+    assert!(!files_row(&app, "src/").contains('•'), "no dot on Changes");
+    let wide = "n".repeat((FILES_X1 - FILES_X0) as usize - 2); // `▸ ` + name + `/` fills the row
+    r.write(&format!("{wide}/a.rs"), "a\n");
+    r.write(&format!("{wide}/b.rs"), "b\n");
+    app.reload().unwrap();
+    let row = files_row(&app, &wide[..20]);
+    assert_eq!(row, format!("▾ {wide}/"), "the exact-fit name is whole on Changes");
+    enter_tab(&mut app, Tab::AllFiles);
+    assert!(dot_at_edge(&app, "…"), "{:?}", files_row(&app, "…"));
+    assert_eq!(
+        files_row(&app, "…"),
+        format!("▸ …{}/ •", &wide[3..]),
+        "the reserve elides two columns"
+    );
+}
+
+#[test]
+fn the_folder_dot_follows_the_scope() {
+    let r = Repo::init();
+    r.write("src/a.rs", "x\n");
+    r.write("src/b.rs", "y\n");
+    r.write("zz.rs", "z\n");
+    r.commit_all("base");
+    r.git(&["checkout", "-q", "-b", "feature"]);
+    r.write("src/a.rs", "x2\n");
+    r.write("zz.rs", "z2\n");
+    r.commit_all("feature work"); // committed on the branch, worktree clean
+    let mut app = App::new(r.path_buf(), Scope::Uncommitted, Some("main".to_string()));
+    app.reload().unwrap();
+    enter_tab(&mut app, Tab::AllFiles);
+    assert!(!files_row(&app, "src/").contains('•'), "nothing uncommitted under src/");
+
+    app.set_scope(Scope::Branch).unwrap();
+    common::land_world(&mut app);
+    assert!(dot_at_edge(&app, "src/"), "the branch scope changed src/a.rs");
+
+    app.set_scope(Scope::Uncommitted).unwrap();
+    common::land_world(&mut app);
+    assert!(!files_row(&app, "src/").contains('•'), "back to uncommitted, the dot clears");
+}
+
+#[test]
+fn a_long_folder_name_leaves_room_for_the_dot() {
+    let r = Repo::init();
+    let dir = "a_directory_name_far_wider_than_the_files_pane_can_ever_hold_at_this_width";
+    r.write(&format!("{dir}/one.rs"), "1\n");
+    r.write(&format!("{dir}/two.rs"), "2\n");
+    r.write("zz.rs", "z\n");
+    r.commit_all("init");
+    r.write(&format!("{dir}/one.rs"), "1b\n");
+    r.write("zz.rs", "z2\n");
+    let mut app = app_on(&r);
+    enter_tab(&mut app, Tab::AllFiles);
+    assert!(dot_at_edge(&app, "…"), "{:?}", files_row(&app, "…"));
+    let row = files_row(&app, "…");
+    assert!(row.starts_with("▸ …") && row.contains("this_width/ •"), "head-elided: {row:?}");
+    let collapsed_name = row.trim_end_matches(" •").to_string();
+
+    app.focus = Focus::Files;
+    app.file_cursor = app.file_rows.iter().position(|r| r.dir_path() == Some(dir)).unwrap();
+    app.expand_dir();
+    let row = files_row(&app, "…");
+    assert_eq!(row.replacen('▾', "▸", 1), collapsed_name, "the name reads the same expanded");
+}
