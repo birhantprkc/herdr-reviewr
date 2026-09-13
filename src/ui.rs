@@ -3123,7 +3123,7 @@ pub fn hit_picker_row(area: Rect, app: &App, col: u16, row: u16) -> Option<usize
 
 // --- Base picker ----------------------------------------------
 
-/// A row's dim trail: `default` on the default branch, or `(sha)` on a named rev
+/// The name as painted: a rev's SHA-once abbrev, else the branch name.
 fn row_shown(row: &crate::app::BaseChoice) -> String {
     match row {
         crate::app::BaseChoice::Rev { name, oid } => git::rev_paint(name, oid).0,
@@ -3131,43 +3131,84 @@ fn row_shown(row: &crate::app::BaseChoice) -> String {
     }
 }
 
-fn base_trail(row: &crate::app::BaseChoice) -> String {
+/// A row's dim trail words, in the order they paint: `pr base`, `default`, `current`, the
+/// tip's age against `now` — or `(sha)` on a named rev.
+fn base_trail_words(row: &crate::app::BaseChoice, now: u64) -> Vec<String> {
+    if let crate::app::BaseChoice::Rev { name, oid } = row {
+        return git::rev_paint(name, oid).1.map(|a| format!("({a})")).into_iter().collect();
+    }
+    let mut words: Vec<String> = Vec::new();
+    if row.pr_base() {
+        words.push("pr base".into());
+    }
     if row.is_default() {
-        return "default".into();
+        words.push("default".into());
     }
-    let crate::app::BaseChoice::Rev { name, oid } = row else {
-        return String::new();
-    };
-    match git::rev_paint(name, oid).1 {
-        Some(abbrev) => format!("({abbrev})"),
-        None => String::new(),
+    if row.current() {
+        words.push("current".into());
+    }
+    if row.tip_secs() > 0 {
+        words.push(age_label(now.saturating_sub(row.tip_secs())));
+    }
+    words
+}
+
+const BASE_ROW_LEAD: &str = " ";
+/// Two cells between the name and the trail, so `feat/x  3d` never reads as one token.
+const BASE_TRAIL_GAP: usize = 2;
+
+/// One row's painted name and trail for `width` cells. The trail sheds words right to
+/// left (age first) until the name fits whole, and the name ellipsizes last — the order
+/// `base_parts` uses for the header, so a narrow pane keeps the fact that matters most.
+fn base_row_parts(row: &crate::app::BaseChoice, width: usize, now: u64) -> (String, String) {
+    let name = row_shown(row);
+    let mut words = base_trail_words(row, now);
+    let avail = width.saturating_sub(BASE_ROW_LEAD.width());
+    loop {
+        let trail = words.join(" · ");
+        let trail_w = if trail.is_empty() { 0 } else { BASE_TRAIL_GAP + trail.width() };
+        if name.width() + trail_w <= avail {
+            return (name, trail);
+        }
+        if words.pop().is_none() {
+            return (truncate_width(&name, avail), String::new());
+        }
     }
 }
 
-/// Content width of one base-picker row: star lead, painted name, and dim trail.
-fn base_row_width(row: &crate::app::BaseChoice) -> usize {
-    let trail = base_trail(row);
-    let trail_w = if trail.is_empty() { 0 } else { 2 + trail.width() };
-    3 + row_shown(row).width() + trail_w
+/// Content width of one base-picker row at full length: lead, name, gap, and trail.
+fn base_row_width(row: &crate::app::BaseChoice, now: u64) -> usize {
+    let (name, trail) = base_row_parts(row, usize::MAX, now);
+    let trail_w = if trail.is_empty() { 0 } else { BASE_TRAIL_GAP + trail.width() };
+    BASE_ROW_LEAD.width() + name.width() + trail_w
 }
 
-/// Sized like the agent picker's box, plus the filter line above the rows. The box holds its
-/// full-list size while the filter narrows, so the frame never jumps under typing.
-fn base_picker_popup(area: Rect, app: &App) -> Rect {
+/// Sized like the agent picker's box, plus the filter line above the rows. The box holds
+/// its full-list size while the filter narrows, so the frame never jumps under typing, and
+/// grows by the one row a probe hit adds while that hit shows.
+fn base_picker_popup(area: Rect, app: &App, now: u64) -> Rect {
     let Some(bp) = &app.base_picker else { return Rect::default() };
-    let hit = match &bp.probe {
-        crate::app::BaseProbe::Hit(c) => Some(c),
-        _ => None,
-    };
-    let widest = bp.rows.iter().chain(hit).map(base_row_width).max().unwrap_or(0);
-    menu_popup(area, app, widest, &base_picker_title(bp), bp.rows.len().max(1) + 3)
+    // `visible` decides whether the hit is its own row; the box follows that one decision.
+    let visible = bp.visible();
+    let added = visible.len() > bp.filtered().len();
+    let hit = visible.last().filter(|_| added).copied();
+    let widest = bp.rows.iter().chain(hit).map(|r| base_row_width(r, now)).max().unwrap_or(0);
+    let lines = bp.rows.len().max(1) + 3 + usize::from(added);
+    menu_popup(area, app, widest, &base_picker_title(bp), lines)
 }
 
-/// The base picker's title names its list, in the commit picker's register
+/// The base picker's title: the branch count while the filter is empty, in the commit
+/// picker's register, and `matched/total` over those same branches while it narrows. A
+/// revision row (the current non-branch pick) is listed but never counted.
 fn base_picker_title(bp: &crate::app::BasePicker) -> String {
-    let n = bp.rows.iter().filter(|r| matches!(r, crate::app::BaseChoice::Branch { .. })).count();
-    let noun = if n == 1 { "branch" } else { "branches" };
-    format!("base · {n} {noun}")
+    let is_branch = |r: &crate::app::BaseChoice| matches!(r, crate::app::BaseChoice::Branch { .. });
+    let total = bp.rows.iter().filter(|r| is_branch(r)).count();
+    if !bp.query.is_empty() {
+        let shown = bp.filtered().into_iter().filter(|&i| is_branch(&bp.rows[i])).count();
+        return format!("base · {shown}/{total}");
+    }
+    let noun = if total == 1 { "branch" } else { "branches" };
+    format!("base · {total} {noun}")
 }
 
 fn base_picker_scroll(bp: &crate::app::BasePicker, rows: usize) -> usize {
@@ -3177,7 +3218,8 @@ fn base_picker_scroll(bp: &crate::app::BasePicker, rows: usize) -> usize {
 fn render_base_picker(frame: &mut Frame, app: &App, area: Rect) {
     let Some(bp) = &app.base_picker else { return };
     let p = app.palette();
-    let popup = base_picker_popup(area, app);
+    let now = now_unix();
+    let popup = base_picker_popup(area, app, now);
     frame.render_widget(Clear, popup);
     let block = Block::default()
         .borders(Borders::ALL)
@@ -3224,17 +3266,14 @@ fn render_base_picker(frame: &mut Frame, app: &App, area: Rect) {
         .skip(first)
         .take(list_area.height as usize)
         .map(|(vi, row)| {
-            // The star marks the open PR's target; the name is the only part at full
-            // brightness, like the agent picker's rows. The dim
-            // trail right-aligns to the row so a probe and the full list put `(sha)`
-            // in the same place.
-            let lead = if row.starred() { " ★ " } else { "   " };
-            let label = row_shown(row);
-            let trail = base_trail(row);
-            let gap = if trail.is_empty() { 0 } else { 2 };
+            // The name is the only part at full brightness, like the agent picker's rows.
+            // The dim trail right-aligns to the row so every row's facts line up.
+            let lead = BASE_ROW_LEAD;
+            let (label, trail) = base_row_parts(row, width, now);
+            let gap = if trail.is_empty() { 0 } else { BASE_TRAIL_GAP };
             let pad = width.saturating_sub(lead.width() + label.width() + gap + trail.width());
             let mut spans = vec![
-                Span::styled(lead.to_string(), Style::default().fg(p.yellow)),
+                Span::styled(lead.to_string(), text_style(p)),
                 Span::styled(label, text_style(p)),
             ];
             if !trail.is_empty() {
@@ -3252,7 +3291,7 @@ fn render_base_picker(frame: &mut Frame, app: &App, area: Rect) {
 /// The filtered base-picker row under the pointer, the filter line skipped
 pub fn hit_base_picker_row(area: Rect, app: &App, col: u16, row: u16) -> Option<usize> {
     let bp = app.base_picker.as_ref()?;
-    let inner = picker_inner(base_picker_popup(area, app));
+    let inner = picker_inner(base_picker_popup(area, app, now_unix()));
     let first = base_picker_scroll(bp, inner.height.saturating_sub(1) as usize);
     menu_hit(inner, 1, first, bp.visible().len(), col, row)
 }

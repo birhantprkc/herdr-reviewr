@@ -264,16 +264,18 @@ back.
 
 ### Base branch
 
-The **branch** scope diffs against the merge-base with your repo's default branch, the one
-`origin/HEAD` names. The header shows the resolved base, `vs main`.
+The **branch** scope diffs against the merge-base with your repo's default branch, with or
+without a remote. The header shows the resolved base, `vs main`.
 
 When the trunk is something else, or you review a stacked branch, press `B` (or click the
-base name) and pick the branch. The pick is stored for this worktree and holds until you
-pick again. Other worktrees on the same clone keep their own pick. Choosing the default
-branch records that name.
+base name) and pick the branch. Every branch is a row with its age, and a row says when it
+is the open PR's target (`pr base`), the repo's `default`, or the branch checked out here
+(`current`). Type to narrow the list, fuzzily. The pick is stored for this worktree and holds
+until you pick again. Other worktrees on the same clone keep their own pick. Pick the default
+branch to go back to it.
 
-You can also type any revision, like `HEAD~2`, a tag, or a SHA prefix. The header shows what
-resolved: `vs HEAD~2 (a1b2c3d)`.
+You can also type any revision, like `HEAD~2`, a tag, or a SHA prefix. It appears as one more
+row under the matches, and the header shows what resolved: `vs HEAD~2 (a1b2c3d)`.
 
 `--base <ref>` sets the base for this pane. It wins over the pick and disables the picker.
 
@@ -482,10 +484,6 @@ Structured (JSON) export, a side-by-side split view, mark-file-reviewed,
 named-key notation for keybindings, OSC light/dark theme autodetect, more themes
 (`kanagawa`, `vesper`, `everforest`, `ayu`, a dark `github`), a `terminal`-following palette,
 and OSC 52 clipboard.
-
-## Design
-
-Change specs live in [`docs/specs/`](docs/specs/), one folder per change.
 
 ## License
 

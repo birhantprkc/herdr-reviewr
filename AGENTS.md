@@ -13,9 +13,9 @@ herdr-reviewr is a Rust TUI (ratatui) code-review pane: it runs in a [herdr](htt
 - `just smoke-edit` — PTY smoke test of the editor path (`e`) against a real release binary. Unit tests stop at the argv; everything after it is terminal state, so run this after any change to `run_editor`, the terminal mode stack, or the editor dialects. Not part of `just ci`: it drives a pty and takes about a minute.
 - `python3 scripts/bench_tui.py --binary target/release/herdr-reviewr --fixture` — perceived-latency benchmark (keypress → painted frame, via PTY), the acceptance instrument. `cargo run --release --example bench_latency -- <repo>` attributes a slow number to its component calls. The one committed baseline is `scripts/bench-results/baseline.json` — replace it when a change moves the numbers, never add per-round runs. Run before/after any change to the reload, render, git, or highlight paths, and compare medians A/B under the same system load (rebuild the old binary to a second target dir and interleave runs — absolute numbers drift with background load).
 
-## Spec-first
+## Invariants
 
-New behavior is designed with `/brainstorming` and sequenced with `/planning`. Each change lives in `docs/specs/YYYY-MM-DD-<slug>/` (`spec.md`, then `plan.md` and `tickets/`). Read that change's spec before touching user-visible behavior.
+New behavior is designed with `/brainstorming` and sequenced with `/planning` in the conversation; the repo keeps no spec tree. The commit message and the changelog carry the decisions.
 
 Load-bearing invariants. Cite them by name:
 

@@ -151,8 +151,10 @@ fn the_base_picker_anchors_the_terminal_cursor_at_its_caret() {
     app.base_picker = Some(BasePicker {
         rows: vec![BaseChoice::Branch {
             name: "main".to_string(),
-            starred: false,
+            pr_base: false,
             is_default: true,
+            current: false,
+            tip_secs: 1,
         }],
         cursor: 0,
         query: String::new(),
@@ -3136,9 +3138,153 @@ fn the_branch_header_names_the_base_and_its_click_opens_the_picker() {
     let keymap = app.keymap().clone();
     handle_mouse(&mut app, click, AREA, &[], &keymap, &herdr_reviewr::export::Clipboard).unwrap();
     let frame = render(&app);
-    assert!(frame.contains("base · 2 branches"), "the click opens the picker popup");
+    assert!(frame.contains("base · 3 branches"), "the click opens the picker popup");
     assert!(frame.contains("dev"), "the sibling branch is a row");
     assert!(frame.contains("default"), "the default branch is marked");
+    assert!(frame.contains("current"), "the checked-out branch is marked");
+    assert!(!frame.contains('★'), "no glyph: the trail words carry the facts");
+
+    // The box is sized to its rows: the filter line, three branch rows, two borders, and
+    // no blank row held for a probe that is not showing.
+    let top = frame.lines().position(|l| l.contains("┌ base")).unwrap();
+    let bottom = frame.lines().skip(top).position(|l| l.contains("└────")).unwrap();
+    assert_eq!(bottom, 5, "top border, filter line, three rows, bottom border: {frame}");
+}
+
+#[test]
+fn the_picker_title_counts_matches_while_filtering() {
+    let (r, mut app) = based_app();
+    app.open_base_picker();
+    assert!(render(&app).contains("base · 3 branches"));
+    app.input_push('d');
+    assert!(render(&app).contains("base · 1/3"), "matched over total: {}", render(&app));
+    app.close_base_picker();
+
+    // A current non-branch pick is a row, never a count: `HEAD~1` is listed under the
+    // three branches but both numbers still say three.
+    herdr_reviewr::git::write_base_pick(r.path(), "HEAD~1").unwrap();
+    app.set_scope(Scope::Branch).unwrap();
+    app.open_base_picker();
+    let frame = render(&app);
+    assert!(frame.contains("HEAD~1"), "{frame}");
+    assert!(frame.contains("base · 3 branches"), "{frame}");
+    app.input_push('e');
+    let frame = render(&app);
+    assert!(
+        frame.contains("base · 2/3"),
+        "dev and feature match, the rev row counts nowhere: {frame}"
+    );
+}
+
+#[test]
+fn a_probe_row_still_fits_when_every_branch_matches() {
+    // One branch, and it matches the query: the frozen full-list height has no spare
+    // row, so the box must grow by the hit's row or the tag is unpainted and unclickable.
+    let r = Repo::init();
+    r.write("hello.rs", "alpha\n");
+    r.commit_all("init");
+    r.set_origin_default("main", "main");
+    r.git(&["checkout", "-q", "-b", "v1.2-hotfix"]);
+    r.write("hello.rs", "alpha\nBETA\n");
+    r.commit_all("edit");
+    r.git(&["branch", "-D", "main"]);
+    r.git(&["tag", "v1.2", "HEAD~1"]);
+    let mut app = app_on(&r);
+    app.set_scope(Scope::Branch).unwrap();
+    app.open_base_picker();
+    for ch in "v1.2".chars() {
+        app.input_push(ch);
+    }
+    app.run_base_probe();
+    let frame = render(&app);
+    assert!(frame.contains("v1.2-hotfix"), "{frame}");
+    assert!(frame.contains('(') && frame.contains("v1.2 "), "the tag row paints: {frame}");
+    let rows: std::collections::BTreeSet<usize> = (0..AREA.height)
+        .flat_map(|row| (0..AREA.width).map(move |col| (col, row)))
+        .filter_map(|(col, row)| ui::hit_base_picker_row(AREA, &app, col, row))
+        .collect();
+    assert_eq!(rows.into_iter().collect::<Vec<_>>(), [0, 1], "the hit row is inside the box");
+}
+
+fn now_minus(secs: u64) -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+        .saturating_sub(secs)
+}
+
+/// A row carrying every trail word, painted at a width that fits and at widths that do not.
+fn worst_case_picker(app: &mut App) {
+    app.base_picker = Some(BasePicker {
+        rows: vec![BaseChoice::Branch {
+            name: "main".to_string(),
+            pr_base: true,
+            is_default: true,
+            current: true,
+            tip_secs: now_minus(2 * 3600),
+        }],
+        cursor: 0,
+        query: String::new(),
+        caret: 0,
+        probe: BaseProbe::Idle,
+    });
+    app.mode = Mode::BasePick;
+}
+
+#[test]
+fn a_narrow_pane_sheds_trail_words_before_the_name() {
+    let mut app = edited_app();
+    worst_case_picker(&mut app);
+    let wide = dump(&render_size(&app, 80, 20));
+    assert!(wide.contains("main"), "{wide}");
+    assert!(wide.contains("pr base · default · current · 2h"), "every word fits at 80: {wide}");
+
+    // The popup never exceeds the body, so a narrow pane narrows the row. Words drop from
+    // the right, the age first, and the name is the last thing to clip.
+    let narrow = dump(&render_size(&app, 34, 20));
+    assert!(narrow.contains("main"), "{narrow}");
+    assert!(narrow.contains("pr base"), "the first word survives: {narrow}");
+    assert!(!narrow.contains("2h"), "the age goes first: {narrow}");
+    let tiny = dump(&render_size(&app, 14, 20));
+    assert!(tiny.contains("main"), "the name outlives every word: {tiny}");
+    assert!(!tiny.contains("pr base"), "{tiny}");
+}
+
+#[test]
+fn a_probe_row_is_clickable_below_the_matches() {
+    let r = Repo::init();
+    r.write("hello.rs", "alpha\n");
+    r.commit_all("init");
+    r.set_origin_default("main", "main");
+    r.git(&["branch", "v1.2-hotfix"]);
+    r.git(&["checkout", "-q", "-b", "feature"]);
+    r.write("hello.rs", "alpha\nBETA\n");
+    r.commit_all("edit");
+    r.git(&["tag", "v1.2", "HEAD~1"]);
+    let mut app = app_on(&r);
+    app.set_scope(Scope::Branch).unwrap();
+    app.open_base_picker();
+    for ch in "v1.2".chars() {
+        app.input_push(ch);
+    }
+    app.run_base_probe();
+    let frame = render(&app);
+    assert!(frame.contains("v1.2-hotfix"), "{frame}");
+    let hits: Vec<(u16, u16, usize)> = (0..AREA.height)
+        .flat_map(|row| (0..AREA.width).map(move |col| (col, row)))
+        .filter_map(|(col, row)| {
+            ui::hit_base_picker_row(AREA, &app, col, row).map(|i| (col, row, i))
+        })
+        .collect();
+    let rows: std::collections::BTreeSet<usize> = hits.iter().map(|h| h.2).collect();
+    assert_eq!(
+        rows.into_iter().collect::<Vec<_>>(),
+        [0, 1],
+        "both rows hit-test, the probe row too"
+    );
+    let probe_y = hits.iter().find(|h| h.2 == 1).unwrap().1;
+    let branch_y = hits.iter().find(|h| h.2 == 0).unwrap().1;
+    assert_eq!(probe_y, branch_y + 1, "the probe row sits under the match");
 }
 
 #[test]
@@ -3350,6 +3496,7 @@ fn without_a_resolving_base_the_header_reads_no_base() {
     let r = Repo::init();
     r.write("hello.rs", "alpha\n");
     r.commit_all("init");
+    r.git(&["branch", "-m", "main", "trunk"]); // no `main`/`master`: no default to fall back on
     r.git(&["checkout", "-q", "-b", "feature"]);
     let mut app = app_on(&r);
     app.set_scope(Scope::Branch).unwrap();
@@ -3360,10 +3507,36 @@ fn without_a_resolving_base_the_header_reads_no_base() {
 }
 
 #[test]
+fn a_local_only_repo_has_its_main_as_the_base() {
+    // No remote at all: `origin/HEAD` names nothing, and the local `main` is the default,
+    // so the header never reads `no base` in a repo that plainly has a trunk.
+    let r = Repo::init();
+    r.write("hello.rs", "alpha\n");
+    r.commit_all("init");
+    r.git(&["checkout", "-q", "-b", "feature"]);
+    r.write("hello.rs", "alpha\nBETA\n");
+    r.commit_all("edit");
+    let mut app = app_on(&r);
+    app.set_scope(Scope::Branch).unwrap();
+    let line0 = render(&app).lines().next().unwrap().to_string();
+    assert!(line0.contains("[branch] vs main"), "the local main is the base: {line0}");
+    assert!(!line0.contains("missing"), "nothing is skipped: {line0}");
+    assert!(line0.contains("1 changed"), "the branch diffs against it: {line0}");
+
+    // On `main` itself the base is still `main`: the scope is the uncommitted diff.
+    r.git(&["checkout", "-q", "main"]);
+    let mut app = app_on(&r);
+    app.set_scope(Scope::Branch).unwrap();
+    let line0 = render(&app).lines().next().unwrap().to_string();
+    assert!(line0.contains("[branch] vs main"), "{line0}");
+}
+
+#[test]
 fn a_dormant_pick_shows_beside_the_empty_state() {
     let r = Repo::init();
     r.write("hello.rs", "alpha\n");
     r.commit_all("init");
+    r.git(&["branch", "-m", "main", "trunk"]); // no `main`/`master`: no default to fall back on
     herdr_reviewr::git::write_base_pick(r.path(), "gone").unwrap();
     r.git(&["checkout", "-q", "-b", "feature"]);
     let mut app = app_on(&r);

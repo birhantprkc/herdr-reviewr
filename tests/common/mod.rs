@@ -21,6 +21,10 @@ impl Repo {
     pub fn init() -> Self {
         let repo = Self { dir: TempDir::new().expect("tempdir") };
         repo.git(&["init", "-q", "-b", "main"]);
+        // The base chain reads `init.defaultBranch`, and `--get` sees the developer's
+        // global config. Pin it locally to a name no test creates, so the suite never
+        // depends on the machine it runs on.
+        repo.git(&["config", "init.defaultBranch", "no-such-default"]);
         repo
     }
 

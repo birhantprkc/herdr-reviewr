@@ -502,7 +502,7 @@ pub struct PrLocalState {
 
 /// Derive the pinned `HEAD`, the pinned base, and the branch's forge names
 pub fn pr_local(repo: &Path, base_flag: Option<&str>) -> Result<PrLocalState, GitFail> {
-    let Some(branch) = git_tristate(repo, &["symbolic-ref", "--quiet", "--short", "HEAD"])? else {
+    let Some(branch) = checked_out_branch(repo)? else {
         return Ok(PrLocalState { detached: true, ..PrLocalState::default() });
     };
     let head_oid = git_tristate(repo, &["rev-parse", "--verify", "--quiet", "HEAD^{commit}"])?;
@@ -579,6 +579,9 @@ pub struct BaseStatus {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BaseResolution {
     pub status: BaseStatus,
+    /// The default branch the chain ran against ([`default_branch_name`]), so the picker
+    /// marks its row from the same pass that resolved the winner.
+    pub default: Option<String>,
     candidates: Vec<ResolvedBase>,
     recorded: Vec<String>,
 }
@@ -589,14 +592,19 @@ impl BaseResolution {
     }
 }
 
-/// Resolve the base chain: the `--base` flag, then this worktree's pick, then the branch
-/// `origin/HEAD` names. A source that does not
+/// Resolve the base chain: the `--base` flag, then this worktree's pick, then the default
+/// branch ([`default_branch_name`]). A source that does not
 /// resolve to a commit is skipped, never an error; a skipped flag or pick that would have
 /// outranked the winner is recorded for the header.
+///
+/// A pick spelling the default branch (one an earlier release wrote, or one the repo
+/// re-defaulted onto) resolves to the same base the default step would, so it needs no
+/// special case here; [`write_base_pick`] keeps such a ref from being written.
 pub fn resolve_base(repo: &Path, base_flag: Option<&str>) -> Result<BaseResolution, GitFail> {
     let mut candidates: Vec<ResolvedBase> = Vec::new();
     let mut recorded: Vec<String> = Vec::new();
     let mut skipped: Option<String> = None;
+    let default = default_branch_name(repo)?;
     let push = |c: ResolvedBase, list: &mut Vec<ResolvedBase>| {
         if !list.iter().any(|x| x.oid() == c.oid()) {
             list.push(c);
@@ -626,20 +634,56 @@ pub fn resolve_base(repo: &Path, base_flag: Option<&str>) -> Result<BaseResoluti
             None => {}
         }
     }
-    if let Some(name) = default_branch_name(repo)? {
+    if let Some(name) = &default {
         record(name.clone(), &mut recorded);
-        if let Some(oid) = resolve_base_entry(repo, &name)? {
-            push(ResolvedBase::branch(name, oid), &mut candidates);
+        if let Some(oid) = resolve_base_entry(repo, name)? {
+            push(ResolvedBase::branch(name.clone(), oid), &mut candidates);
         }
     }
     let winner = candidates.first().cloned();
-    Ok(BaseResolution { status: BaseStatus { winner, skipped }, candidates, recorded })
+    Ok(BaseResolution { status: BaseStatus { winner, skipped }, default, candidates, recorded })
+}
+
+/// The repo's default branch: what `origin/HEAD` names, else `init.defaultBranch`, else
+/// `main`, else `master` — the last three only when a branch of exactly that name exists,
+/// on origin or locally. `origin/HEAD` is the best evidence of the trunk, not its
+/// definition: a clone with no remote still has one, and without this fallback such a
+/// repo has no base at all.
+///
+/// Existence is read back from the ref list, never probed with `rev-parse`: a loose-ref
+/// lookup on a case-insensitive filesystem resolves `refs/heads/main` to a branch named
+/// `Main`, and a name no ref spells would then paint the header and match no row.
+pub fn default_branch_name(repo: &Path) -> Result<Option<String>, GitFail> {
+    if let Some(name) = origin_default_branch(repo)? {
+        return Ok(Some(name));
+    }
+    let configured = git_tristate(repo, &["config", "--get", "init.defaultBranch"])?
+        .filter(|name| is_branch_label(name));
+    let names: Vec<&str> =
+        configured.iter().map(String::as_str).chain(["main", "master"]).collect();
+    // One listing for every candidate: `for-each-ref` takes several patterns, and it
+    // matches them case-sensitively and by whole path, so the output is checked for the
+    // exact ref (the pattern alone would also match a branch `main/foo`).
+    let patterns: Vec<String> = names
+        .iter()
+        .flat_map(|name| BRANCH_REF_PREFIXES.iter().map(move |prefix| format!("{prefix}{name}")))
+        .collect();
+    let mut args = vec!["for-each-ref", "--format=%(refname)"];
+    args.extend(patterns.iter().map(String::as_str));
+    let out = git_strict(repo, &args)?;
+    let listed: std::collections::HashSet<&str> = out.lines().collect();
+    Ok(names
+        .into_iter()
+        .find(|name| {
+            BRANCH_REF_PREFIXES.iter().any(|p| listed.contains(format!("{p}{name}").as_str()))
+        })
+        .map(str::to_string))
 }
 
 /// The branch name `origin/HEAD` points at. Some
 /// clones carry `origin/HEAD` as a plain ref instead of a symref — then the name is the
 /// origin tip whose commit matches it.
-pub fn default_branch_name(repo: &Path) -> Result<Option<String>, GitFail> {
+fn origin_default_branch(repo: &Path) -> Result<Option<String>, GitFail> {
     let target = git_tristate(repo, &["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"])?;
     if let Some(name) =
         target.and_then(|t| t.strip_prefix("refs/remotes/origin/").map(str::to_string))
@@ -670,37 +714,52 @@ pub(crate) fn strip_base_prefix(entry: &str) -> String {
         .to_string()
 }
 
-/// Every branch name for the base picker: `refs/heads` and `refs/remotes/origin` merged by
-/// bare name, newest commit first, `origin/HEAD` and the checked-out branch excluded —
-/// except the `default` branch, which stays listed so it can be picked even while checked
-/// out. The caller passes the default it already resolved, so one picker open runs the
-/// resolution once.
-pub fn list_branches(repo: &Path, default: Option<&str>) -> Result<Vec<String>, GitFail> {
-    let checked_out = git_tristate(repo, &["symbolic-ref", "--quiet", "--short", "HEAD"])?
-        .filter(|name| default != Some(name));
+/// One base picker row: a bare branch name and the unix time of its tip commit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BranchRow {
+    pub name: String,
+    pub tip_secs: u64,
+}
+
+/// Every branch for the base picker: `refs/heads` and `refs/remotes/origin` merged by
+/// bare name, newest tip first, `origin/HEAD` excluded. A name on both sides keeps
+/// origin's tip, the one the chain resolves it to. The checked-out branch is listed: it is
+/// a legitimate base (the diff is then the uncommitted one), and excluding it is what left
+/// a one-branch repo with no rows.
+pub fn list_branches(repo: &Path) -> Result<Vec<BranchRow>, GitFail> {
     let out = git_strict(
         repo,
         &[
             "for-each-ref",
-            "refs/heads",
             "refs/remotes/origin",
+            "refs/heads",
             "--sort=-committerdate",
-            "--format=%(refname)",
+            "--format=%(refname)%00%(committerdate:unix)",
         ],
     )?;
-    let mut names: Vec<String> = Vec::new();
-    for line in out.lines() {
-        let name =
-            line.strip_prefix("refs/remotes/origin/").or_else(|| line.strip_prefix("refs/heads/"));
-        let Some(name) = name else { continue };
-        if name == "HEAD" || checked_out.as_deref() == Some(name) {
-            continue;
-        }
-        if !names.iter().any(|n| n == name) {
-            names.push(name.to_string());
+    // The sort interleaves origin and local refs by date, so origin's rows are taken in a
+    // first pass and local ones fill in after: the merge keeps origin's tip by rule
+    // (`BRANCH_REF_PREFIXES`), not by whichever side happens to be newer. A tip whose
+    // date does not parse (a ref at a non-commit) keeps `0`, which paints as no age.
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut rows: Vec<BranchRow> = Vec::new();
+    for prefix in BRANCH_REF_PREFIXES {
+        for line in out.lines() {
+            let Some((refname, secs)) = line.split_once('\0') else { continue };
+            let Some(name) = refname.strip_prefix(prefix) else { continue };
+            if name == "HEAD" || !seen.insert(name) {
+                continue;
+            }
+            rows.push(BranchRow { name: name.to_string(), tip_secs: secs.parse().unwrap_or(0) });
         }
     }
-    Ok(names)
+    rows.sort_by_key(|r| std::cmp::Reverse(r.tip_secs));
+    Ok(rows)
+}
+
+/// The checked-out branch's bare name, `None` when `HEAD` is detached.
+pub fn checked_out_branch(repo: &Path) -> Result<Option<String>, GitFail> {
+    git_tristate(repo, &["symbolic-ref", "--quiet", "--short", "HEAD"])
 }
 
 /// The `origin` remote-tracking tips as `(OID, bare name)`, `origin/HEAD` excluded — one
@@ -919,11 +978,16 @@ fn classify_flag(
     })
 }
 
+/// Where a bare branch name is looked up, in the order that decides a name on both
+/// sides: origin's tip is what the PR sees, so it wins. One list serves the resolve, the
+/// default fallback, and the picker's merge.
+const BRANCH_REF_PREFIXES: [&str; 2] = ["refs/remotes/origin/", "refs/heads/"];
+
 fn resolve_base_entry(repo: &Path, name: &str) -> Result<Option<String>, GitFail> {
     if !is_branch_label(name) {
         return Ok(None);
     }
-    for prefix in ["refs/remotes/origin/", "refs/heads/"] {
+    for prefix in BRANCH_REF_PREFIXES {
         let probe = format!("{prefix}{name}^{{commit}}");
         if let Some(oid) = git_tristate(repo, &["rev-parse", "--verify", "--quiet", &probe])? {
             return Ok(Some(oid));
@@ -1046,9 +1110,23 @@ fn branch_name_shaped(value: &str) -> bool {
 
 /// Record `name` as this worktree's pick. The ref write lands before the pick applies,
 /// so a crash between the two loses nothing.
+///
+/// A name spelling the default branch is no pick: the ref is deleted instead, so the pane
+/// follows the repo's next re-default. The default is read here, at the write, so a
+/// picker row marked at open cannot go stale under a fetch that moved `origin/HEAD`.
 pub fn write_base_pick(repo: &Path, name: &str) -> Result<(), GitFail> {
+    if Some(name) == default_branch_name(repo)?.as_deref() {
+        return delete_base_pick(repo);
+    }
     let blob = git_stdin(repo, &["hash-object", "-w", "--stdin"], name)?;
     git_strict(repo, &["update-ref", BASE_PICK_REF, blob.trim()])?;
+    Ok(())
+}
+
+/// Forget this worktree's pick, so the base is the default branch again. Deleting a ref
+/// that does not exist succeeds: git's `-d` without an old value is idempotent.
+pub fn delete_base_pick(repo: &Path) -> Result<(), GitFail> {
+    git_strict(repo, &["update-ref", "-d", BASE_PICK_REF])?;
     Ok(())
 }
 

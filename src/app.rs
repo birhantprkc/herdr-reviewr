@@ -127,8 +127,8 @@ struct ArmedCross {
 /// at open; the filter and highlight are the reviewer's own place state.
 #[derive(Clone, Debug)]
 pub struct BasePicker {
-    /// Pickable rows: branches (PR target starred first, default next, recency, checked-out
-    /// excluded) plus a current non-branch spelling so the highlight can open on it.
+    /// Pickable rows: every branch (the PR's target first, the default next, the rest by
+    /// tip recency) plus a current non-branch spelling so the highlight can open on it.
     pub rows: Vec<BaseChoice>,
     /// The highlighted row, an index into the visible view.
     pub cursor: usize,
@@ -151,10 +151,14 @@ pub enum BaseProbe {
     Miss,
 }
 
-/// One base picker row.
+/// One base picker row. A branch carries the facts its trail paints: the open PR's
+/// target (`pr base`), the repo's default (`default`), checked out here (`current`), and
+/// its tip's commit time, painted as an age at render like the commit picker's rows so
+/// it never goes stale while the picker sits open (`0` when unknown: no age). A typed
+/// revision carries its oid instead.
 #[derive(Clone, Debug)]
 pub enum BaseChoice {
-    Branch { name: String, starred: bool, is_default: bool },
+    Branch { name: String, pr_base: bool, is_default: bool, current: bool, tip_secs: u64 },
     Rev { name: String, oid: String },
 }
 
@@ -167,13 +171,27 @@ impl BaseChoice {
     }
 
     #[must_use]
-    pub fn starred(&self) -> bool {
-        matches!(self, Self::Branch { starred: true, .. })
+    pub fn pr_base(&self) -> bool {
+        matches!(self, Self::Branch { pr_base: true, .. })
     }
 
     #[must_use]
     pub fn is_default(&self) -> bool {
         matches!(self, Self::Branch { is_default: true, .. })
+    }
+
+    #[must_use]
+    pub fn current(&self) -> bool {
+        matches!(self, Self::Branch { current: true, .. })
+    }
+
+    /// The tip's commit time, `0` on a revision row or a probe hit.
+    #[must_use]
+    pub fn tip_secs(&self) -> u64 {
+        match self {
+            Self::Branch { tip_secs, .. } => *tip_secs,
+            Self::Rev { .. } => 0,
+        }
     }
 
     #[must_use]
@@ -186,22 +204,40 @@ impl BaseChoice {
 }
 
 impl BasePicker {
-    /// Frozen rows whose name contains the query, matched case-insensitively and
-    /// anywhere in the name.
+    /// Frozen rows the query fuzzily matches, best score first, by the matcher the search
+    /// screen uses (`neo_frizbee`, fff's engine). Ties keep the frozen order, so an empty
+    /// query is the list as opened.
     pub fn filtered(&self) -> Vec<usize> {
-        let q = self.query.to_lowercase();
-        (0..self.rows.len()).filter(|&i| self.rows[i].name().to_lowercase().contains(&q)).collect()
+        if self.query.is_empty() {
+            return (0..self.rows.len()).collect();
+        }
+        let names: Vec<&str> = self.rows.iter().map(BaseChoice::name).collect();
+        let config = neo_frizbee::Config { sort: false, ..neo_frizbee::Config::default() };
+        let mut matches = neo_frizbee::match_list(&self.query, &names, &config);
+        matches.sort_by_key(|m| std::cmp::Reverse(m.score));
+        matches.into_iter().map(|m| m.index as usize).collect()
     }
 
-    /// The on-screen rows: a live probe hit, else the frozen matches.
+    /// Whether a frozen row spells the query, case aside: then no revision probe runs,
+    /// since Enter would pick that row. Case is ignored because the fuzzy filter already
+    /// shows `main` for `MAIN`, and a probe of `MAIN` on a case-insensitive filesystem
+    /// would resolve and offer a second, wrongly spelled row.
+    #[must_use]
+    pub fn query_is_listed(&self) -> bool {
+        self.rows.iter().any(|r| r.name().eq_ignore_ascii_case(&self.query))
+    }
+
+    /// The on-screen rows: the frozen matches, then a live probe hit as one more row. The
+    /// hit is appended, never inserted, so it cannot move the highlight.
     pub fn visible(&self) -> Vec<&BaseChoice> {
-        let matched = self.filtered();
+        let mut rows: Vec<&BaseChoice> =
+            self.filtered().into_iter().map(|i| &self.rows[i]).collect();
         if let BaseProbe::Hit(probe) = &self.probe
-            && matched.is_empty()
+            && !rows.iter().any(|r| r.name() == probe.name())
         {
-            return vec![probe];
+            rows.push(probe);
         }
-        matched.into_iter().map(|i| &self.rows[i]).collect()
+        rows
     }
 }
 
@@ -3326,11 +3362,11 @@ impl App {
 
     /// Re-seat the base picker's highlight after a filter edit: it follows its own row into
     /// the narrowed view when the row survives, else rests on the first match
-    /// (Continuity). An empty frozen list with a non-empty query
-    /// schedules a commit probe.
+    /// (Continuity). A non-empty query no row spells exactly schedules a revision probe,
+    /// whatever the fuzzy matches: `v1.2` must reach the tag even beside `v1.2-hotfix`.
     fn refilter_base_picker(&mut self, highlighted: Option<String>) {
         let Some(bp) = self.base_picker.as_mut() else { return };
-        bp.probe = if bp.filtered().is_empty() && !bp.query.is_empty() {
+        bp.probe = if !bp.query.is_empty() && !bp.query_is_listed() {
             BaseProbe::Pending(Instant::now() + BASE_PROBE_DELAY)
         } else {
             BaseProbe::Idle
@@ -3366,7 +3402,7 @@ impl App {
     /// Check the query as a commit now. Tests call this instead of sleeping.
     pub fn run_base_probe(&mut self) {
         let Some(bp) = &self.base_picker else { return };
-        if bp.query.is_empty() || !bp.filtered().is_empty() {
+        if bp.query.is_empty() || bp.query_is_listed() {
             if let Some(bp) = self.base_picker.as_mut() {
                 bp.probe = BaseProbe::Idle;
             }
@@ -3375,9 +3411,13 @@ impl App {
         let query = bp.query.clone();
         let hit = git::resolve_spelling(&self.repo, &query).map(|resolved| {
             resolved.map(|c| match c {
-                git::ResolvedBase::Branch { name, .. } => {
-                    BaseChoice::Branch { name, starred: false, is_default: false }
-                }
+                git::ResolvedBase::Branch { name, .. } => BaseChoice::Branch {
+                    name,
+                    pr_base: false,
+                    is_default: false,
+                    current: false,
+                    tip_secs: 0,
+                },
                 git::ResolvedBase::Rev { spelling, oid } => {
                     BaseChoice::Rev { name: git::complete_sha_prefix(&spelling, &oid), oid }
                 }
@@ -3385,10 +3425,7 @@ impl App {
         });
         let Some(bp) = self.base_picker.as_mut() else { return };
         match hit {
-            Ok(Some(choice)) => {
-                bp.probe = BaseProbe::Hit(choice);
-                bp.cursor = 0;
-            }
+            Ok(Some(choice)) => bp.probe = BaseProbe::Hit(choice),
             Ok(None) => bp.probe = BaseProbe::Miss,
             Err(e) => {
                 bp.probe = BaseProbe::Miss;
@@ -4423,18 +4460,33 @@ impl App {
         self.tab.is_file_tab() && self.base.is_none()
     }
 
-    /// Open the base picker: one row per branch name, the open PR's target starred first,
-    /// the default branch next, the rest by commit recency.
-    /// A current non-branch pick is inserted as a row. The highlight opens on the current
-    /// base, else the first row. Still opens when that list is empty, so a revision can
-    /// be typed.
+    /// Open the base picker: one row per branch, the open PR's target first, the default
+    /// branch next, the rest by tip recency, each with its trail facts. Picking the
+    /// default row is the way back to the default: its name deletes the pick instead of
+    /// recording it. A current non-branch pick is inserted as a row. The highlight opens
+    /// on the current base, else the first row. Still opens when that list is empty, so a
+    /// revision can be typed.
     pub fn open_base_picker(&mut self) {
         if !self.base_pick_available() || self.mode != Mode::Normal {
             return;
         }
-        let default = git::default_branch_name(&self.repo).ok().flatten();
-        let names = match git::list_branches(&self.repo, default.as_deref()) {
-            Ok(names) => names,
+        // The base is re-resolved here, not read from `branch_base`: that lands only while
+        // `branch` is showing, and the picker opens from every scope. One pass serves both
+        // the winner and the default row's mark.
+        let resolution = match git::resolve_base(&self.repo, self.base.as_deref()) {
+            Ok(r) => r,
+            Err(e) => {
+                self.status = e.0;
+                return;
+            }
+        };
+        let (winner, default) = (resolution.status.winner, resolution.default);
+        let listed = git::list_branches(&self.repo).and_then(|rows| {
+            let current = git::checked_out_branch(&self.repo)?;
+            Ok((rows, current))
+        });
+        let (branches, current) = match listed {
+            Ok(v) => v,
             Err(e) => {
                 self.status = e.0;
                 return;
@@ -4444,25 +4496,18 @@ impl App {
             .pr_snapshot()
             .filter(|s| s.state == forge::PrState::Open)
             .map(|s| s.base_ref.clone());
-        let mut rows: Vec<BaseChoice> = names
+        let mut rows: Vec<BaseChoice> = branches
             .into_iter()
-            .map(|name| BaseChoice::Branch {
-                starred: target.as_deref() == Some(name.as_str()),
-                is_default: default.as_deref() == Some(name.as_str()),
-                name,
+            .map(|b| BaseChoice::Branch {
+                pr_base: target.as_deref() == Some(b.name.as_str()),
+                is_default: default.as_deref() == Some(b.name.as_str()),
+                current: current.as_deref() == Some(b.name.as_str()),
+                tip_secs: b.tip_secs,
+                name: b.name,
             })
             .collect();
         // A stable sort, so recency still orders the promoted pair and the rest alike.
-        rows.sort_by_key(|r| (!r.starred(), !r.is_default()));
-        // The base is re-resolved here, not read from `branch_base`: that lands only while
-        // `branch` is showing, and the picker opens from every scope.
-        let winner = match git::resolve_base(&self.repo, self.base.as_deref()) {
-            Ok(r) => r.status.winner,
-            Err(e) => {
-                self.status = e.0;
-                return;
-            }
-        };
+        rows.sort_by_key(|r| (!r.pr_base(), !r.is_default()));
         if let Some(git::ResolvedBase::Rev { spelling, oid }) = &winner
             && !rows.iter().any(|r| r.name() == spelling)
         {
@@ -4506,8 +4551,9 @@ impl App {
     }
 
     /// Pick the highlighted row: persist its spelling, then rebuild the changeset
-    /// against it. With no visible row, Enter checks the query immediately and
-    /// records it if it resolves.
+    /// against it. The default row is the way back: its spelling deletes the ref instead
+    /// (`git::write_base_pick`), so the pane follows the repo's default again. With no
+    /// visible row, Enter checks the query immediately and records it if it resolves.
     pub fn base_picker_pick(&mut self) -> Result<()> {
         let Some(bp) = &self.base_picker else { return Ok(()) };
         if bp.visible().is_empty() {
@@ -5023,8 +5069,10 @@ mod tests {
         old.base_picker = Some(super::BasePicker {
             rows: vec![super::BaseChoice::Branch {
                 name: "dev".to_string(),
-                starred: false,
+                pr_base: false,
                 is_default: false,
+                current: false,
+                tip_secs: 0,
             }],
             cursor: 0,
             query: "d".to_string(),
