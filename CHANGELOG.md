@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.38.0] — 2026-09-16
+
 ### Changed
 - **PR comments paint as comments.** Badge images become P1/P2/P3 chips, mermaid fences become
   a `⧉ mermaid` placeholder, HTML headings match markdown headings, `<details>` starts collapsed,
