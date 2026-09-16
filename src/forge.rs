@@ -117,6 +117,7 @@ fn extension_hint(forge: crate::git::Forge) -> Option<&'static str> {
 
 /// One pull request's state, read fresh from the forge each poll.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct PrSnapshot {
     pub number: u64,
     pub title: String,
@@ -138,9 +139,10 @@ pub struct PrSnapshot {
     pub sync: Sync,
     pub checks: Vec<Check>,
     pub comments: Vec<Comment>,
-    /// A capped surface (reviews/comments/threads/checks) had more rows than the 100-row fetch
-    /// returned — the lists shown are a prefix, not the whole set. Drives a "more on the forge" marker.
-    pub truncated: bool,
+    /// Reviews, conversation comments, or threads had more rows than the 100-row fetch.
+    pub comments_truncated: bool,
+    /// Checks had more rows than the 100-row fetch.
+    pub checks_truncated: bool,
 }
 
 /// The PR lifecycle.
@@ -207,7 +209,17 @@ pub struct Comment {
     pub created_at: String,
     pub is_resolved: bool,
     pub is_outdated: bool,
-    pub reply_count: u32,
+    /// Replies after the root, oldest first. Empty for a single card.
+    pub replies: Vec<Reply>,
+}
+
+/// One reply on a thread. The root lives on [`Comment`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Reply {
+    pub author: String,
+    pub author_is_bot: bool,
+    pub body: String,
+    pub created_at: String,
 }
 
 /// What a comment is anchored to.
@@ -648,7 +660,8 @@ fn fetch_inner(
         name: detail_repo.name(),
         cancelled,
     };
-    let detail = pr_detail(&target, number)?;
+    let mut detail = pr_detail(&target, number)?;
+    complete_review_thread_comments(&target, &mut detail)?;
     let node = &detail["data"]["repository"]["pullRequest"];
     if node.is_null() {
         return Ok(PrView::NoPr);
@@ -903,9 +916,9 @@ fn build_detail_query(number: u64) -> String {
          ... on CheckRun{{name status conclusion}} ... on StatusContext{{context state}}}}}}}}}}}}}} \
          reviews(last:100){{pageInfo{{hasPreviousPage}} nodes{{author{{login}} body submittedAt}}}} \
          comments(last:100){{pageInfo{{hasPreviousPage}} nodes{{author{{login}} body createdAt}}}} \
-         reviewThreads(last:100){{pageInfo{{hasPreviousPage}} nodes{{isResolved isOutdated path \
+         reviewThreads(last:100){{pageInfo{{hasPreviousPage}} nodes{{id isResolved isOutdated path \
          startLine line originalStartLine originalLine diffSide \
-         comments(first:1){{totalCount nodes{{author{{login}} body createdAt diffHunk}}}}}}}}}}}}}}"
+         comments(first:100){{pageInfo{{hasNextPage endCursor}} nodes{{author{{login}} body createdAt diffHunk}}}}}}}}}}}}}}"
     )
 }
 
@@ -923,6 +936,71 @@ fn graphql(
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let out = gh(repo, host, &arg_refs, cancelled)?;
     serde_json::from_str(&out).map_err(|e| GhError::Other(e.to_string()))
+}
+
+/// Page every shown thread whose first comments page is incomplete. Extra round trips
+/// are allowed. The snapshot still lands as one generation, or this errors and the last
+/// good view stays.
+fn complete_review_thread_comments(
+    target: &FetchTarget<'_>,
+    detail: &mut Value,
+) -> Result<(), GhError> {
+    let Some(threads) =
+        detail["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"].as_array_mut()
+    else {
+        return Ok(());
+    };
+    for thread in threads {
+        while let Some((id, after)) = next_thread_page(thread)? {
+            let page = thread_comments_page(target, &id, &after)?;
+            append_thread_comment_page(thread, &page)?;
+        }
+    }
+    Ok(())
+}
+
+/// `None` when this thread's comments are complete. `Err` when GitHub says there is
+/// another page but the cursor cannot follow it — the snapshot must not land.
+fn next_thread_page(thread: &Value) -> Result<Option<(String, String)>, GhError> {
+    if thread["comments"]["pageInfo"]["hasNextPage"].as_bool() != Some(true) {
+        return Ok(None);
+    }
+    let id = thread["id"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| GhError::Other("review thread missing id".into()))?;
+    let after = thread["comments"]["pageInfo"]["endCursor"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| GhError::Other("incomplete thread comments page".into()))?;
+    Ok(Some((id.to_string(), after.to_string())))
+}
+
+fn append_thread_comment_page(thread: &mut Value, page: &Value) -> Result<(), GhError> {
+    let comments = &page["data"]["node"]["comments"];
+    if comments["pageInfo"].is_null() {
+        return Err(GhError::Other("thread comments page missing".into()));
+    }
+    let more = comments["nodes"].as_array().cloned().unwrap_or_default();
+    thread["comments"]["nodes"]
+        .as_array_mut()
+        .ok_or_else(|| GhError::Other("thread comments missing".into()))?
+        .extend(more);
+    thread["comments"]["pageInfo"] = comments["pageInfo"].clone();
+    Ok(())
+}
+
+fn thread_comments_page(target: &FetchTarget<'_>, id: &str, after: &str) -> Result<Value, GhError> {
+    let q = "query($id:ID!,$after:String!){node(id:$id){... on PullRequestReviewThread{\
+             comments(first:100, after:$after){pageInfo{hasNextPage endCursor} \
+             nodes{author{login} body createdAt}}}}}";
+    graphql(
+        target.repo,
+        target.host,
+        q,
+        &[("id".into(), id.to_string()), ("after".into(), after.to_string())],
+        target.cancelled,
+    )
 }
 
 fn graphql_args(host: &str, query: &str, vars: &[(String, String)]) -> Vec<String> {
@@ -954,10 +1032,9 @@ fn build_snapshot(node: &Value, sync: Sync) -> PrSnapshot {
         conn["pageInfo"]["hasNextPage"].as_bool().unwrap_or(false)
             || conn["pageInfo"]["hasPreviousPage"].as_bool().unwrap_or(false)
     };
-    let truncated = more(contexts)
-        || more(&node["reviews"])
-        || more(&node["comments"])
-        || more(&node["reviewThreads"]);
+    let comments_truncated =
+        more(&node["reviews"]) || more(&node["comments"]) || more(&node["reviewThreads"]);
+    let checks_truncated = more(contexts);
     PrSnapshot {
         number: node["number"].as_u64().unwrap_or_default(),
         title: node["title"].as_str().unwrap_or_default().to_string(),
@@ -977,7 +1054,8 @@ fn build_snapshot(node: &Value, sync: Sync) -> PrSnapshot {
             &node["comments"]["nodes"],
             &node["reviewThreads"]["nodes"],
         ),
-        truncated,
+        comments_truncated,
+        checks_truncated,
     }
 }
 
@@ -1081,7 +1159,13 @@ fn merge_comments(reviews: &Value, issues: &Value, threads: &Value) -> Vec<Comme
 
     // Inline review threads (the `finding` cards), with resolved/outdated and replies.
     for t in threads.as_array().into_iter().flatten() {
-        let root = &t["comments"]["nodes"][0];
+        let nodes = t["comments"]["nodes"].as_array().map_or(&[][..], Vec::as_slice);
+        let Some(root_i) =
+            nodes.iter().position(|n| !n["body"].as_str().unwrap_or("").trim().is_empty())
+        else {
+            continue;
+        };
+        let root = &nodes[root_i];
         let login = root["author"]["login"].as_str().unwrap_or("").to_string();
         let path = t["path"].as_str().unwrap_or("");
         let diff_side = t["diffSide"].as_str();
@@ -1109,7 +1193,7 @@ fn merge_comments(reviews: &Value, issues: &Value, threads: &Value) -> Vec<Comme
             created_at: root["createdAt"].as_str().unwrap_or("").to_string(),
             is_resolved: t["isResolved"].as_bool().unwrap_or(false),
             is_outdated: t["isOutdated"].as_bool().unwrap_or(false),
-            reply_count: t["comments"]["totalCount"].as_u64().unwrap_or(1).saturating_sub(1) as u32,
+            replies: replies_from_nodes(&nodes[root_i..]),
         });
     }
 
@@ -1195,8 +1279,29 @@ pub(crate) fn prose_row(
         created_at,
         is_resolved: false,
         is_outdated: false,
-        reply_count: 0,
+        replies: Vec::new(),
     }
+}
+
+/// Replies are every comment node after the root, skipping empty bodies the way roots do.
+fn replies_from_nodes(nodes: &[Value]) -> Vec<Reply> {
+    nodes
+        .iter()
+        .skip(1)
+        .filter_map(|n| {
+            let body = n["body"].as_str().unwrap_or("").trim();
+            if body.is_empty() {
+                return None;
+            }
+            let login = n["author"]["login"].as_str().unwrap_or("").to_string();
+            Some(Reply {
+                author_is_bot: is_bot(&login),
+                author: login,
+                body: body.to_string(),
+                created_at: n["createdAt"].as_str().unwrap_or("").to_string(),
+            })
+        })
+        .collect()
 }
 
 /// Keep only the latest PR-level (`review`/`comment`) post per bot author; humans keep all.
@@ -1317,10 +1422,8 @@ mod tests {
             "comments": {"pageInfo": {"hasNextPage": false}, "nodes": []},
             "reviewThreads": {"pageInfo": {"hasNextPage": false}, "nodes": []}
         });
-        assert!(
-            !build_snapshot(&base, Sync::InSync).truncated,
-            "all pages complete → not truncated"
-        );
+        let s = build_snapshot(&base, Sync::InSync);
+        assert!(!s.comments_truncated && !s.checks_truncated, "all pages complete");
         // The description parses when present and stays empty when GitHub returns null.
         assert_eq!(build_snapshot(&base, Sync::InSync).body, "");
         let mut with_body = base.clone();
@@ -1330,22 +1433,24 @@ mod tests {
         // Comments and threads read `last:100`, so their "more exist" flag pages backward.
         let mut comments_more = base.clone();
         comments_more["comments"]["pageInfo"]["hasPreviousPage"] = serde_json::json!(true);
-        assert!(build_snapshot(&comments_more, Sync::InSync).truncated);
+        assert!(build_snapshot(&comments_more, Sync::InSync).comments_truncated);
+        assert!(!build_snapshot(&comments_more, Sync::InSync).checks_truncated);
 
         let mut threads_more = base.clone();
         threads_more["reviewThreads"]["pageInfo"]["hasPreviousPage"] = serde_json::json!(true);
-        assert!(build_snapshot(&threads_more, Sync::InSync).truncated);
+        assert!(build_snapshot(&threads_more, Sync::InSync).comments_truncated);
 
         let mut checks_more = base.clone();
         checks_more["commits"]["nodes"][0]["commit"]["statusCheckRollup"]["contexts"]["pageInfo"]
             ["hasNextPage"] = serde_json::json!(true);
-        assert!(build_snapshot(&checks_more, Sync::InSync).truncated);
+        assert!(build_snapshot(&checks_more, Sync::InSync).checks_truncated);
+        assert!(!build_snapshot(&checks_more, Sync::InSync).comments_truncated);
 
         // `reviews` pages backward (last:100), so its "more exist" flag is `hasPreviousPage` —
         // checking `hasNextPage` here (the old bug) would leave this surface never marked.
         let mut reviews_more = base.clone();
         reviews_more["reviews"]["pageInfo"]["hasPreviousPage"] = serde_json::json!(true);
-        assert!(build_snapshot(&reviews_more, Sync::InSync).truncated);
+        assert!(build_snapshot(&reviews_more, Sync::InSync).comments_truncated);
     }
 
     #[test]
@@ -1392,7 +1497,8 @@ mod tests {
             sync: Sync::InSync,
             checks: statuses.iter().map(|&s| Check { name: "c".into(), status: s }).collect(),
             comments: Vec::new(),
-            truncated: false,
+            comments_truncated: false,
+            checks_truncated: false,
         };
         assert_eq!(snap(&[]).checks_rollup(), None);
         assert_eq!(
@@ -1575,7 +1681,10 @@ mod tests {
         ]);
         let threads = serde_json::json!([
             {"isResolved": false, "isOutdated": true, "path": "a.py", "line": null,
-             "comments": {"totalCount": 2, "nodes": [{"author": {"login": "claude[bot]"}, "body": "SSRF", "createdAt": "2026-06-27T11:00:00Z"}]}}
+             "comments": {"nodes": [
+                {"author": {"login": "claude[bot]"}, "body": "SSRF", "createdAt": "2026-06-27T11:00:00Z"},
+                {"author": {"login": "persijano"}, "body": "Addressed in abc", "createdAt": "2026-06-27T11:30:00Z"}
+             ]}}
         ]);
         let cs = merge_comments(&reviews, &issues, &threads);
         assert_eq!(cs.len(), 3);
@@ -1594,7 +1703,52 @@ mod tests {
         let f = cs.iter().find(|c| c.kind == CommentKind::Finding).unwrap();
         assert_eq!(f.anchor, "a.py");
         assert!(f.is_outdated);
-        assert_eq!(f.reply_count, 1);
+        assert_eq!(f.replies.len(), 1);
+        assert_eq!(f.replies[0].author, "persijano");
+        assert_eq!(f.replies[0].body, "Addressed in abc");
+    }
+
+    #[test]
+    fn a_short_thread_page_does_not_land() {
+        let incomplete = serde_json::json!({
+            "id": "T1",
+            "comments": {"pageInfo": {"hasNextPage": true, "endCursor": ""}, "nodes": [{"body": "root"}]}
+        });
+        assert!(next_thread_page(&incomplete).is_err(), "empty cursor is a failed page");
+        let missing_id = serde_json::json!({
+            "comments": {"pageInfo": {"hasNextPage": true, "endCursor": "c1"}, "nodes": [{"body": "root"}]}
+        });
+        assert!(next_thread_page(&missing_id).is_err(), "missing id is a failed page");
+        let done = serde_json::json!({
+            "id": "T1",
+            "comments": {"pageInfo": {"hasNextPage": false, "endCursor": "c1"}, "nodes": [{"body": "root"}]}
+        });
+        assert_eq!(next_thread_page(&done).unwrap(), None);
+        let more = serde_json::json!({
+            "id": "T1",
+            "comments": {"pageInfo": {"hasNextPage": true, "endCursor": "c1"}, "nodes": [{"body": "root"}]}
+        });
+        assert_eq!(next_thread_page(&more).unwrap(), Some(("T1".into(), "c1".into())));
+        let null_page = serde_json::json!({"data": {"node": {}}});
+        let mut thread = more;
+        assert!(append_thread_comment_page(&mut thread, &null_page).is_err());
+    }
+
+    #[test]
+    fn an_empty_leading_github_note_is_not_the_root() {
+        let threads = serde_json::json!([{
+            "isResolved": false, "isOutdated": false, "path": "a.rs", "line": 1,
+            "comments": {"nodes": [
+                {"author": {"login": "bot"}, "body": "  ", "createdAt": "2026-06-27T11:00:00Z"},
+                {"author": {"login": "bot"}, "body": "the finding", "createdAt": "2026-06-27T11:01:00Z"},
+                {"author": {"login": "ann"}, "body": "Addressed", "createdAt": "2026-06-27T11:02:00Z"}
+            ]}
+        }]);
+        let cs = merge_comments(&serde_json::json!([]), &serde_json::json!([]), &threads);
+        assert_eq!(cs.len(), 1);
+        assert_eq!(cs[0].body, "the finding");
+        assert_eq!(cs[0].replies.len(), 1);
+        assert_eq!(cs[0].replies[0].body, "Addressed");
     }
 
     #[test]
@@ -1687,7 +1841,7 @@ mod tests {
             created_at: created_at.to_string(),
             is_resolved: false,
             is_outdated: false,
-            reply_count: 0,
+            replies: Vec::new(),
         };
         let mut out = vec![
             row(CommentKind::Review, "review", "approved", ""),

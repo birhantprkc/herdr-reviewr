@@ -13,7 +13,8 @@ use serde_json::Value;
 
 use crate::forge::{
     AssocPr, Association, Check, CheckStatus, Comment, CommentKind, Merge, PrFetchInput,
-    PrSnapshot, PrState, PrView, Sync, finish_comments, prose_row, push_unique, upsert_latest,
+    PrSnapshot, PrState, PrView, Reply, Sync, finish_comments, prose_row, push_unique,
+    upsert_latest,
 };
 
 /// Read Azure DevOps for one already-derived input. Degradation stays in-band for the PR tab.
@@ -260,7 +261,8 @@ fn fetch_inner(
         checks,
         &rows,
         &evaluations,
-        threads_capped || checks_capped,
+        threads_capped,
+        checks_capped,
     ))))
 }
 
@@ -456,7 +458,8 @@ fn build_snapshot(
     checks: Vec<Check>,
     rows: &[&Value],
     evaluations: &Value,
-    truncated: bool,
+    comments_truncated: bool,
+    checks_truncated: bool,
 ) -> PrSnapshot {
     let id = pr["pullRequestId"].as_u64().unwrap_or_default();
     PrSnapshot {
@@ -480,7 +483,8 @@ fn build_snapshot(
         sync,
         checks,
         comments: merge_comments(rows, pr),
-        truncated,
+        comments_truncated,
+        checks_truncated,
     }
 }
 
@@ -600,19 +604,34 @@ fn comment_root(thread: &Value) -> Option<&Value> {
 }
 
 /// A comment that renders: human-authored, not deleted, and carrying content. The one
-/// predicate behind the root pick and the reply count, so the two can never disagree.
+/// predicate behind the root pick and `replies`, so the two can never disagree.
 fn is_comment(comment: &Value) -> bool {
     comment["commentType"].as_str() != Some("system")
         && !comment["isDeleted"].as_bool().unwrap_or(false)
         && !comment["content"].as_str().unwrap_or("").trim().is_empty()
 }
 
-/// Replies beyond the root: the rendering comments on the thread, less one.
-fn reply_count(thread: &Value) -> u32 {
-    let comments = thread["comments"]
-        .as_array()
-        .map_or(0, |comments| comments.iter().filter(|comment| is_comment(comment)).count());
-    comments.saturating_sub(1) as u32
+/// Replies beyond the root: every later rendering comment.
+fn replies_from_thread(thread: &Value) -> Vec<Reply> {
+    let Some(comments) = thread["comments"].as_array() else {
+        return Vec::new();
+    };
+    let Some(root_i) = comments.iter().position(is_comment) else {
+        return Vec::new();
+    };
+    comments[root_i + 1..]
+        .iter()
+        .filter(|comment| is_comment(comment))
+        .map(|comment| {
+            let author = comment["author"]["displayName"].as_str().unwrap_or("").to_string();
+            Reply {
+                author_is_bot: is_azure_bot(&comment["author"]),
+                author,
+                body: comment["content"].as_str().unwrap_or("").trim().to_string(),
+                created_at: comment["publishedDate"].as_str().unwrap_or("").to_string(),
+            }
+        })
+        .collect()
 }
 
 fn thread_line_range(context: &Value) -> (Option<u64>, Option<u64>) {
@@ -670,7 +689,7 @@ fn merge_comments(threads: &[&Value], pr: &Value) -> Vec<Comment> {
             created_at: root["publishedDate"].as_str().unwrap_or("").to_string(),
             is_resolved,
             is_outdated: false,
-            reply_count: reply_count(thread),
+            replies: replies_from_thread(thread),
         });
     }
     for reviewer in pr["reviewers"].as_array().into_iter().flatten() {
@@ -729,7 +748,7 @@ mod tests {
              "author": {"displayName": "Author"}}
         ]});
         assert_eq!(comment_root(&thread).unwrap()["content"], "The real comment.");
-        assert_eq!(reply_count(&thread), 0);
+        assert!(replies_from_thread(&thread).is_empty());
     }
 
     #[test]
@@ -862,7 +881,8 @@ mod tests {
         assert!(finding.snippet.is_none(), "a thread carries no code context");
         let comment = comments.iter().find(|c| c.kind == CommentKind::Comment).unwrap();
         assert_eq!(comment.author, "Mark Wilkie");
-        assert_eq!(comment.reply_count, 1);
+        assert_eq!(comment.replies.len(), 1);
+        assert_eq!(comment.replies[0].body, "Agreed.");
         let votes: Vec<&Comment> =
             comments.iter().filter(|c| c.kind == CommentKind::Review).collect();
         assert_eq!(votes.len(), 2, "a zero vote and a container render nothing");

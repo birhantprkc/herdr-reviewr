@@ -6,6 +6,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **PR comments paint as comments.** Badge images become P1/P2/P3 chips, mermaid fences become
+  a `⧉ mermaid` placeholder, HTML headings match markdown headings, `<details>` starts collapsed,
+  and HTML tags no longer leak as source. The same renderer drives the All-files preview.
+- **A review thread shows every reply in the read pane.** GitHub, GitLab, and Azure DevOps.
+  The `↳ N replies — open on GitHub` line is gone. Click a `<details>` summary to toggle it;
+  on the PR tab `→`/`←` expand/collapse every details in the open thread.
+- **A capped list says so in the pane** (`newest 100 comments` / `newest 100 checks`) instead of
+  sending you to the forge.
+
 ## [0.37.1] — 2026-09-13
 
 ### Changed

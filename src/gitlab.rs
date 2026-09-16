@@ -12,7 +12,8 @@ use serde_json::Value;
 
 use crate::forge::{
     AssocPr, Association, Check, CheckStatus, Comment, CommentKind, Merge, PrFetchInput,
-    PrSnapshot, PrState, PrView, Sync, finish_comments, prose_row, push_unique, upsert_latest,
+    PrSnapshot, PrState, PrView, Reply, Sync, finish_comments, prose_row, push_unique,
+    upsert_latest,
 };
 
 /// Read GitLab for one already-derived input. Degradation stays in-band for the PR tab.
@@ -249,7 +250,8 @@ fn fetch_inner(
         checks,
         &rows,
         &approvals,
-        discussions_capped || jobs_capped,
+        discussions_capped,
+        jobs_capped,
     ))))
 }
 
@@ -536,7 +538,8 @@ fn build_snapshot(
     checks: Vec<Check>,
     rows: &[Value],
     approvals: &Value,
-    truncated: bool,
+    comments_truncated: bool,
+    checks_truncated: bool,
 ) -> PrSnapshot {
     PrSnapshot {
         number: mr["iid"].as_u64().unwrap_or_default(),
@@ -555,7 +558,8 @@ fn build_snapshot(
         sync,
         checks,
         comments: merge_comments(rows, approvals),
-        truncated,
+        comments_truncated,
+        checks_truncated,
     }
 }
 
@@ -605,18 +609,33 @@ fn comment_root(discussion: &Value) -> Option<&Value> {
 }
 
 /// A note that renders: human-authored and carrying a body. The one predicate behind the
-/// root pick and the reply count, so the two can never disagree.
+/// root pick and `replies`, so the two can never disagree.
 fn is_comment_note(note: &Value) -> bool {
     !note["system"].as_bool().unwrap_or(false)
         && !note["body"].as_str().unwrap_or("").trim().is_empty()
 }
 
-/// Replies beyond the root: the comment notes on the thread, less one.
-fn reply_count(discussion: &Value) -> u32 {
-    let notes = discussion["notes"]
-        .as_array()
-        .map_or(0, |notes| notes.iter().filter(|note| is_comment_note(note)).count());
-    notes.saturating_sub(1) as u32
+/// Replies beyond the root: every later comment note.
+fn replies_from_discussion(discussion: &Value) -> Vec<Reply> {
+    let Some(notes) = discussion["notes"].as_array() else {
+        return Vec::new();
+    };
+    let Some(root_i) = notes.iter().position(is_comment_note) else {
+        return Vec::new();
+    };
+    notes[root_i + 1..]
+        .iter()
+        .filter(|note| is_comment_note(note))
+        .map(|note| {
+            let author = note["author"]["username"].as_str().unwrap_or("").to_string();
+            Reply {
+                author_is_bot: is_gitlab_bot(&author),
+                author,
+                body: note["body"].as_str().unwrap_or("").trim().to_string(),
+                created_at: note["created_at"].as_str().unwrap_or("").to_string(),
+            }
+        })
+        .collect()
 }
 
 /// Merge the discussion threads and approvals into one newest-first comment list:
@@ -656,7 +675,7 @@ fn merge_comments(discussions: &[Value], approvals: &Value) -> Vec<Comment> {
             created_at: root["created_at"].as_str().unwrap_or("").to_string(),
             is_resolved,
             is_outdated: false,
-            reply_count: reply_count(discussion),
+            replies: replies_from_discussion(discussion),
         });
     }
     for user in approvals["approved_by"].as_array().into_iter().flatten() {
@@ -761,12 +780,12 @@ mod tests {
             {"system": false, "body": "The real comment.", "author": {"username": "author"}}
         ]});
         assert_eq!(comment_root(&discussion).unwrap()["body"], "The real comment.");
-        assert_eq!(reply_count(&discussion), 0);
+        assert!(replies_from_discussion(&discussion).is_empty());
     }
 
     #[test]
     fn snapshot_maps_the_merge_request_fields() {
-        let s = build_snapshot(&mr_node(), Sync::InSync, Vec::new(), &[], &json!({}), false);
+        let s = build_snapshot(&mr_node(), Sync::InSync, Vec::new(), &[], &json!({}), false, false);
         assert_eq!(s.number, 42);
         assert_eq!(s.title, "Add search");
         assert_eq!(s.state, PrState::Open);
@@ -775,7 +794,7 @@ mod tests {
         assert!(!s.head_is_fork);
         assert_eq!(s.base_ref, "main");
         assert_eq!(s.merge, Merge::Clean);
-        assert!(!s.truncated);
+        assert!(!s.comments_truncated && !s.checks_truncated);
     }
 
     #[test]
@@ -987,7 +1006,8 @@ mod tests {
         assert_eq!(finding.anchor, "src/a.rs:10-12");
         assert_eq!(finding.place.as_ref().unwrap().side, Some(crate::model::Side::New));
         assert!(finding.is_resolved);
-        assert_eq!(finding.reply_count, 1);
+        assert_eq!(finding.replies.len(), 1);
+        assert_eq!(finding.replies[0].body, "Fixed.");
         let old = comments.iter().find(|c| c.body == "On the old column.").unwrap();
         assert_eq!(old.anchor, "src/a.rs:8-9");
         assert_eq!(old.place.as_ref().unwrap().side, Some(crate::model::Side::Old));
